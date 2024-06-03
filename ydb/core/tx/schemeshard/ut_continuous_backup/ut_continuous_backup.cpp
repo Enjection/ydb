@@ -103,15 +103,22 @@ Y_UNIT_TEST_SUITE(TContinuousBackupTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
+        ui64 pathId = DescribePrivatePath(runtime, "/MyRoot/Table/incBackupImpl").GetPathId();
+
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/Table/continuousBackupImpl/streamImpl"), {
             NLs::PathExist,
-            NLs::HasOffloadConfig,
+            NLs::HasOffloadConfig(Sprintf(R"(
+                    IncrementalBackup: {
+                        DstPath: "/MyRoot/Table/incBackupImpl"
+                        DstPathId: %)" PRIu64 R"(
+                    }
+                )", pathId)),
         });
 
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/Table/incBackupImpl"), {
             NLs::PathExist,
             NLs::IsTable,
-            NLs::CheckColumns("incBackupImpl", {"key", "value", "__incrBackupImpl_deleted"}, {}, {"key"}),
+            NLs::CheckColumns("incBackupImpl", {"key", "value", "__incrBackupImpl_added", "__incrBackupImpl_deleted"}, {}, {"key"}),
         });
     }
 } // TCdcStreamWithInitialScanTests

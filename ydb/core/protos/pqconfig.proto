@@ -306,7 +306,14 @@ enum EConsumerScalingSupport {
 }
 
 message TOffloadConfig {
+    message TIncrementalBackup {
+        optional string DstPath = 1;
+        optional uint64 DstPathId = 2;
+    }
 
+    oneof Strategy {
+        TIncrementalBackup IncrementalBackup = 1;
+    }
 }
 
 message TPQTabletConfig {
