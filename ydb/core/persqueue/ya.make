@@ -12,6 +12,7 @@ SRCS(
     metering_sink.cpp
     mirrorer.cpp
     mirrorer.h
+    offload_actor.h
     ownerinfo.cpp
     partition_init.cpp
     partition_monitoring.cpp

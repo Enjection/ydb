@@ -14,12 +14,98 @@
 #include <ydb/library/actors/core/actor.h>
 #include <ydb/library/actors/core/hfunc.h>
 #include <ydb/library/services/services.pb.h>
+#include <ydb/core/protos/change_exchange.pb.h>
 
 #include <util/generic/map.h>
 #include <util/generic/maybe.h>
 #include <util/string/builder.h>
 
 namespace NKikimr::NReplication::NService {
+
+class TProtoChangeRecordBuilder;
+
+class TProtoChangeRecord: public NChangeExchange::TChangeRecordBase {
+    friend class TProtoChangeRecordBuilder;
+
+public:
+    ui64 GetGroup() const override {
+        return ProtoBody.GetGroup();
+    }
+    ui64 GetStep() const override {
+        return ProtoBody.GetStep();
+    }
+    ui64 GetTxId() const override {
+        return ProtoBody.GetTxId();
+    }
+    EKind GetKind() const override {
+        return EKind::CdcDataChange;
+    }
+    TString GetSourceId() const {
+        return SourceId;
+    }
+
+    void Serialize(NKikimrTxDataShard::TEvApplyReplicationChanges::TChange& record, TMemoryPool& pool) const {
+        Y_UNUSED(pool);
+        record.SetSourceOffset(GetOrder());
+        // TODO: fill WriteTxId
+
+        record.SetKey(ProtoBody.GetCdcDataChange().GetKey().GetData());
+
+        auto& upsert = *record.MutableUpsert();
+        *upsert.MutableTags() = {ProtoBody.GetCdcDataChange().GetUpsert().GetTags().begin(), ProtoBody.GetCdcDataChange().GetUpsert().GetTags().end()};
+        upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
+    }
+    void Serialize(NKikimrTxDataShard::TEvApplyReplicationChanges::TChange& record) const {
+        TMemoryPool pool(256);
+        return Serialize(record, pool);
+    }
+
+    TConstArrayRef<TCell> GetKey(TMemoryPool& pool) const {
+        Y_UNUSED(pool);
+
+        Y_ABORT_UNLESS(ProtoBody.HasCdcDataChange());
+        Y_ABORT_UNLESS(ProtoBody.GetCdcDataChange().HasKey());
+        Y_ABORT_UNLESS(ProtoBody.GetCdcDataChange().GetKey().HasData());
+        TSerializedCellVec keyCellVec;
+        Y_ABORT_UNLESS(TSerializedCellVec::TryParse(ProtoBody.GetCdcDataChange().GetKey().GetData(), keyCellVec));
+        Key = keyCellVec;
+
+        Y_ABORT_UNLESS(Key);
+        return Key->GetCells();
+    }
+    TConstArrayRef<TCell> GetKey() const {
+        TMemoryPool pool(256);
+        return GetKey(pool);
+    }
+private:
+    TString SourceId;
+    NKikimrChangeExchange::TChangeRecord ProtoBody;
+    TLightweightSchema::TCPtr Schema;
+
+    mutable TMaybe<TSerializedCellVec> Key;
+}; // TChangeRecord
+
+class TProtoChangeRecordBuilder: public NChangeExchange::TChangeRecordBuilder<TProtoChangeRecord, TProtoChangeRecordBuilder> {
+public:
+    using TBase::TBase;
+
+    TSelf& WithSourceId(const TString& sourceId) {
+        GetRecord()->SourceId = sourceId;
+        return static_cast<TSelf&>(*this);
+    }
+
+    template <typename T>
+    TSelf& WithBody(T&& body) {
+        Y_ABORT_UNLESS(GetRecord()->ProtoBody.ParseFromString(body));
+        return static_cast<TBase*>(this)->WithBody(std::forward<T>(body));
+    }
+
+    TSelf& WithSchema(TLightweightSchema::TCPtr schema) {
+        GetRecord()->Schema = schema;
+        return static_cast<TSelf&>(*this);
+    }
+
+}; // TChangeRecordBuilder
 
 class TTablePartitionWriter: public TActorBootstrapped<TTablePartitionWriter> {
     TStringBuf GetLogPrefix() const {
@@ -79,7 +165,7 @@ class TTablePartitionWriter: public TActorBootstrapped<TTablePartitionWriter> {
         TString source;
         for (auto recordPtr : ev->Get()->Records) {
             MemoryPool.Clear();
-            const auto& record = *recordPtr->Get<TChangeRecord>();
+            const auto& record = *recordPtr->Get<TProtoChangeRecord>(); // FIXME
             record.Serialize(*event->Record.AddChanges(), MemoryPool);
 
             if (!source) {
@@ -411,7 +497,7 @@ class TLocalTableWriter
         Y_ABORT_UNLESS(KeyDesc->GetPartitions());
 
         MemoryPool.Clear();
-        const auto range = TTableRange(record->Get<TChangeRecord>()->GetKey(MemoryPool));
+        const auto range = TTableRange(record->Get<TProtoChangeRecord>()->GetKey(MemoryPool)); // FIXME
         Y_ABORT_UNLESS(range.Point);
 
         TVector<TKeyDesc::TPartitionInfo>::const_iterator it = LowerBound(
@@ -431,6 +517,16 @@ class TLocalTableWriter
         return it->ShardId;
     }
 
+    template <class TBuilder>
+    NChangeExchange::IChangeRecord::TPtr BuildChangeRecord(const TString& source, ui32 offset, TString&& body) {
+        return TBuilder()
+            .WithSourceId(source)
+            .WithOrder(offset)
+            .WithBody(std::move(body))
+            .WithSchema(Schema)
+            .Build();
+    }
+
     void Handle(TEvWorker::TEvData::TPtr& ev) {
         LOG_D("Handle " << ev->Get()->ToString());
 
@@ -439,13 +535,13 @@ class TLocalTableWriter
 
         for (auto& record : ev->Get()->Records) {
             records.emplace_back(record.Offset, PathId, record.Data.size());
-            auto res = PendingRecords.emplace(record.Offset, TChangeRecordBuilder()
-                .WithSourceId(ev->Get()->Source)
-                .WithOrder(record.Offset)
-                .WithBody(std::move(record.Data))
-                .WithSchema(Schema)
-                .Build()
-            );
+            NChangeExchange::IChangeRecord::TPtr changeRecord;
+            if (!ev->Get()->Proto) {
+                changeRecord = BuildChangeRecord<TChangeRecordBuilder>(ev->Get()->Source, record.Offset, std::move(record.Data));
+            } else {
+                changeRecord = BuildChangeRecord<TProtoChangeRecordBuilder>(ev->Get()->Source, record.Offset, std::move(record.Data));
+            }
+            auto res = PendingRecords.emplace(record.Offset, std::move(changeRecord));
             Y_ABORT_UNLESS(res.second);
         }
 

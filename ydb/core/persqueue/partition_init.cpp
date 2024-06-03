@@ -1,4 +1,5 @@
 #include "partition.h"
+#include "offload_actor.h"
 #include "partition_util.h"
 #include <memory>
 
@@ -749,6 +750,10 @@ void TPartition::Initialize(const TActorContext& ctx) {
 
     for (ui32 i = 0; i < TotalLevels; ++i) {
         DataKeysHead.push_back(TKeyLevel(CompactLevelBorder[i]));
+    }
+
+    if (Config.HasOffloadConfig() && !OffloadActor) {
+        OffloadActor = Register(new TOffloadActor(Tablet, Partition.OriginalPartitionId, Config.GetOffloadConfig()));
     }
 
     LOG_INFO_S(ctx, NKikimrServices::PERSQUEUE, "bootstrapping " << Partition << " " << ctx.SelfID);

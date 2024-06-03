@@ -823,6 +823,8 @@ private:
     void ScheduleTransactionCompleted(const NKikimrPQ::TEvProposeTransaction& tx);
 
     void DestroyActor(const TActorContext& ctx);
+
+    TActorId OffloadActor;
 };
 
 } // namespace NKikimr::NPQ

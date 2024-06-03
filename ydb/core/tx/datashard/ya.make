@@ -289,6 +289,7 @@ RECURSE_FOR_TESTS(
     ut_build_index
     ut_change_collector
     ut_change_exchange
+    ut_incremental_backup
     ut_column_stats
     ut_compaction
     ut_erase_rows
