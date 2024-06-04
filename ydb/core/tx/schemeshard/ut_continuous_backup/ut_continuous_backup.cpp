@@ -103,16 +103,21 @@ Y_UNIT_TEST_SUITE(TContinuousBackupTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        ui64 pathId = DescribePrivatePath(runtime, "/MyRoot/Table/incBackupImpl").GetPathId();
+        auto pathInfo = DescribePrivatePath(runtime, "/MyRoot/Table/incBackupImpl");
+        auto ownerId = pathInfo.GetPathOwnerId();
+        auto localId = pathInfo.GetPathId();
 
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/Table/continuousBackupImpl/streamImpl"), {
             NLs::PathExist,
             NLs::HasOffloadConfig(Sprintf(R"(
                     IncrementalBackup: {
                         DstPath: "/MyRoot/Table/incBackupImpl"
-                        DstPathId: %)" PRIu64 R"(
+                        DstPathId: {
+                            OwnerId: %)" PRIu64 R"(
+                            LocalId: %)" PRIu64 R"(
+                        }
                     }
-                )", pathId)),
+                )", ownerId, localId)),
         });
 
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/Table/incBackupImpl"), {

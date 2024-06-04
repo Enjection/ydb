@@ -2163,7 +2163,7 @@ void TPartition::EndChangePartitionConfig(NKikimrPQ::TPQTabletConfig&& config,
     NewPartition = false;
 
     if (Config.HasOffloadConfig() && !OffloadActor) {
-        OffloadActor = Register(new TOffloadActor(Tablet, Partition.OriginalPartitionId));
+        OffloadActor = Register(new TOffloadActor(Tablet, Partition.OriginalPartitionId, Config.GetOffloadConfig()));
     }
 
     Y_ABORT_UNLESS(Config.GetPartitionConfig().GetTotalPartitions() > 0);

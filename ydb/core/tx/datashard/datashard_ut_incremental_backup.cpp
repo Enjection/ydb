@@ -145,6 +145,8 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         runtime.SetLogPriority(NKikimrServices::PERSQUEUE, NLog::PRI_DEBUG);
         runtime.SetLogPriority(NKikimrServices::PQ_READ_PROXY, NLog::PRI_DEBUG);
         runtime.SetLogPriority(NKikimrServices::PQ_METACACHE, NLog::PRI_DEBUG);
+        runtime.SetLogPriority(NKikimrServices::CONTINUOUS_BACKUP, NLog::PRI_DEBUG);
+        runtime.SetLogPriority(NKikimrServices::REPLICATION_SERVICE, NLog::PRI_DEBUG);
     }
 
     TCdcStream WithInitialScan(TCdcStream streamDesc) {
@@ -360,9 +362,15 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         WaitTxNotification(server, edgeActor, AsyncAlterTakeIncrementalBackup(server, "/Root", "Table"));
 
-        Cerr << KqpSimpleExec(runtime, R"(
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        UNIT_ASSERT_VALUES_EQUAL(
+            KqpSimpleExec(runtime, R"(
                 SELECT key, value FROM `/Root/Table/incBackupImpl`
-                )") << Endl;
+                )"),
+            "{ items { uint32_value: 1 } items { uint32_value: 100 } }, "
+            "{ items { uint32_value: 2 } items { uint32_value: 200 } }, "
+            "{ items { uint32_value: 3 } items { uint32_value: 300 } }");
     }
 
 } // Cdc

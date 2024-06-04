@@ -23,15 +23,17 @@ TEvWorker::TEvData::TRecord::TRecord(ui64 offset, TString&& data)
 {
 }
 
-TEvWorker::TEvData::TEvData(const TString& source, const TVector<TRecord>& records)
+TEvWorker::TEvData::TEvData(const TString& source, const TVector<TRecord>& records, bool proto)
     : Source(source)
     , Records(records)
+    , Proto(proto)
 {
 }
 
-TEvWorker::TEvData::TEvData(const TString& source, TVector<TRecord>&& records)
+TEvWorker::TEvData::TEvData(const TString& source, TVector<TRecord>&& records, bool proto)
     : Source(source)
     , Records(std::move(records))
+    , Proto(proto)
 {
 }
 
@@ -45,7 +47,8 @@ void TEvWorker::TEvData::TRecord::Out(IOutputStream& out) const {
 TString TEvWorker::TEvData::ToString() const {
     return TStringBuilder() << ToStringHeader() << " {"
         << " Source: " << Source
-        << " Records [" << JoinSeq(",", Records) << "]"
+        << " Records [" << JoinSeq(",", Records) << "] "
+        << " Proto: " << Proto
     << " }";
 }
 
@@ -127,7 +130,7 @@ class TWorker: public TActorBootstrapped<TWorker> {
 
             Writer.Registered();
             if (InFlightData) {
-                Send(Writer, new TEvWorker::TEvData(InFlightData->Source, InFlightData->Records));
+                Send(Writer, new TEvWorker::TEvData(InFlightData->Source, InFlightData->Records, InFlightData->Proto));
             }
         } else {
             LOG_W("Handshake from unknown actor"
@@ -161,7 +164,7 @@ class TWorker: public TActorBootstrapped<TWorker> {
         }
 
         Y_ABORT_UNLESS(!InFlightData);
-        InFlightData = MakeHolder<TEvWorker::TEvData>(ev->Get()->Source, ev->Get()->Records);
+        InFlightData = MakeHolder<TEvWorker::TEvData>(ev->Get()->Source, ev->Get()->Records, ev->Get()->Proto);
 
         if (Writer) {
             Send(ev->Forward(Writer));

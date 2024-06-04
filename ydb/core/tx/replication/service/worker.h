@@ -38,9 +38,10 @@ struct TEvWorker {
 
         TString Source;
         TVector<TRecord> Records;
+        bool Proto = false;
 
-        explicit TEvData(const TString& source, const TVector<TRecord>& records);
-        explicit TEvData(const TString& source, TVector<TRecord>&& records);
+        explicit TEvData(const TString& source, const TVector<TRecord>& records, bool proto = false);
+        explicit TEvData(const TString& source, TVector<TRecord>&& records, bool proto = false);
         TString ToString() const override;
     };
 

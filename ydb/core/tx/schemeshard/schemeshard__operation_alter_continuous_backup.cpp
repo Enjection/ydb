@@ -46,6 +46,10 @@ void DoCreateIncBackupTable(const TOperationId& opId, const TPath& dst, NKikimrS
     desc.CopyFrom(tableDesc);
     desc.SetName(dst.LeafName());
 
+    auto& replicationConfig = *desc.MutableReplicationConfig();
+    replicationConfig.SetMode(NKikimrSchemeOp::TTableReplicationConfig::REPLICATION_MODE_READ_ONLY);
+    replicationConfig.SetConsistency(NKikimrSchemeOp::TTableReplicationConfig::CONSISTENCY_WEAK);
+
     // TODO: remove NotNull from all columns for correct deletion writing
     // TODO: cleanup all sequences
 
