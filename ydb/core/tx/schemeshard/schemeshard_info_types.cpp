@@ -541,6 +541,7 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
     }
 
     alterData->IsBackup = op.GetIsBackup();
+    alterData->IsIncrementalBackup = op.GetIncrementalBackup();
 
     if (source && op.KeyColumnNamesSize() == 0)
         return alterData;

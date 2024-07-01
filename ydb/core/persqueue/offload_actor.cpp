@@ -75,9 +75,9 @@ public:
 
     STATEFN(StateWork) {
         switch (ev->GetTypeRewrite()) {
-        default:
-            Y_VERIFY_S(false, "Unhandled event type: " << ev->GetTypeRewrite()
-                        << " event: " << ev->ToString());
+        // default:
+            // Y_VERIFY_S(false, "Unhandled event type: " << ev->GetTypeRewrite()
+            //             << " event: " << ev->ToString());
         }
     }
 };

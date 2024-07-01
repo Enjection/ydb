@@ -395,6 +395,8 @@ message TTableDescription {
     optional TTableReplicationConfig ReplicationConfig = 40;
 
     optional bool Temporary = 41;
+
+    optional bool IncrementalBackup = 42;
 }
 
 message TDictionaryEncodingSettings {
@@ -947,6 +949,7 @@ message TAlterContinuousBackup {
     }
 
     message TTakeIncrementalBackup {
+        optional string DstPath = 1;
     }
 
     oneof Action {
