@@ -886,6 +886,10 @@ const Ydb::Table::DescribeTableResult& TTableDescription::GetProto() const {
     return Impl_->GetProto();
 }
 
+bool TTableDescription::IsIncrementalBackup() const {
+    return Impl_->IsIncrementalBackup();
+}
+
 void TTableDescription::SerializeTo(Ydb::Table::CreateTableRequest& request) const {
     for (const auto& column : Impl_->GetColumns()) {
         auto& protoColumn = *request.add_columns();
