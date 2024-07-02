@@ -37,9 +37,15 @@ public:
         record.SetKey(ProtoBody.GetCdcDataChange().GetKey().GetData());
 
         auto& upsert = *record.MutableUpsert();
-        *upsert.MutableTags() = {
-            ProtoBody.GetCdcDataChange().GetUpsert().GetTags().begin(),
-            ProtoBody.GetCdcDataChange().GetUpsert().GetTags().end()};
+        auto tagsSize = ProtoBody.GetCdcDataChange().GetUpsert().TagsSize();
+        ui64 i = 0;
+        for (auto& tag : ProtoBody.GetCdcDataChange().GetUpsert().GetTags()) {
+            ++i;
+            if (i == tagsSize) {
+                break;
+            }
+            upsert.AddTags(tag);
+        }
         upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
     }
 

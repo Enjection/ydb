@@ -620,5 +620,7 @@ ISubOperation::TPtr CreateAlterResourcePool(TOperationId id, TTxState::ETxState 
 ISubOperation::TPtr CreateDropResourcePool(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateDropResourcePool(TOperationId id, TTxState::ETxState state);
 
+TVector<ISubOperation::TPtr> CreateRestoreIncrementalBackup(TOperationId opId, const TTxTransaction& tx, TOperationContext& context);
+
 }
 }

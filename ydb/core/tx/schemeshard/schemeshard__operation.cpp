@@ -906,6 +906,8 @@ ISubOperation::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxState::
         return CreateBackup(NextPartId(), txState);
     case TTxState::ETxType::TxRestore:
         return CreateRestore(NextPartId(), txState);
+    case TTxState::ETxType::TxRestoreIncrementalBackup:
+        Y_ABORT("TODO: implement");
     case TTxState::ETxType::TxDropTable:
         return CreateDropTable(NextPartId(), txState);
     case TTxState::ETxType::TxCreateTableIndex:
@@ -1343,6 +1345,8 @@ TVector<ISubOperation::TPtr> TOperation::ConstructParts(const TTxTransaction& tx
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterResourcePool:
         return {CreateAlterResourcePool(NextPartId(), tx)};
 
+    case NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackup:
+        return CreateRestoreIncrementalBackup(NextPartId(), tx, context);
     }
 
     Y_UNREACHABLE();

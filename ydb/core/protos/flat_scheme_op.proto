@@ -962,6 +962,11 @@ message TDropContinuousBackup {
     optional string TableName = 1;
 }
 
+message TRestoreIncrementalBackup {
+    optional string SrcTableName = 1;
+    optional string DstTableName = 2;
+}
+
 enum EIndexType {
     EIndexTypeInvalid = 0;
     EIndexTypeGlobal = 1;
@@ -1592,6 +1597,8 @@ enum EOperationType {
     ESchemeOpCreateResourcePool = 100;
     ESchemeOpDropResourcePool = 101;
     ESchemeOpAlterResourcePool = 102;
+
+    ESchemeOpRestoreIncrementalBackup = 103;
 }
 
 message TApplyIf {
@@ -1774,6 +1781,8 @@ message TModifyScheme {
     optional bool AllowCreateInTempDir = 71 [default = false];
 
     optional TResourcePoolDescription CreateResourcePool = 72;
+
+    optional TRestoreIncrementalBackup RestoreIncrementalBackup = 73;
 }
 
 message TCopySequence {

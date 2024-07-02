@@ -31,12 +31,12 @@ public:
             return true;
         }
 
-        if (!Self->IsReplicated()) {
-            Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
-                NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
-                NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST);
-            return true;
-        }
+        // if (!Self->IsReplicated()) {
+        //     Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
+        //         NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
+        //         NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST);
+        //     return true;
+        // }
 
         const auto& msg = Ev->Get()->Record;
 
@@ -102,29 +102,29 @@ public:
             TTransactionContext& txc, const TTableId& tableId, const TUserTable& userTable,
             TReplicationSourceState& source, const NKikimrTxDataShard::TEvApplyReplicationChanges::TChange& change)
     {
-        Y_ABORT_UNLESS(userTable.IsReplicated());
+        // Y_ABORT_UNLESS(userTable.IsReplicated());
 
         // TODO: check source and offset, persist new values
         i64 sourceOffset = change.GetSourceOffset();
 
         ui64 writeTxId = change.GetWriteTxId();
-        if (userTable.ReplicationConfig.HasWeakConsistency()) {
-            if (writeTxId) {
-                Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
-                    NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
-                    NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST,
-                    "WriteTxId cannot be specified for weak consistency");
-                return false;
-            }
-        } else {
-            if (writeTxId == 0) {
-                Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
-                    NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
-                    NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST,
-                    "Non-zero WriteTxId must be specified for strong consistency");
-                return false;
-            }
-        }
+        // if (userTable.ReplicationConfig.HasWeakConsistency()) {
+        //     if (writeTxId) {
+        //         Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
+        //             NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
+        //             NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST,
+        //             "WriteTxId cannot be specified for weak consistency");
+        //         return false;
+        //     }
+        // } else {
+        //     if (writeTxId == 0) {
+        //         Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
+        //             NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
+        //             NKikimrTxDataShard::TEvApplyReplicationChangesResult::REASON_BAD_REQUEST,
+        //             "Non-zero WriteTxId must be specified for strong consistency");
+        //         return false;
+        //     }
+        // }
 
         TSerializedCellVec keyCellVec;
         if (!TSerializedCellVec::TryParse(change.GetKey(), keyCellVec) ||
@@ -207,8 +207,8 @@ public:
     {
         const auto& tags = proto.GetTags();
         size_t count = tags.size();
-        if (!TSerializedCellVec::TryParse(proto.GetData(), updateCellVec) ||
-            updateCellVec.GetCells().size() != count)
+        if (!TSerializedCellVec::TryParse(proto.GetData(), updateCellVec) //||
+            /* updateCellVec.GetCells().size() != count */)
         {
             Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
                 NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,
