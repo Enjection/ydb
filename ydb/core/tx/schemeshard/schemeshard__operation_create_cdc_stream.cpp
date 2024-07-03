@@ -202,6 +202,7 @@ public:
         case NKikimrSchemeOp::ECdcStreamModeNewImage:
         case NKikimrSchemeOp::ECdcStreamModeOldImage:
         case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages:
+        case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
             break;
         case NKikimrSchemeOp::ECdcStreamModeUpdate:
             if (streamDesc.GetFormat() == NKikimrSchemeOp::ECdcStreamFormatDynamoDBStreamsJson) {
@@ -937,6 +938,7 @@ TVector<ISubOperation::TPtr> CreateNewCdcStream(TOperationId opId, const TTxTran
     case NKikimrSchemeOp::ECdcStreamModeNewImage:
     case NKikimrSchemeOp::ECdcStreamModeOldImage:
     case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages:
+    case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
         break;
     default:
         return {CreateReject(opId, NKikimrScheme::StatusInvalidParameter, TStringBuilder()

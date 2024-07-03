@@ -876,6 +876,7 @@ enum ECdcStreamMode {
     ECdcStreamModeNewImage = 3;
     ECdcStreamModeOldImage = 4;
     ECdcStreamModeNewAndOldImages = 5;
+    ECdcStreamModeRestoreIncBackup = 6;
 }
 
 enum ECdcStreamFormat {

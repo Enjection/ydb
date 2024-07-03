@@ -148,7 +148,7 @@ TVector<ISubOperation::TPtr> CreateRestoreIncrementalBackup(TOperationId opId, c
     createCdcStreamOp.SetTableName(srcTableName);
     auto& streamDescription = *createCdcStreamOp.MutableStreamDescription();
     streamDescription.SetName(IB_RESTORE_CDC_STREAM_NAME);
-    streamDescription.SetMode(NKikimrSchemeOp::ECdcStreamModeUpdate);
+    streamDescription.SetMode(NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup);
     streamDescription.SetFormat(NKikimrSchemeOp::ECdcStreamFormatProto);
     streamDescription.SetState(NKikimrSchemeOp::ECdcStreamStateScan);
 

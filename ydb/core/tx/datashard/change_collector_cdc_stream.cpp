@@ -59,6 +59,29 @@ namespace {
         return result;
     }
 
+    auto MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TArrayRef<const NScheme::TTypeInfo> types, TUserTable::TCPtr table) {
+        Y_ABORT_UNLESS(cells.size() >= 1);
+        TVector<TUpdateOp> result(::Reserve(cells.size() - 1));
+
+        Y_ABORT_UNLESS(cells.size() == tags.size());
+        Y_ABORT_UNLESS(cells.size() == types.size());
+
+        bool skipped = false;
+        for (TPos pos = 0; pos < cells.size(); ++pos) {
+            const auto tag = tags.at(pos);
+            auto it = table->Columns.find(tag);
+            Y_ABORT_UNLESS(it != table->Columns.end());
+            if (it->second.Name == "__incrBackupImpl_deleted") {
+                skipped = true;
+                continue;
+            }
+            result.emplace_back(tags.at(pos), ECellOp::Set, TRawTypeValue(cells.at(pos).AsRef(), types.at(pos)));
+        }
+        Y_ABORT_UNLESS(skipped);
+
+        return result;
+    }
+
     auto MakeTagToPos(TArrayRef<const TTag> tags) {
         THashMap<TTag, TPos> result;
 
@@ -132,6 +155,7 @@ bool TCdcStreamChangeCollector::NeedToReadKeys() const {
             switch (streamInfo.Mode) {
             case NKikimrSchemeOp::ECdcStreamModeKeysOnly:
             case NKikimrSchemeOp::ECdcStreamModeUpdate:
+            case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
                 break;
             case NKikimrSchemeOp::ECdcStreamModeNewImage:
             case NKikimrSchemeOp::ECdcStreamModeOldImage:
@@ -227,6 +251,9 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
             case NKikimrSchemeOp::ECdcStreamModeUpdate:
                 Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, MakeUpdates(**initialState, valueTags, valueTypes));
                 break;
+            case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
+                Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, MakeRestoreUpdates(**initialState, valueTags, valueTypes, userTable));
+                break;
             case NKikimrSchemeOp::ECdcStreamModeNewImage:
             case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages:
                 Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, nullptr, &*initialState, valueTags);
@@ -244,6 +271,7 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
             Persist(tableId, pathId, rop, key, keyTags, {});
             break;
         case NKikimrSchemeOp::ECdcStreamModeUpdate:
+        case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
             Persist(tableId, pathId, rop, key, keyTags, updates);
             break;
         case NKikimrSchemeOp::ECdcStreamModeNewImage:

@@ -208,6 +208,27 @@ class TDataShard::TTxCdcStreamScanProgress
         return updates;
     }
 
+    static TVector<TUpdateOp> MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TUserTable::TCPtr table) {
+        Y_ABORT_UNLESS(cells.size() >= 1);
+        TVector<TUpdateOp> updates(::Reserve(cells.size() - 1));
+
+        bool skipped = false;
+        Y_ABORT_UNLESS(cells.size() == tags.size());
+        for (TPos pos = 0; pos < cells.size(); ++pos) {
+            const auto tag = tags.at(pos);
+            auto it = table->Columns.find(tag);
+            Y_ABORT_UNLESS(it != table->Columns.end());
+            if (it->second.Name == "__incrBackupImpl_deleted") {
+                skipped = true;
+                continue;
+            }
+            updates.emplace_back(tag, ECellOp::Set, TRawTypeValue(cells.at(pos).AsRef(), it->second.Type));
+        }
+        Y_ABORT_UNLESS(skipped);
+
+        return updates;
+    }
+
     static TRowState MakeRow(TArrayRef<const TCell> cells) {
         TRowState row(cells.size());
 
@@ -306,6 +327,9 @@ public:
                     break;
                 case NKikimrSchemeOp::ECdcStreamModeUpdate:
                     Serialize(body, ERowOp::Upsert, key, keyTags, MakeUpdates(v.GetCells(), valueTags, table));
+                    break;
+                case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
+                    Serialize(body, ERowOp::Upsert, key, keyTags, MakeRestoreUpdates(v.GetCells(), valueTags, table));
                     break;
                 case NKikimrSchemeOp::ECdcStreamModeNewImage:
                 case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages: {
