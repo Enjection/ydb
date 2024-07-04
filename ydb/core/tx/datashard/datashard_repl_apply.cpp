@@ -207,8 +207,8 @@ public:
     {
         const auto& tags = proto.GetTags();
         size_t count = tags.size();
-        if (!TSerializedCellVec::TryParse(proto.GetData(), updateCellVec) //||
-            /* updateCellVec.GetCells().size() != count */)
+        if (!TSerializedCellVec::TryParse(proto.GetData(), updateCellVec) ||
+            updateCellVec.GetCells().size() != count)
         {
             Result = MakeHolder<TEvDataShard::TEvApplyReplicationChangesResult>(
                 NKikimrTxDataShard::TEvApplyReplicationChangesResult::STATUS_REJECTED,

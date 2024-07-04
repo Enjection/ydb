@@ -552,6 +552,9 @@ public:
         return std::move(Buf);
     }
 
+    // read headers, assuming the buf is correct and append additional cell to the end
+    static bool UnsafeAppendCell(const TCell& cell, TString& serializedCellVec);
+
 private:
     bool DoTryParse(const TString& data);
 

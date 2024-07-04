@@ -238,6 +238,40 @@ namespace {
     }
 }
 
+
+bool TSerializedCellVec::UnsafeAppendCell(const TCell& cell, TString& serializedCellVec) {
+    const char* buf = serializedCellVec.data();
+    const char* bufEnd = serializedCellVec.data() + serializedCellVec.size();
+
+    if (!serializedCellVec) {
+        TSerializedCellVec::Serialize(serializedCellVec, {cell});
+        return true;
+    }
+
+    if (Y_UNLIKELY(bufEnd - buf < static_cast<ptrdiff_t>(sizeof(ui16)))) {
+        return false;
+    }
+
+    ui16 cellCount = ReadUnaligned<ui16>(buf);
+    cellCount += 1;
+
+    serializedCellVec.ReserveAndResize(serializedCellVec.size() + sizeof(ui32) + cell.Size());
+
+    char* mutableBuf = serializedCellVec.Detach();
+    char* oldBufEnd = mutableBuf + (bufEnd - buf);
+
+    WriteUnaligned<ui16>(mutableBuf, cellCount);
+
+    TCellHeader header(cell.Size(), cell.IsNull());
+    WriteUnaligned<ui32>(oldBufEnd, header.RawValue);
+    oldBufEnd += sizeof(header);
+    if (cell.Size() > 0) {
+        cell.CopyDataInto(oldBufEnd);
+    }
+
+    return true;
+}
+
 TSerializedCellVec::TSerializedCellVec(TConstArrayRef<TCell> cells)
 {
     SerializeCellVec(cells, Buf, &Cells);

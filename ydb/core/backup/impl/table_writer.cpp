@@ -64,12 +64,20 @@ public:
             auto& upsert = *record.MutableUpsert();
 
             switch (ProtoBody.GetCdcDataChange().GetRowOperationCase()) {
-            case NKikimrChangeExchange::TDataChange::kUpsert:
+            case NKikimrChangeExchange::TDataChange::kUpsert: {
                 *upsert.MutableTags() = {
                     ProtoBody.GetCdcDataChange().GetUpsert().GetTags().begin(),
                     ProtoBody.GetCdcDataChange().GetUpsert().GetTags().end()};
-                upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
+                auto it = Schema->ValueColumns.find("__incrBackupImpl_deleted");
+                upsert.AddTags(it->second.Tag);
+
+                TString serializedCellVec = ProtoBody.GetCdcDataChange().GetUpsert().GetData();
+                const TCell cell = TCell::Make<bool>(false);
+                Y_ABORT_UNLESS(TSerializedCellVec::UnsafeAppendCell(cell, serializedCellVec), "uh-oh");
+
+                upsert.SetData(serializedCellVec);
                 break;
+            }
             case NKikimrChangeExchange::TDataChange::kErase: {
                 size_t size = Schema->ValueColumns.size();
                 TVector<NTable::TTag> tags;
