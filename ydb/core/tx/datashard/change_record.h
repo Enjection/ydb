@@ -164,6 +164,7 @@ public:
         GetRecord()->Schema = schema;
         return static_cast<TSelf&>(*this);
     }
+
 }; // TChangeRecordBuilder
 
 }
