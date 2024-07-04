@@ -7,6 +7,27 @@
 
 namespace NKikimr::NBackup::NImpl {
 
+class TChangeRecord;
+
+}
+
+namespace NKikimr {
+
+template <>
+struct TChangeRecordBuilderContextTrait<NBackup::NImpl::TChangeRecord> {
+    bool Restore;
+
+    TChangeRecordBuilderContextTrait(bool restore)
+        : Restore(restore)
+    {}
+
+    TChangeRecordBuilderContextTrait(const TChangeRecordBuilderContextTrait<NBackup::NImpl::TChangeRecord>& other) = default;
+};
+
+}
+
+namespace NKikimr::NBackup::NImpl {
+
 class TChangeRecord: public NChangeExchange::TChangeRecordBase {
     friend class TChangeRecordBuilder;
 
@@ -30,24 +51,73 @@ public:
         return SourceId;
     }
 
-    void Serialize(NKikimrTxDataShard::TEvApplyReplicationChanges::TChange& record) const {
-        record.SetSourceOffset(GetOrder());
-        // TODO: fill WriteTxId
-
-        record.SetKey(ProtoBody.GetCdcDataChange().GetKey().GetData());
-
-        auto& upsert = *record.MutableUpsert();
-        for (auto& tag : ProtoBody.GetCdcDataChange().GetUpsert().GetTags()) {
-            upsert.AddTags(tag);
-        }
-        upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
-    }
-
     void Serialize(
         NKikimrTxDataShard::TEvApplyReplicationChanges::TChange& record,
-        TChangeRecordBuilderContextTrait<TChangeRecord>&) const
+        TChangeRecordBuilderContextTrait<TChangeRecord>& ctx) const
     {
-        return Serialize(record);
+        if (!ctx.Restore) {
+            record.SetSourceOffset(GetOrder());
+            // TODO: fill WriteTxId
+
+            record.SetKey(ProtoBody.GetCdcDataChange().GetKey().GetData());
+
+            auto& upsert = *record.MutableUpsert();
+
+            switch (ProtoBody.GetCdcDataChange().GetRowOperationCase()) {
+            case NKikimrChangeExchange::TDataChange::kUpsert:
+                *upsert.MutableTags() = {
+                    ProtoBody.GetCdcDataChange().GetUpsert().GetTags().begin(),
+                    ProtoBody.GetCdcDataChange().GetUpsert().GetTags().end()};
+                upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
+                break;
+            case NKikimrChangeExchange::TDataChange::kErase: {
+                size_t size = Schema->ValueColumns.size();
+                TVector<NTable::TTag> tags;
+                TVector<TCell> cells;
+
+                tags.reserve(size);
+                cells.reserve(size);
+
+                for (const auto& [name, value] : Schema->ValueColumns) {
+                    tags.push_back(value.Tag);
+                    if (name != "__incrBackupImpl_deleted") {
+                        cells.emplace_back();
+                    } else {
+                        cells.emplace_back(TCell::Make<bool>(true));
+                    }
+                }
+
+                *upsert.MutableTags() = {tags.begin(), tags.end()};
+                upsert.SetData(TSerializedCellVec::Serialize(cells));
+
+                break;
+            }
+            case NKikimrChangeExchange::TDataChange::kReset:
+            default:
+                Y_FAIL_S("Unexpected row operation: " << static_cast<int>(ProtoBody.GetCdcDataChange().GetRowOperationCase()));
+            }
+        } else {
+            record.SetSourceOffset(GetOrder());
+            record.SetKey(ProtoBody.GetCdcDataChange().GetKey().GetData());
+
+            switch (ProtoBody.GetCdcDataChange().GetRowOperationCase()) {
+            case NKikimrChangeExchange::TDataChange::kUpsert: {
+                auto& upsert = *record.MutableUpsert();
+                *upsert.MutableTags() = {
+                    ProtoBody.GetCdcDataChange().GetUpsert().GetTags().begin(),
+                    ProtoBody.GetCdcDataChange().GetUpsert().GetTags().end()};
+                upsert.SetData(ProtoBody.GetCdcDataChange().GetUpsert().GetData());
+                break;
+            }
+            case NKikimrChangeExchange::TDataChange::kErase:
+                record.MutableErase();
+                break;
+            case NKikimrChangeExchange::TDataChange::kReset:
+            default:
+                Y_FAIL_S("Unexpected row operation: " << static_cast<int>(ProtoBody.GetCdcDataChange().GetRowOperationCase()));
+            }
+
+        }
     }
 
     ui64 ResolvePartitionId(NChangeExchange::IChangeSenderResolver* const resolver) const override {
@@ -156,8 +226,8 @@ Y_DECLARE_OUT_SPEC(inline, NKikimr::NBackup::NImpl::TChangeRecord::TPtr, out, va
 
 namespace NKikimr::NBackup::NImpl {
 
-IActor* CreateLocalTableWriter(const TPathId& tablePathId) {
-    return new NReplication::NService::TLocalTableWriter<NBackup::NImpl::TChangeRecord>(tablePathId);
+IActor* CreateLocalTableWriter(const TPathId& tablePathId, bool restore) {
+    return new NReplication::NService::TLocalTableWriter<NBackup::NImpl::TChangeRecord>(tablePathId, restore);
 }
 
 }

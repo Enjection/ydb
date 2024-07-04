@@ -65,10 +65,12 @@ public:
         auto* workerActor = CreateWorker(
             SelfId(),
             [=]() -> IActor* { return NBackup::NImpl::CreateLocalPartitionReader(ParentTablet, Partition); },
-            [=]() -> IActor* { return NBackup::NImpl::CreateLocalTableWriter(
-                    Config.HasIncrementalBackup()
-                    ? PathIdFromPathId(Config.GetIncrementalBackup().GetDstPathId())
-                    : PathIdFromPathId(Config.GetIncrementalRestore().GetDstPathId()));
+            [=]() -> IActor* {
+                if (Config.HasIncrementalBackup()) {
+                    return NBackup::NImpl::CreateLocalTableWriter(PathIdFromPathId(Config.GetIncrementalBackup().GetDstPathId()));
+                } else {
+                    return NBackup::NImpl::CreateLocalTableWriter(PathIdFromPathId(Config.GetIncrementalRestore().GetDstPathId()), true);
+                }
             });
         Worker = TActivationContext::Register(workerActor);
 

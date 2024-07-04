@@ -59,7 +59,7 @@ namespace {
         return result;
     }
 
-    auto MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TArrayRef<const NScheme::TTypeInfo> types, TUserTable::TCPtr table) {
+    std::optional<TVector<TUpdateOp>> MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TArrayRef<const NScheme::TTypeInfo> types, TUserTable::TCPtr table) {
         Y_ABORT_UNLESS(cells.size() >= 1);
         TVector<TUpdateOp> result(::Reserve(cells.size() - 1));
 
@@ -72,6 +72,10 @@ namespace {
             auto it = table->Columns.find(tag);
             Y_ABORT_UNLESS(it != table->Columns.end());
             if (it->second.Name == "__incrBackupImpl_deleted") {
+                // FIXME assert
+                if (const auto& cell = cells.at(pos); !cell.IsNull() && cell.AsValue<bool>()) {
+                    return std::nullopt;
+                }
                 skipped = true;
                 continue;
             }
@@ -251,9 +255,15 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
             case NKikimrSchemeOp::ECdcStreamModeUpdate:
                 Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, MakeUpdates(**initialState, valueTags, valueTypes));
                 break;
-            case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
-                Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, MakeRestoreUpdates(**initialState, valueTags, valueTypes, userTable));
+            case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup: {
+                auto updates = MakeRestoreUpdates(**initialState, valueTags, valueTypes, userTable);
+                if (updates) {
+                    Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, *updates);
+                } else {
+                    Persist(tableId, pathId, ERowOp::Erase, key, keyTags, {});
+                }
                 break;
+            }
             case NKikimrSchemeOp::ECdcStreamModeNewImage:
             case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages:
                 Persist(tableId, pathId, ERowOp::Upsert, key, keyTags, nullptr, &*initialState, valueTags);

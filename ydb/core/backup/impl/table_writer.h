@@ -8,6 +8,6 @@ namespace NKikimr {
 
 namespace NKikimr::NBackup::NImpl {
 
-IActor* CreateLocalTableWriter(const TPathId& tablePathId);
+IActor* CreateLocalTableWriter(const TPathId& tablePathId, bool restore = false);
 
 }

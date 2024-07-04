@@ -208,7 +208,7 @@ class TDataShard::TTxCdcStreamScanProgress
         return updates;
     }
 
-    static TVector<TUpdateOp> MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TUserTable::TCPtr table) {
+    static std::optional<TVector<TUpdateOp>> MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TUserTable::TCPtr table) {
         Y_ABORT_UNLESS(cells.size() >= 1);
         TVector<TUpdateOp> updates(::Reserve(cells.size() - 1));
 
@@ -219,6 +219,10 @@ class TDataShard::TTxCdcStreamScanProgress
             auto it = table->Columns.find(tag);
             Y_ABORT_UNLESS(it != table->Columns.end());
             if (it->second.Name == "__incrBackupImpl_deleted") {
+                // FIXME assert
+                if (const auto& cell = cells.at(pos); !cell.IsNull() && cell.AsValue<bool>()) {
+                    return std::nullopt;
+                }
                 skipped = true;
                 continue;
             }
@@ -328,9 +332,15 @@ public:
                 case NKikimrSchemeOp::ECdcStreamModeUpdate:
                     Serialize(body, ERowOp::Upsert, key, keyTags, MakeUpdates(v.GetCells(), valueTags, table));
                     break;
-                case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup:
-                    Serialize(body, ERowOp::Upsert, key, keyTags, MakeRestoreUpdates(v.GetCells(), valueTags, table));
+                case NKikimrSchemeOp::ECdcStreamModeRestoreIncBackup: {
+                    auto updates = MakeRestoreUpdates(v.GetCells(), valueTags, table);
+                    if (updates) {
+                        Serialize(body, ERowOp::Upsert, key, keyTags, *updates);
+                    } else {
+                        Serialize(body, ERowOp::Erase, key, keyTags, {});
+                    }
                     break;
+                }
                 case NKikimrSchemeOp::ECdcStreamModeNewImage:
                 case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages: {
                     const auto newImage = MakeRow(v.GetCells());
