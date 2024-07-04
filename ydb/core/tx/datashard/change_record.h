@@ -37,9 +37,6 @@ public:
     const TPathId& GetTableId() const { return TableId; }
     ui64 GetSchemaVersion() const { return SchemaVersion; }
     TUserTable::TCPtr GetSchema() const { return Schema; }
-    TString GetSourceId() const {
-        return SourceId;
-    }
 
     void Serialize(NKikimrChangeExchange::TChangeRecord& record) const;
 
@@ -103,7 +100,6 @@ private:
     ui64 LockId = 0;
     ui64 LockOffset = 0;
     TPathId PathId;
-    TString SourceId;
 
     ui64 SchemaVersion;
     TPathId TableId;
@@ -166,11 +162,6 @@ public:
 
     TSelf& WithSchema(TUserTable::TCPtr schema) {
         GetRecord()->Schema = schema;
-        return static_cast<TSelf&>(*this);
-    }
-
-    TSelf& WithSourceId(const TString& sourceId) {
-        GetRecord()->SourceId = sourceId;
         return static_cast<TSelf&>(*this);
     }
 }; // TChangeRecordBuilder
