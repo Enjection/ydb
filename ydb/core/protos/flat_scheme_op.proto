@@ -344,6 +344,7 @@ message TTableReplicationConfig {
     enum EReplicationMode {
         REPLICATION_MODE_NONE = 0;
         REPLICATION_MODE_READ_ONLY = 1;
+        REPLICATION_MODE_RESTORE_INCREMENTAL_BACKUP = 2;
     }
 
     enum EConsistency {

@@ -96,6 +96,24 @@ void DoCreatePqPart(
     result.push_back(CreateNewPQ(NextPartId(opId, result), outTx));
 }
 
+void DoCreateAlterTable(
+    const TOperationId& opId,
+    const TPath& dstTablePath,
+    TVector<ISubOperation::TPtr>& result)
+{
+    auto outTx = TransactionTemplate(dstTablePath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable);
+    auto& desc = *outTx.MutableAlterTable();
+
+    PathIdFromPathId(dstTablePath.Base()->PathId, desc.MutablePathId());
+
+    auto& replicationConfig = *desc.MutableReplicationConfig();
+    replicationConfig.SetMode(NKikimrSchemeOp::TTableReplicationConfig::REPLICATION_MODE_RESTORE_INCREMENTAL_BACKUP);
+    replicationConfig.SetConsistency(NKikimrSchemeOp::TTableReplicationConfig::CONSISTENCY_WEAK);
+
+    result.push_back(CreateAlterTable(NextPartId(opId, result), outTx));
+}
+
+
 TVector<ISubOperation::TPtr> CreateRestoreIncrementalBackup(TOperationId opId, const TTxTransaction& tx, TOperationContext& context) {
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackup);
 
@@ -155,6 +173,8 @@ TVector<ISubOperation::TPtr> CreateRestoreIncrementalBackup(TOperationId opId, c
     TVector<ISubOperation::TPtr> result;
 
     DoCreateLock(opId, workingDirPath, srcTablePath, false, result);
+
+    DoCreateAlterTable(opId, dstTablePath, result);
 
     NCdc::DoCreateStream(createCdcStreamOp, opId, workingDirPath, srcTablePath, acceptExisted, true, {}, result);
     DoCreatePqPart(
