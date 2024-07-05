@@ -45,6 +45,7 @@ void DoCreateIncBackupTable(const TOperationId& opId, const TPath& dst, NKikimrS
     auto& desc = *outTx.MutableCreateTable();
     desc.CopyFrom(tableDesc);
     desc.SetName(dst.LeafName());
+    desc.SetIncrementalBackup(true);
 
     auto& replicationConfig = *desc.MutableReplicationConfig();
     replicationConfig.SetMode(NKikimrSchemeOp::TTableReplicationConfig::REPLICATION_MODE_READ_ONLY);
@@ -78,7 +79,7 @@ TVector<ISubOperation::TPtr> CreateAlterContinuousBackup(TOperationId opId, cons
     const auto topicPath = streamPath.Child("streamImpl");
     TTopicInfo::TPtr topic = context.SS->Topics.at(topicPath.Base()->PathId);
 
-    const auto backupTablePath = tablePath.Child("incBackupImpl");
+    const auto backupTablePath = workingDirPath.Child(cbOp.GetTakeIncrementalBackup().GetDstPath());
 
     const NScheme::TTypeRegistry* typeRegistry = AppData(context.Ctx)->TypeRegistry;
 

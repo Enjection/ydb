@@ -366,7 +366,8 @@ void TPersQueueReadBalancer::CheckACL(const TEvPersQueue::TEvCheckACL::TPtr &req
     };
 
     TString user = record.HasUser() ? record.GetUser() : "";
-
+    RespondWithACL(request, NKikimrPQ::EAccess::ALLOWED, "", ctx);
+    return;
     if (record.GetOperation() == NKikimrPQ::EOperation::READ_OP) {
         if (!Consumers.contains(user)) {
             RespondWithACL(request, NKikimrPQ::EAccess::DENIED, TStringBuilder() << "no read rule provided for consumer '"

@@ -139,6 +139,10 @@ struct TChangeRecordBuilderContextTrait<NReplication::NService::TChangeRecord> {
     TChangeRecordBuilderContextTrait()
         : MemoryPool(256)
     {}
+
+    TChangeRecordBuilderContextTrait(const TChangeRecordBuilderContextTrait<NReplication::NService::TChangeRecord>&)
+        : MemoryPool(256)
+    {};
 };
 
 }

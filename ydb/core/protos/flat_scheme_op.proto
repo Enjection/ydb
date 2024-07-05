@@ -344,6 +344,7 @@ message TTableReplicationConfig {
     enum EReplicationMode {
         REPLICATION_MODE_NONE = 0;
         REPLICATION_MODE_READ_ONLY = 1;
+        REPLICATION_MODE_RESTORE_INCREMENTAL_BACKUP = 2;
     }
 
     enum EConsistency {
@@ -395,6 +396,8 @@ message TTableDescription {
     optional TTableReplicationConfig ReplicationConfig = 40;
 
     optional bool Temporary = 41;
+
+    optional bool IncrementalBackup = 42;
 }
 
 message TDictionaryEncodingSettings {
@@ -874,6 +877,7 @@ enum ECdcStreamMode {
     ECdcStreamModeNewImage = 3;
     ECdcStreamModeOldImage = 4;
     ECdcStreamModeNewAndOldImages = 5;
+    ECdcStreamModeRestoreIncBackup = 6;
 }
 
 enum ECdcStreamFormat {
@@ -947,6 +951,7 @@ message TAlterContinuousBackup {
     }
 
     message TTakeIncrementalBackup {
+        optional string DstPath = 1;
     }
 
     oneof Action {
@@ -957,6 +962,11 @@ message TAlterContinuousBackup {
 
 message TDropContinuousBackup {
     optional string TableName = 1;
+}
+
+message TRestoreIncrementalBackup {
+    optional string SrcTableName = 1;
+    optional string DstTableName = 2;
 }
 
 enum EIndexType {
@@ -1589,6 +1599,8 @@ enum EOperationType {
     ESchemeOpCreateResourcePool = 100;
     ESchemeOpDropResourcePool = 101;
     ESchemeOpAlterResourcePool = 102;
+
+    ESchemeOpRestoreIncrementalBackup = 103;
 }
 
 message TApplyIf {
@@ -1771,6 +1783,8 @@ message TModifyScheme {
     optional bool AllowCreateInTempDir = 71 [default = false];
 
     optional TResourcePoolDescription CreateResourcePool = 72;
+
+    optional TRestoreIncrementalBackup RestoreIncrementalBackup = 73;
 }
 
 message TCopySequence {

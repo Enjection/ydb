@@ -532,6 +532,8 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
                 return nullptr;
             }
             break;
+        case NKikimrSchemeOp::TTableReplicationConfig::REPLICATION_MODE_RESTORE_INCREMENTAL_BACKUP:
+            break;
         default:
             errStr = "Unknown replication mode";
             return nullptr;
@@ -541,6 +543,7 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
     }
 
     alterData->IsBackup = op.GetIsBackup();
+    alterData->IsIncrementalBackup = op.GetIncrementalBackup();
 
     if (source && op.KeyColumnNamesSize() == 0)
         return alterData;

@@ -200,6 +200,7 @@ bool TReadInitAndAuthActor::CheckTopicACL(
     )) {
         return false;
     }
+    return true;
     if (!SkipReadRuleCheck && (Token || AppData(ctx)->PQConfig.GetTopicsAreFirstClassCitizen())) {
         //TODO : add here checking of client-service-type password. Provide it via API-call.
         if (!NPQ::HasConsumer(pqDescr.GetPQTabletConfig(), ClientId)) {

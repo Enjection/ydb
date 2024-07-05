@@ -490,6 +490,10 @@ void TUserTable::ApplyAlter(
         }
     }
 
+    if (delta.HasReplicationConfig()) {
+        ReplicationConfig = delta.GetReplicationConfig();
+    }
+
     // Most settings are applied to both main and shadow table
     TStackVec<ui32> tids;
     tids.push_back(LocalTid);

@@ -58,12 +58,16 @@ private:
         Send(PQTablet, CreateGetOffsetRequest().Release());
     }
 
+    void HandleInit() {
+        Send(PQTablet, CreateGetOffsetRequest().Release());
+    }
+
     void HandleInit(TEvPersQueue::TEvResponse::TPtr& ev) {
         LOG_D("Handle " << ev->Get()->ToString());
         auto& record = ev->Get()->Record;
         if (record.GetErrorCode() == NPersQueue::NErrorCode::INITIALIZING) {
-            // TODO reschedule
-            Y_ABORT("Unimplemented!");
+            Schedule(TDuration::Seconds(1), new NActors::TEvents::TEvWakeup);
+            return;
         }
         Y_VERIFY_S(record.GetErrorCode() == NPersQueue::NErrorCode::OK, "Unimplemented!");
         Y_VERIFY_S(record.HasPartitionResponse() && record.GetPartitionResponse().HasCmdGetClientOffsetResult(), "Unimplemented!");
@@ -85,7 +89,7 @@ private:
         auto& read = *req.MutableCmdRead();
         read.SetOffset(Offset);
         read.SetClientId(OFFLOAD_ACTOR_CLIENT_ID);
-        read.SetTimeoutMs(0);
+        read.SetTimeoutMs(1000);
         read.SetBytes(1_MB);
 
         return request;
@@ -113,6 +117,12 @@ private:
         LOG_D("Handle " << ev->Get()->ToString());
 
         const auto& readResult = record.GetPartitionResponse().GetCmdReadResult();
+
+        if (!readResult.ResultSize()) {
+            Y_ABORT_UNLESS(PQTablet);
+            Send(PQTablet, CreateReadRequest().Release());
+            return;
+        }
 
         auto gotOffset = Offset;
         TVector<TEvWorker::TEvData::TRecord> records(::Reserve(readResult.ResultSize()));
@@ -147,6 +157,7 @@ public:
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvWorker::TEvHandshake, HandleInit);
             hFunc(TEvPersQueue::TEvResponse, HandleInit);
+            sFunc(TEvents::TEvWakeup, HandleInit);
             sFunc(TEvents::TEvPoison, PassAway);
         default:
             Y_VERIFY_S(false, "Unhandled event type: " << ev->GetTypeRewrite()

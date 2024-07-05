@@ -34,7 +34,6 @@ private:
     const TActorId ParentTablet;
     const ui32 Partition;
     const NKikimrPQ::TOffloadConfig Config;
-    const TPathId DstPathId;
 
     mutable TMaybe<TString> LogPrefix;
     TActorId Worker;
@@ -60,14 +59,19 @@ public:
         : ParentTablet(parentTablet)
         , Partition(partition)
         , Config(config)
-        , DstPathId(PathIdFromPathId(config.GetIncrementalBackup().GetDstPathId()))
     {}
 
     void Bootstrap() {
         auto* workerActor = CreateWorker(
             SelfId(),
             [=]() -> IActor* { return NBackup::NImpl::CreateLocalPartitionReader(ParentTablet, Partition); },
-            [=]() -> IActor* { return NBackup::NImpl::CreateLocalTableWriter(DstPathId); });
+            [=]() -> IActor* {
+                if (Config.HasIncrementalBackup()) {
+                    return NBackup::NImpl::CreateLocalTableWriter(PathIdFromPathId(Config.GetIncrementalBackup().GetDstPathId()));
+                } else {
+                    return NBackup::NImpl::CreateLocalTableWriter(PathIdFromPathId(Config.GetIncrementalRestore().GetDstPathId()), true);
+                }
+            });
         Worker = TActivationContext::Register(workerActor);
 
         Become(&TOffloadActor::StateWork);
@@ -75,9 +79,9 @@ public:
 
     STATEFN(StateWork) {
         switch (ev->GetTypeRewrite()) {
-        default:
-            Y_VERIFY_S(false, "Unhandled event type: " << ev->GetTypeRewrite()
-                        << " event: " << ev->ToString());
+        // default:
+            // Y_VERIFY_S(false, "Unhandled event type: " << ev->GetTypeRewrite()
+            //             << " event: " << ev->ToString());
         }
     }
 };
