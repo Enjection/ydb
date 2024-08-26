@@ -315,6 +315,7 @@ class TDataShard
     friend class TS3DownloadsManager;
     friend class TS3Downloader;
     template <typename T> friend class TBackupRestoreUnitBase;
+    friend class TRestoreIncrementalBackupSrcUnit;
     friend struct TSetupSysLocks;
     friend class TDataShardLocksDb;
 

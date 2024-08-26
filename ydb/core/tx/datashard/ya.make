@@ -42,6 +42,7 @@ SRCS(
     create_persistent_snapshot_unit.cpp
     create_table_unit.cpp
     create_volatile_snapshot_unit.cpp
+    create_restore_incremental_backup_src_unit.cpp
     datashard__cancel_tx_proposal.cpp
     datashard__column_stats.cpp
     datashard__compact_borrowed.cpp
