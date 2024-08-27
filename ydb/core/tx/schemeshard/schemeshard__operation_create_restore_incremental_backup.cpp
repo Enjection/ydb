@@ -148,8 +148,8 @@ protected:
         auto table = context.SS->Tables.at(pathId);
 
         auto& notice = *tx.MutableRestoreIncrementalBackupSrc();
+        PathIdFromPathId(pathId, notice.MutableSrcPathId());
 
-        Y_UNUSED(notice);
         // TODO: copy op to notice
     }
 
@@ -343,12 +343,13 @@ public:
             streamPathId = childPathId;
         }
 
-        if (AppData()->DisableCdcAutoSwitchingToReadyStateForTests) {
-            return true;
-        }
+        // if (AppData()->DisableCdcAutoSwitchingToReadyStateForTests) {
+        //     return true;
+        // }
 
-        Y_ABORT_UNLESS(streamPathId);
-        context.OnComplete.Send(context.SS->SelfId(), new TEvPrivate::TEvRunCdcStreamScan(*streamPathId));
+        // FIXME(+active)
+        // Y_ABORT_UNLESS(streamPathId);
+        // context.OnComplete.Send(context.SS->SelfId(), new TEvPrivate::TEvRunCdcStreamScan(*streamPathId));
 
         return true;
     }

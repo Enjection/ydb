@@ -116,6 +116,7 @@ namespace NMiniKQL {
 
 namespace NDataShard {
     class IExportFactory;
+    class IRestoreIncrementalBackupFactory;
 }
 
 namespace NSQS {
@@ -153,6 +154,7 @@ struct TAppData {
     const NScheme::TTypeRegistry* TypeRegistry = nullptr;
     const NMiniKQL::IFunctionRegistry* FunctionRegistry = nullptr;
     const NDataShard::IExportFactory *DataShardExportFactory = nullptr;
+    const NDataShard::IRestoreIncrementalBackupFactory *DataShardRestoreIncrementalBackupFactory = nullptr;
     const TFormatFactory* FormatFactory = nullptr;
     const NSQS::IEventsWriterFactory* SqsEventsWriterFactory = nullptr;
 

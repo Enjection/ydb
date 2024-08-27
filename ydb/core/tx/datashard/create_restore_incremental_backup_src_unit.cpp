@@ -2,11 +2,26 @@
 #include "execution_unit_ctors.h"
 #include "datashard_active_transaction.h"
 #include "datashard_impl.h"
+#include "export_iface.h"
+#include "export_scan.h"
+#include <ydb/core/protos/datashard_config.pb.h>
 
 namespace NKikimr {
 namespace NDataShard {
 
 using namespace NKikimrTxDataShard;
+using namespace NExportScan;
+
+///
+
+class IRestoreIncrementalBackupFactory {
+public:
+    virtual ~IRestoreIncrementalBackupFactory() = default;
+    virtual IExport* CreateRestore(const ::NKikimrSchemeOp::TRestoreIncrementalBackup, const IExport::TTableColumns& columns) const = 0;
+    virtual void Shutdown() = 0;
+};
+
+///
 
 class TRestoreIncrementalBackupSrcUnit : public TExecutionUnit {
 protected:
@@ -27,81 +42,72 @@ protected:
         op->ResetWaitingForRestartFlag();
     }
 
+    void Abort(TOperation::TPtr op, const TActorContext& ctx, const TString& error) {
+        TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
+        Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
+
+        LOG_NOTICE_S(ctx, NKikimrServices::TX_DATASHARD, error);
+
+        BuildResult(op)->AddError(NKikimrTxDataShard::TError::WRONG_SHARD_STATE, error);
+        ResetWaiting(op);
+
+        Cancel(tx, ctx);
+    }
+
     bool Run(TOperation::TPtr op, TTransactionContext& txc, const TActorContext& ctx) {
-        Y_UNUSED(op, txc, ctx);
-        // TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
-        // Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
+        TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
+        Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
 
-        // Y_ABORT_UNLESS(tx->GetSchemeTx().HasBackup());
-        // const auto& backup = tx->GetSchemeTx().GetBackup();
+        Y_ABORT_UNLESS(tx->GetSchemeTx().HasRestoreIncrementalBackupSrc());
+        const auto& restoreSrc = tx->GetSchemeTx().GetRestoreIncrementalBackupSrc();
 
-        // const ui64 tableId = backup.GetTableId();
-        // Y_ABORT_UNLESS(DataShard.GetUserTables().contains(tableId));
+        const ui64 tableId = restoreSrc.GetSrcPathId().GetLocalId();
+        Y_ABORT_UNLESS(DataShard.GetUserTables().contains(tableId));
 
-        // const ui32 localTableId = DataShard.GetUserTables().at(tableId)->LocalTid;
-        // Y_ABORT_UNLESS(txc.DB.GetScheme().GetTableInfo(localTableId));
+        const ui32 localTableId = DataShard.GetUserTables().at(tableId)->LocalTid;
+        Y_ABORT_UNLESS(txc.DB.GetScheme().GetTableInfo(localTableId));
 
-        // auto* appData = AppData(ctx);
-        // const auto& columns = DataShard.GetUserTables().at(tableId)->Columns;
-        // std::shared_ptr<::NKikimr::NDataShard::IExport> exp;
+        auto* appData = AppData(ctx);
+        const auto& columns = DataShard.GetUserTables().at(tableId)->Columns;
+        std::shared_ptr<::NKikimr::NDataShard::IExport> exp; // TODO: decouple from export
+        Y_UNUSED(exp, appData, columns);
 
-        // if (backup.HasYTSettings()) {
-        //     if (backup.HasCompression()) {
-        //         Abort(op, ctx, "Exports to YT do not support compression");
-        //         return false;
-        //     }
+        if (auto* restoreFactory = appData->DataShardRestoreIncrementalBackupFactory) {
+            std::shared_ptr<IExport>(restoreFactory->CreateRestore(restoreSrc, columns)).swap(exp);
+        } else {
+            Abort(op, ctx, "Restore incremental backup are disabled");
+            Y_VERIFY("1");
+            return false;
+        }
 
-        //     if (auto* exportFactory = appData->DataShardExportFactory) {
-        //         std::shared_ptr<IExport>(exportFactory->CreateExportToYt(backup, columns)).swap(exp);
-        //     } else {
-        //         Abort(op, ctx, "Exports to YT are disabled");
-        //         return false;
-        //     }
-        // } else if (backup.HasS3Settings()) {
-        //     NBackupRestoreTraits::ECompressionCodec codec;
-        //     if (!TryCodecFromTask(backup, codec)) {
-        //         Abort(op, ctx, TStringBuilder() << "Unsupported compression codec"
-        //             << ": " << backup.GetCompression().GetCodec());
-        //         return false;
-        //     }
+        auto createUploader = [self = DataShard.SelfId(), txId = op->GetTxId(), exp]() {
+            return exp->CreateUploader(self, txId);
+        };
 
-        //     if (auto* exportFactory = appData->DataShardExportFactory) {
-        //         std::shared_ptr<IExport>(exportFactory->CreateExportToS3(backup, columns)).swap(exp);
-        //     } else {
-        //         Abort(op, ctx, "Exports to S3 are disabled");
-        //         return false;
-        //     }
-        // } else {
-        //     Abort(op, ctx, "Unsupported backup task");
-        //     return false;
-        // }
+        THolder<IBuffer> buffer{exp->CreateBuffer()};
+        THolder<NTable::IScan> scan{CreateExportScan(std::move(buffer), createUploader)};
 
-        // auto createUploader = [self = DataShard.SelfId(), txId = op->GetTxId(), exp]() {
-        //     return exp->CreateUploader(self, txId);
-        // };
+        // FIXME:
 
-        // THolder<IBuffer> buffer{exp->CreateBuffer()};
-        // THolder<NTable::IScan> scan{CreateExportScan(std::move(buffer), createUploader)};
+        const auto& taskName = appData->DataShardConfig.GetBackupTaskName();
+        const auto taskPrio = appData->DataShardConfig.GetBackupTaskPriority();
 
-        // const auto& taskName = appData->DataShardConfig.GetBackupTaskName();
-        // const auto taskPrio = appData->DataShardConfig.GetBackupTaskPriority();
+        ui64 readAheadLo = appData->DataShardConfig.GetBackupReadAheadLo();
+        if (ui64 readAheadLoOverride = DataShard.GetBackupReadAheadLoOverride(); readAheadLoOverride > 0) {
+            readAheadLo = readAheadLoOverride;
+        }
 
-        // ui64 readAheadLo = appData->DataShardConfig.GetBackupReadAheadLo();
-        // if (ui64 readAheadLoOverride = DataShard.GetBackupReadAheadLoOverride(); readAheadLoOverride > 0) {
-        //     readAheadLo = readAheadLoOverride;
-        // }
+        ui64 readAheadHi = appData->DataShardConfig.GetBackupReadAheadHi();
+        if (ui64 readAheadHiOverride = DataShard.GetBackupReadAheadHiOverride(); readAheadHiOverride > 0) {
+            readAheadHi = readAheadHiOverride;
+        }
 
-        // ui64 readAheadHi = appData->DataShardConfig.GetBackupReadAheadHi();
-        // if (ui64 readAheadHiOverride = DataShard.GetBackupReadAheadHiOverride(); readAheadHiOverride > 0) {
-        //     readAheadHi = readAheadHiOverride;
-        // }
-
-        // tx->SetScanTask(DataShard.QueueScan(localTableId, scan.Release(), op->GetTxId(),
-        //     TScanOptions()
-        //         .SetResourceBroker(taskName, taskPrio)
-        //         .SetReadAhead(readAheadLo, readAheadHi)
-        //         .SetReadPrio(TScanOptions::EReadPrio::Low)
-        // ));
+        tx->SetScanTask(DataShard.QueueScan(localTableId, scan.Release(), op->GetTxId(),
+            TScanOptions()
+                .SetResourceBroker(taskName, taskPrio)
+                .SetReadAhead(readAheadLo, readAheadHi)
+                .SetReadPrio(TScanOptions::EReadPrio::Low)
+        ));
 
         return true;
     }
@@ -114,31 +120,30 @@ protected:
         TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
         Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
 
-        // auto* result = CheckedCast<TExportScanProduct*>(op->ScanResult().Get());
-        // bool done = true;
+        auto* result = CheckedCast<TExportScanProduct*>(op->ScanResult().Get());
+        bool done = true;
 
-        // switch (result->Outcome) {
-        // case EExportOutcome::Success:
-        // case EExportOutcome::Error:
-        //     if (auto* schemeOp = DataShard.FindSchemaTx(op->GetTxId())) {
-        //         schemeOp->Success = result->Outcome == EExportOutcome::Success;
-        //         schemeOp->Error = std::move(result->Error);
-        //         schemeOp->BytesProcessed = result->BytesRead;
-        //         schemeOp->RowsProcessed = result->RowsRead;
-        //     } else {
-        //         Y_FAIL_S("Cannot find schema tx: " << op->GetTxId());
-        //     }
-        //     break;
-        // case EExportOutcome::Aborted:
-        //     done = false;
-        //     break;
-        // }
+        switch (result->Outcome) {
+        case EExportOutcome::Success:
+        case EExportOutcome::Error:
+            if (auto* schemeOp = DataShard.FindSchemaTx(op->GetTxId())) {
+                schemeOp->Success = result->Outcome == EExportOutcome::Success;
+                schemeOp->Error = std::move(result->Error);
+                schemeOp->BytesProcessed = result->BytesRead;
+                schemeOp->RowsProcessed = result->RowsRead;
+            } else {
+                Y_FAIL_S("Cannot find schema tx: " << op->GetTxId());
+            }
+            break;
+        case EExportOutcome::Aborted:
+            done = false;
+            break;
+        }
 
-        // op->SetScanResult(nullptr);
-        // tx->SetScanTask(0);
+        op->SetScanResult(nullptr);
+        tx->SetScanTask(0);
 
-        // return done;
-        return true;
+        return done;
     }
 
     void Cancel(TActiveTransaction* tx, const TActorContext&) {
@@ -164,8 +169,13 @@ protected:
     }
 
     EExecutionStatus Execute(TOperation::TPtr op, TTransactionContext& txc, const TActorContext& ctx) override final {
+        Y_ABORT_UNLESS(op->IsSchemeTx());
+
         TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
         Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
+
+        const TString msg = TStringBuilder() << "Got2 " << "<" << tx->IsSchemeTx() << ">" << tx->GetTxBody() << " tx";
+        LOG_ERROR_S(TActivationContext::AsActorContext(), NKikimrServices::TX_DATASHARD, msg);
 
         if (!IsRelevant(tx)) {
             return EExecutionStatus::Executed;
@@ -232,7 +242,8 @@ protected:
         switch (ev->GetTypeRewrite()) {
             // OHFunc(TEvCancel, Handle);
         }
-        Y_UNUSED(op,ctx);
+        Y_VERIFY("2");
+        Y_UNUSED(op, ctx);
     }
 
 public:

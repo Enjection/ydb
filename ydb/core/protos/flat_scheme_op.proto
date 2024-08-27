@@ -422,7 +422,7 @@ message TTableDescription {
     // This flag is create-only, and has to be set up
     // on table creation to allow system column names (started with __ydb_)
     // It won't be present on describes and won't be preserved
-    optional bool SystemColumnNamesAllowed = 43;
+    optional bool SystemColumnNamesAllowed = 42;
 }
 
 message TDictionaryEncodingSettings {
@@ -1015,6 +1015,8 @@ message TDropContinuousBackup {
 
 message TRestoreIncrementalBackup {
     optional string SrcTableName = 1;
+    optional NKikimrProto.TPathID SrcPathId = 3;
+
     optional string DstTableName = 2;
 }
 
