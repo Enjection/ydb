@@ -120,7 +120,7 @@ namespace NIncrBackup {
 class TConfigurePartsAtTable: public TSubOperationState {
     TString DebugHint() const override {
         return TStringBuilder()
-            << "NCdcStreamState::TConfigurePartsAtTable"
+            << "NIncrBackupState::TConfigurePartsAtTable"
             << " operationId: " << OperationId;
     }
 
@@ -212,7 +212,7 @@ private:
 class TProposeAtTable: public TSubOperationState {
     TString DebugHint() const override {
         return TStringBuilder()
-            << "NCdcStreamState::TProposeAtTable"
+            << "NIncrBackupState::TProposeAtTable"
             << " operationId: " << OperationId;
     }
 
