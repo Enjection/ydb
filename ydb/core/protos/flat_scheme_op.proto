@@ -1018,6 +1018,7 @@ message TRestoreIncrementalBackup {
     optional NKikimrProto.TPathID SrcPathId = 3;
 
     optional string DstTableName = 2;
+    optional NKikimrProto.TPathID DstPathId = 4;
 }
 
 enum EIndexType {

@@ -5,6 +5,17 @@
 #include "export_iface.h"
 #include "export_scan.h"
 #include <ydb/core/protos/datashard_config.pb.h>
+#include <ydb/core/tablet_flat/flat_scan_spent.h>
+#include <ydb/core/tx/replication/service/worker.h>
+#include <ydb/core/backup/impl/table_writer.h>
+
+#define EXPORT_LOG_T(stream) LOG_TRACE_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_D(stream) LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_I(stream) LOG_INFO_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_N(stream) LOG_NOTICE_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_W(stream) LOG_WARN_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_E(stream) LOG_ERROR_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
+#define EXPORT_LOG_C(stream) LOG_CRIT_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP, "[Export] [" << LogPrefix() << "] " << stream)
 
 namespace NKikimr {
 namespace NDataShard {
@@ -13,54 +24,6 @@ using namespace NKikimrTxDataShard;
 using namespace NExportScan;
 
 ///
-
-class IRestoreIncrementalBackupFactory {
-public:
-    virtual ~IRestoreIncrementalBackupFactory() = default;
-    virtual IExport* CreateRestore(const ::NKikimrSchemeOp::TRestoreIncrementalBackup, const IExport::TTableColumns& columns) const = 0;
-    virtual void Shutdown() = 0;
-};
-
-class TTableExport: public IExport {
-public:
-    explicit TTableExport(const ::NKikimrSchemeOp::TRestoreIncrementalBackup& task, const TTableColumns& columns)
-        : Task(task)
-        , Columns(columns)
-    {
-    }
-
-    IActor* CreateUploader(const TActorId& dataShard, ui64 txId) const override {
-        // FIXME
-        Y_UNUSED(dataShard, txId);
-        return nullptr;
-    }
-
-    IBuffer* CreateBuffer() const override {
-        // using namespace NBackupRestoreTraits;
-
-        // const auto& scanSettings = Task.GetScanSettings();
-        // const ui64 maxRows = scanSettings.GetRowsBatchSize() ? scanSettings.GetRowsBatchSize() : Max<ui64>();
-        // const ui64 maxBytes = scanSettings.GetBytesBatchSize();
-        // const ui64 minBytes = Task.GetS3Settings().GetLimits().GetMinWriteBatchSize();
-
-        // switch (CodecFromTask(Task)) {
-        // case ECompressionCodec::None:
-        //     return CreateS3ExportBufferRaw(Columns, maxRows, maxBytes);
-        // case ECompressionCodec::Zstd:
-        //     return CreateS3ExportBufferZstd(Task.GetCompression().GetLevel(), Columns, maxRows, maxBytes, minBytes);
-        // case ECompressionCodec::Invalid:
-        //     Y_ABORT("unreachable");
-        // }
-        // FIXME
-        return nullptr;
-    }
-
-    void Shutdown() const override {}
-
-protected:
-    const ::NKikimrSchemeOp::TRestoreIncrementalBackup Task;
-    const TTableColumns Columns;
-};
 
 class TDirectReplicationScan: private NActors::IActorCallback, public NTable::IScan {
     enum EStateBits {
@@ -126,7 +89,7 @@ class TDirectReplicationScan: private NActors::IActorCallback, public NTable::IS
     EScan MaybeSendBuffer() {
         const bool noMoreData = State.Test(ES_NO_MORE_DATA);
 
-        if (!noMoreData && !Buffer->IsFilled()) {
+        if (!noMoreData /* && !Buffer->IsFilled() */) {
             return EScan::Feed;
         }
 
@@ -135,22 +98,23 @@ class TDirectReplicationScan: private NActors::IActorCallback, public NTable::IS
             return EScan::Sleep;
         }
 
-        IBuffer::TStats stats;
-        THolder<IEventBase> ev{Buffer->PrepareEvent(noMoreData, stats)};
+        // IBuffer::TStats stats;
+        // THolder<IEventBase> ev{Buffer->PrepareEvent(noMoreData, stats)};
 
-        if (!ev) {
-            Success = false;
-            Error = Buffer->GetError();
-            return EScan::Final;
-        }
+        // if (!ev) {
+        //     Success = false;
+        //     Error = Buffer->GetError();
+        //     return EScan::Final;
+        // }
 
-        Send(Uploader, std::move(ev));
-        State.Set(ES_BUFFER_SENT);
-        Stats->Aggr(stats);
+        // Send(Uploader, std::move(ev));
+        // State.Set(ES_BUFFER_SENT);
+        // Stats->Aggr(stats);
 
         if (noMoreData) {
             Spent->Alter(false);
-            return EScan::Sleep;
+            return EScan::Final; // FIXME: tmp
+            // return EScan::Sleep;
         }
 
         return EScan::Feed;
@@ -198,8 +162,9 @@ public:
         return "scanner"sv;
     }
 
-    explicit TDirectReplicationScan()
-        : IActorCallback(static_cast<TReceiveFunc>(&TExportScan::StateWork), NKikimrServices::TActivity::EXPORT_SCAN_ACTOR)
+    explicit TDirectReplicationScan(const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup)
+        : IActorCallback(static_cast<TReceiveFunc>(&TDirectReplicationScan::StateWork), NKikimrServices::TActivity::EXPORT_SCAN_ACTOR)
+        , Config(incrBackup)
         , Stats(new TStats)
         , Driver(nullptr)
         , Success(false)
@@ -215,27 +180,43 @@ public:
           << " }";
     }
 
+    auto CreateWriterFactory() {
+        return [=]() -> IActor* {
+            return NBackup::NImpl::CreateLocalTableWriter(
+                PathIdFromPathId(Config.GetDstPathId()),
+                NBackup::NImpl::EWriterType::Restore);
+        };
+    }
+
     IScan::TInitialState Prepare(IDriver* driver, TIntrusiveConstPtr<TScheme> scheme) noexcept override {
         TlsActivationContext->AsActorContext().RegisterWithSameMailbox(this);
 
         Driver = driver;
         Scheme = std::move(scheme);
         Spent = new TSpent(TAppData::TimeProvider.Get());
-        Buffer->ColumnsOrder(Scheme->Tags());
+        // Buffer->ColumnsOrder(Scheme->Tags());
 
         return {EScan::Feed, {}};
     }
 
-    void Registered(TActorSystem* sys, const TActorId&) override {
+    void Registered(TActorSystem* /* sys */, const TActorId& /* selfId */) override {
         // Uploader = sys->Register(CreateUploaderFn(), TMailboxType::HTSwap, AppData()->BatchPoolId);
+        //
+        auto* workerActor = NKikimr::NReplication::NService::CreateWorker(
+            SelfId(),
+            SelfId(),
+            CreateWriterFactory());
+
+        Worker = TlsActivationContext->AsActorContext().RegisterWithSameMailbox(workerActor);
+
 
         State.Set(ES_REGISTERED);
         MaybeReady();
     }
 
     EScan Seek(TLead& lead, ui64) noexcept override {
-        lead.To(Scheme->Tags(), {}, ESeek::Lower);
-        Buffer->Clear();
+        lead.To(Scheme->Tags(), {}, NTable::ESeek::Lower);
+        // Buffer->Clear();
 
         State.Set(ES_INITIALIZED);
         MaybeReady();
@@ -244,13 +225,13 @@ public:
         return EScan::Feed;
     }
 
-    EScan Feed(TArrayRef<const TCell>, const TRow& row) noexcept override {
-        if (!Buffer->Collect(row)) {
-            Success = false;
-            Error = Buffer->GetError();
-            EXPORT_LOG_E("Error read data from table: " << Error);
-            return EScan::Final;
-        }
+    EScan Feed(TArrayRef<const TCell>, const TRow& /* row */) noexcept override {
+        // if (!Buffer->Collect(row)) {
+        //     Success = false;
+        //     Error = Buffer->GetError();
+        //     EXPORT_LOG_E("Error read data from table: " << Error);
+        //     return EScan::Final;
+        // }
 
         return MaybeSendBuffer();
     }
@@ -289,7 +270,9 @@ public:
     }
 
 private:
+    const ::NKikimrSchemeOp::TRestoreIncrementalBackup Config;
     TActorId Uploader;
+    TActorId Worker;
     THolder<TStats> Stats;
 
     IDriver* Driver;
@@ -302,8 +285,8 @@ private:
 
 }; // TExportScan
 
-NTable::IScan* CreateDirectReplicationScan() {
-    return nullptr; // FIXME
+NTable::IScan* CreateDirectReplicationScan(const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup) {
+    return new TDirectReplicationScan(incrBackup);
 }
 
 ///
@@ -372,7 +355,7 @@ protected:
         // };
 
         // THolder<IBuffer> buffer{exp->CreateBuffer()};
-        THolder<NTable::IScan> scan{CreateDirectReplicationScan(/* std::move(buffer), createUploader */)};
+        THolder<NTable::IScan> scan{CreateDirectReplicationScan(restoreSrc)};
 
         // FIXME:
 
