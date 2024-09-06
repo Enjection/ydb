@@ -3,7 +3,8 @@
 #include "datashard_active_transaction.h"
 #include "datashard_impl.h"
 #include "export_iface.h"
-#include "export_scan.h"
+#include "cdc_stream_scan.h"
+
 #include <ydb/core/protos/datashard_config.pb.h>
 #include <ydb/core/tablet_flat/flat_scan_spent.h>
 #include <ydb/core/tx/replication/service/worker.h>
@@ -25,273 +26,16 @@ using namespace NExportScan;
 
 ///
 
-class TDirectReplicationScan: private NActors::IActorCallback, public NTable::IScan {
-    enum EStateBits {
-        ES_REGISTERED = 0, // Actor is registered
-        ES_INITIALIZED, // Seek(...) was called
-        ES_UPLOADER_READY,
-        ES_BUFFER_SENT,
-        ES_NO_MORE_DATA,
-
-        ES_COUNT,
-    };
-
-    struct TStats: public IBuffer::TStats {
-        TStats()
-            : IBuffer::TStats()
-        {
-            auto counters = GetServiceCounters(AppData()->Counters, "tablets")->GetSubgroup("subsystem", "store_to_yt");
-
-            MonRows = counters->GetCounter("Rows", true);
-            MonBytesRead = counters->GetCounter("BytesRead", true);
-            MonBytesSent = counters->GetCounter("BytesSent", true);
-        }
-
-        void Aggr(ui64 rows, ui64 bytesRead, ui64 bytesSent) {
-            Rows += rows;
-            BytesRead += bytesRead;
-            BytesSent += bytesSent;
-
-            *MonRows += rows;
-            *MonBytesRead += bytesRead;
-            *MonBytesSent += bytesSent;
-        }
-
-        void Aggr(const IBuffer::TStats& stats) {
-            Aggr(stats.Rows, stats.BytesRead, stats.BytesSent);
-        }
-
-        TString ToString() const {
-            return TStringBuilder()
-                << "Stats { "
-                    << " Rows: " << Rows
-                    << " BytesRead: " << BytesRead
-                    << " BytesSent: " << BytesSent
-                << " }";
-        }
-
-    private:
-        ::NMonitoring::TDynamicCounters::TCounterPtr MonRows;
-        ::NMonitoring::TDynamicCounters::TCounterPtr MonBytesRead;
-        ::NMonitoring::TDynamicCounters::TCounterPtr MonBytesSent;
-    };
-
-    bool IsReady() const {
-        return State.Test(ES_REGISTERED) && State.Test(ES_INITIALIZED);
-    }
-
-    void MaybeReady() {
-        if (IsReady()) {
-            Send(Uploader, new TEvExportScan::TEvReady());
-        }
-    }
-
-    EScan MaybeSendBuffer() {
-        const bool noMoreData = State.Test(ES_NO_MORE_DATA);
-
-        if (!noMoreData /* && !Buffer->IsFilled() */) {
-            return EScan::Feed;
-        }
-
-        if (!State.Test(ES_UPLOADER_READY) || State.Test(ES_BUFFER_SENT)) {
-            Spent->Alter(false);
-            return EScan::Sleep;
-        }
-
-        // IBuffer::TStats stats;
-        // THolder<IEventBase> ev{Buffer->PrepareEvent(noMoreData, stats)};
-
-        // if (!ev) {
-        //     Success = false;
-        //     Error = Buffer->GetError();
-        //     return EScan::Final;
-        // }
-
-        // Send(Uploader, std::move(ev));
-        // State.Set(ES_BUFFER_SENT);
-        // Stats->Aggr(stats);
-
-        if (noMoreData) {
-            Spent->Alter(false);
-            return EScan::Final; // FIXME: tmp
-            // return EScan::Sleep;
-        }
-
-        return EScan::Feed;
-    }
-
-    void Handle(TEvExportScan::TEvReset::TPtr&) {
-        Y_ABORT_UNLESS(IsReady());
-
-        EXPORT_LOG_D("Handle TEvExportScan::TEvReset"
-            << ": self# " << SelfId());
-
-        Stats.Reset(new TStats);
-        State.Reset(ES_UPLOADER_READY).Reset(ES_BUFFER_SENT).Reset(ES_NO_MORE_DATA);
-        Spent->Alter(true);
-        Driver->Touch(EScan::Reset);
-    }
-
-    void Handle(TEvExportScan::TEvFeed::TPtr&) {
-        Y_ABORT_UNLESS(IsReady());
-
-        EXPORT_LOG_D("Handle TEvExportScan::TEvFeed"
-            << ": self# " << SelfId());
-
-        State.Set(ES_UPLOADER_READY).Reset(ES_BUFFER_SENT);
-        Spent->Alter(true);
-        if (EScan::Feed == MaybeSendBuffer()) {
-            Driver->Touch(EScan::Feed);
-        }
-    }
-
-    void Handle(TEvExportScan::TEvFinish::TPtr& ev) {
-        Y_ABORT_UNLESS(IsReady());
-
-        EXPORT_LOG_D("Handle TEvExportScan::TEvFinish"
-            << ": self# " << SelfId()
-            << ", msg# " << ev->Get()->ToString());
-
-        Success = ev->Get()->Success;
-        Error = ev->Get()->Error;
-        Driver->Touch(EScan::Final);
-    }
-
-public:
-    static constexpr TStringBuf LogPrefix() {
-        return "scanner"sv;
-    }
-
-    explicit TDirectReplicationScan(const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup)
-        : IActorCallback(static_cast<TReceiveFunc>(&TDirectReplicationScan::StateWork), NKikimrServices::TActivity::EXPORT_SCAN_ACTOR)
-        , Config(incrBackup)
-        , Stats(new TStats)
-        , Driver(nullptr)
-        , Success(false)
-    {
-    }
-
-    void Describe(IOutputStream& o) const noexcept override {
-        o << "ExportScan { "
-              << "Uploader: " << Uploader
-              << Stats->ToString() << " "
-              << "Success: " << Success
-              << "Error: " << Error
-          << " }";
-    }
-
-    auto CreateWriterFactory() {
-        return [=]() -> IActor* {
-            return NBackup::NImpl::CreateLocalTableWriter(
-                PathIdFromPathId(Config.GetDstPathId()),
-                NBackup::NImpl::EWriterType::Restore);
-        };
-    }
-
-    IScan::TInitialState Prepare(IDriver* driver, TIntrusiveConstPtr<TScheme> scheme) noexcept override {
-        TlsActivationContext->AsActorContext().RegisterWithSameMailbox(this);
-
-        Driver = driver;
-        Scheme = std::move(scheme);
-        Spent = new TSpent(TAppData::TimeProvider.Get());
-        // Buffer->ColumnsOrder(Scheme->Tags());
-
-        return {EScan::Feed, {}};
-    }
-
-    void Registered(TActorSystem* /* sys */, const TActorId& /* selfId */) override {
-        // Uploader = sys->Register(CreateUploaderFn(), TMailboxType::HTSwap, AppData()->BatchPoolId);
-        //
-        auto* workerActor = NKikimr::NReplication::NService::CreateWorker(
-            SelfId(),
-            SelfId(),
-            CreateWriterFactory());
-
-        Worker = TlsActivationContext->AsActorContext().RegisterWithSameMailbox(workerActor);
-
-
-        State.Set(ES_REGISTERED);
-        MaybeReady();
-    }
-
-    EScan Seek(TLead& lead, ui64) noexcept override {
-        lead.To(Scheme->Tags(), {}, NTable::ESeek::Lower);
-        // Buffer->Clear();
-
-        State.Set(ES_INITIALIZED);
-        MaybeReady();
-
-        Spent->Alter(true);
-        return EScan::Feed;
-    }
-
-    EScan Feed(TArrayRef<const TCell>, const TRow& /* row */) noexcept override {
-        // if (!Buffer->Collect(row)) {
-        //     Success = false;
-        //     Error = Buffer->GetError();
-        //     EXPORT_LOG_E("Error read data from table: " << Error);
-        //     return EScan::Final;
-        // }
-
-        return MaybeSendBuffer();
-    }
-
-    EScan Exhausted() noexcept override {
-        State.Set(ES_NO_MORE_DATA);
-        return MaybeSendBuffer();
-    }
-
-    TAutoPtr<IDestructable> Finish(EAbort abort) noexcept override {
-        auto outcome = EExportOutcome::Success;
-        if (abort != EAbort::None) {
-            outcome = EExportOutcome::Aborted;
-        } else if (!Success) {
-            outcome = EExportOutcome::Error;
-        }
-
-        PassAway();
-        return new TExportScanProduct(outcome, Error, Stats->BytesRead, Stats->Rows);
-    }
-
-    void PassAway() override {
-        if (const auto& actorId = std::exchange(Uploader, {})) {
-            Send(actorId, new TEvents::TEvPoisonPill());
-        }
-
-        IActorCallback::PassAway();
-    }
-
-    STATEFN(StateWork) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(TEvExportScan::TEvReset, Handle);
-            hFunc(TEvExportScan::TEvFeed, Handle);
-            hFunc(TEvExportScan::TEvFinish, Handle);
-        }
-    }
-
-private:
-    const ::NKikimrSchemeOp::TRestoreIncrementalBackup Config;
-    TActorId Uploader;
-    TActorId Worker;
-    THolder<TStats> Stats;
-
-    IDriver* Driver;
-    TIntrusiveConstPtr<TScheme> Scheme;
-    TAutoPtr<TSpent> Spent;
-
-    TBitMap<EStateBits::ES_COUNT> State;
-    bool Success;
-    TString Error;
-
-}; // TExportScan
-
-NTable::IScan* CreateDirectReplicationScan(const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup) {
-    return new TDirectReplicationScan(incrBackup);
+THolder<NTable::IScan> CreateDirectReplicationScan(TDataShard& self, const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup) {
+    TPathId tablePathId = PathIdFromPathId(incrBackup.GetSrcPathId());
+    TPathId dstTablePathId = PathIdFromPathId(incrBackup.GetDstPathId());
+    return self.CreateVolatileStreamScan(tablePathId, dstTablePathId);
 }
 
 ///
 
 class TRestoreIncrementalBackupSrcUnit : public TExecutionUnit {
+    THolder<TEvChangeExchange::TEvAddSender> AddSender;
 protected:
     bool IsRelevant(TActiveTransaction* tx) const {
         return tx->GetSchemeTx().HasRestoreIncrementalBackupSrc();
@@ -335,6 +79,9 @@ protected:
         const ui32 localTableId = DataShard.GetUserTables().at(tableId)->LocalTid;
         Y_ABORT_UNLESS(txc.DB.GetScheme().GetTableInfo(localTableId));
 
+        Y_ABORT_UNLESS(restoreSrc.HasDstPathId());
+        // const TPathId dstTableId = PathIdFromPathId(restoreSrc.GetDstPathId());
+
         auto* appData = AppData(ctx);
         const auto& columns = DataShard.GetUserTables().at(tableId)->Columns;
         std::shared_ptr<::NKikimr::NDataShard::IExport> exp; // TODO: decouple from export
@@ -355,7 +102,8 @@ protected:
         // };
 
         // THolder<IBuffer> buffer{exp->CreateBuffer()};
-        THolder<NTable::IScan> scan{CreateDirectReplicationScan(restoreSrc)};
+        //
+        THolder<NTable::IScan> scan{CreateDirectReplicationScan(DataShard, restoreSrc)};
 
         // FIXME:
 
@@ -378,6 +126,16 @@ protected:
                 .SetReadAhead(readAheadLo, readAheadHi)
                 .SetReadPrio(TScanOptions::EReadPrio::Low)
         ));
+
+        // AddSender.Reset(new TEvChangeExchange::TEvAddSender(
+        //     TTableId(DataShard.GetPathOwnerId(), tableId),
+        //     TEvChangeExchange::ESenderType::IncrRestore,
+        //     dstTableId
+        // ));
+
+        // if (AddSender) {
+        //     ctx.Send(DataShard.GetChangeSender(), AddSender.Release());
+        // }
 
         return true;
     }

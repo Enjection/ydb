@@ -5,6 +5,8 @@
 #include <ydb/core/scheme/scheme_pathid.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
 #include <ydb/core/tablet_flat/flat_cxx_database.h>
+#include <ydb/core/tablet_flat/flat_scan_iface.h>
+#include <ydb/core/tx/datashard/datashard_user_table.h>
 
 #include <util/generic/hash.h>
 #include <util/generic/maybe.h>

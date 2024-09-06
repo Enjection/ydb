@@ -2126,6 +2126,10 @@ public:
         return LogThrottlers[type];
     };
 
+    THolder<NTable::IScan> CreateVolatileStreamScan(
+            TPathId tablePathId,
+            const TPathId& streamPathId);
+
 private:
     ///
     class TLoanReturnTracker {

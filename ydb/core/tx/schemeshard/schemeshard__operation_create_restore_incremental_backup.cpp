@@ -140,22 +140,26 @@ class TConfigurePartsAtTable: public TSubOperationState {
 
 protected:
     // FIXME
-    void FillNotice(const TPathId& pathId, NKikimrTxDataShard::TFlatSchemeTransaction& tx, TOperationContext& context) const {
+    void FillNotice(
+        const TPathId& pathId,
+        NKikimrTxDataShard::TFlatSchemeTransaction& tx,
+        TOperationContext& context) const
+    {
         Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
         auto path = context.SS->PathsById.at(pathId);
 
         Y_ABORT_UNLESS(context.SS->Tables.contains(pathId));
         auto table = context.SS->Tables.at(pathId);
 
-        auto& notice = *tx.MutableRestoreIncrementalBackupSrc();
-        PathIdFromPathId(pathId, notice.MutableSrcPathId());
+        tx.MutableRestoreIncrementalBackupSrc()->CopyFrom(RestoreOp);
 
         // TODO: copy op to notice
     }
 
 public:
-    explicit TConfigurePartsAtTable(TOperationId id)
+    explicit TConfigurePartsAtTable(TOperationId id, const NKikimrSchemeOp::TRestoreIncrementalBackup& restoreOp)
         : OperationId(id)
+        , RestoreOp(restoreOp)
     {
         IgnoreMessages(DebugHint(), {});
     }
@@ -206,7 +210,7 @@ public:
 
 private:
     const TOperationId OperationId;
-
+    const NKikimrSchemeOp::TRestoreIncrementalBackup RestoreOp;
 }; // TConfigurePartsAtTable
 
 class TProposeAtTable: public TSubOperationState {
@@ -379,7 +383,7 @@ class TNewRestoreFromAtTable: public TSubOperation {
         switch (state) {
         case TTxState::Waiting:
         case TTxState::ConfigureParts:
-            return MakeHolder<TConfigurePartsAtTable>(OperationId);
+            return MakeHolder<TConfigurePartsAtTable>(OperationId, Transaction.GetRestoreIncrementalBackup());
         case TTxState::Propose:
             return MakeHolder<TProposeAtTable>(OperationId);
         case TTxState::ProposedWaitParts:
@@ -406,12 +410,16 @@ public:
         const auto& workingDir = Transaction.GetWorkingDir();
         const auto& op = Transaction.GetRestoreIncrementalBackup();
         const auto& tableName = op.GetSrcTableName();
+        const auto& dstTableName = op.GetDstTableName();
 
         // LOG_N("TNewRestoreFromAtTable Propose"
         //     << ": opId# " << OperationId
         //     << ", stream# " << workingDir << "/" << tableName << "/" << streamName);
 
-        auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), context.SS->TabletID());
+        auto result = MakeHolder<TProposeResponse>(
+            NKikimrScheme::StatusAccepted,
+            ui64(OperationId.GetTxId()),
+            context.SS->TabletID());
 
         const auto workingDirPath = TPath::Resolve(workingDir, context.SS);
         // {
@@ -459,6 +467,7 @@ public:
         //         return result;
         //     }
         // }
+        const auto dstTablePath = workingDirPath.Child(dstTableName);
 
         TString errStr;
         if (!context.SS->CheckApplyIf(Transaction, errStr)) {
@@ -593,6 +602,9 @@ TVector<ISubOperation::TPtr> CreateRestoreIncrementalBackup(TOperationId opId, c
     {
         auto outTx = TransactionTemplate(workingDirPath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpCreateCdcStreamAtTable);
         outTx.MutableRestoreIncrementalBackup()->CopyFrom(restoreOp);
+        auto& restoreOp = *outTx.MutableRestoreIncrementalBackup();
+        PathIdFromPathId(srcTablePath.Base()->PathId, restoreOp.MutableSrcPathId());
+        PathIdFromPathId(dstTablePath.Base()->PathId, restoreOp.MutableDstPathId());
         result.push_back(MakeSubOperation<NIncrBackup::TNewRestoreFromAtTable>(NextPartId(opId, result), outTx));
     }
 

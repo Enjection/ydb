@@ -49,6 +49,7 @@ struct TEvChangeExchange {
     enum class ESenderType {
         AsyncIndex,
         CdcStream,
+        IncrRestore,
     };
 
     struct TEvAddSender: public TEventLocal<TEvAddSender, EvAddSender> {
