@@ -33,6 +33,9 @@ struct TEvChangeExchange {
         // Split/merge
         EvSplitAck,
 
+        EvNoMoreData,
+        EvAllSent,
+
         EvEnd,
     };
 
@@ -44,6 +47,8 @@ struct TEvChangeExchange {
     struct TEvStatus: public TEventPB<TEvStatus, NKikimrChangeExchange::TEvStatus, EvStatus> {};
     struct TEvActivateSender: public TEventPB<TEvActivateSender, NKikimrChangeExchange::TEvActivateSender, EvActivateSender> {};
     struct TEvActivateSenderAck: public TEventPB<TEvActivateSenderAck, NKikimrChangeExchange::TEvActivateSenderAck, EvActivateSenderAck> {};
+    struct TEvNoMoreData: public TEventLocal<TEvNoMoreData, EvNoMoreData> {};
+    struct TEvAllSent: public TEventLocal<TEvAllSent, EvAllSent> {};
 
     /// Local events
     enum class ESenderType {

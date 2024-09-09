@@ -26,10 +26,10 @@ using namespace NExportScan;
 
 ///
 
-THolder<NTable::IScan> CreateDirectReplicationScan(TDataShard& self, const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup) {
+THolder<NTable::IScan> CreateDirectReplicationScan(TDataShard& self, const ::NKikimrSchemeOp::TRestoreIncrementalBackup& incrBackup, ui64 txId) {
     TPathId tablePathId = PathIdFromPathId(incrBackup.GetSrcPathId());
     TPathId dstTablePathId = PathIdFromPathId(incrBackup.GetDstPathId());
-    return self.CreateVolatileStreamScan(tablePathId, dstTablePathId);
+    return self.CreateVolatileStreamScan(tablePathId, dstTablePathId, txId);
 }
 
 ///
@@ -70,6 +70,8 @@ protected:
         TActiveTransaction* tx = dynamic_cast<TActiveTransaction*>(op.Get());
         Y_VERIFY_S(tx, "cannot cast operation of kind " << op->GetKind());
 
+        Y_ABORT_UNLESS(!DataShard.RestoreStarted, "uh-oh");
+
         Y_ABORT_UNLESS(tx->GetSchemeTx().HasRestoreIncrementalBackupSrc());
         const auto& restoreSrc = tx->GetSchemeTx().GetRestoreIncrementalBackupSrc();
 
@@ -103,7 +105,7 @@ protected:
 
         // THolder<IBuffer> buffer{exp->CreateBuffer()};
         //
-        THolder<NTable::IScan> scan{CreateDirectReplicationScan(DataShard, restoreSrc)};
+        THolder<NTable::IScan> scan{CreateDirectReplicationScan(DataShard, restoreSrc, op->GetTxId())};
 
         // FIXME:
 
@@ -119,6 +121,8 @@ protected:
         if (ui64 readAheadHiOverride = DataShard.GetBackupReadAheadHiOverride(); readAheadHiOverride > 0) {
             readAheadHi = readAheadHiOverride;
         }
+
+        DataShard.RestoreStarted = true;
 
         tx->SetScanTask(DataShard.QueueScan(localTableId, scan.Release(), op->GetTxId(),
             TScanOptions()
@@ -266,8 +270,15 @@ protected:
     void Complete(TOperation::TPtr, const TActorContext&) override final {
     }
 
+
+    void Handle(TEvDataShard::TEvRestoreFinished::TPtr& ev, TOperation::TPtr op, const TActorContext& ctx) {
+        Y_UNUSED(ev, op, ctx);
+        ResetWaiting(op);
+    }
+
     void ProcessEvent(TAutoPtr<NActors::IEventHandle>& ev, TOperation::TPtr op, const TActorContext& ctx) {
         switch (ev->GetTypeRewrite()) {
+            OHFunc(TEvDataShard::TEvRestoreFinished, Handle);
             // OHFunc(TEvCancel, Handle);
         }
         Y_UNUSED(op, ctx);

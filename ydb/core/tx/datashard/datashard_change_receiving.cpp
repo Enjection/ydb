@@ -305,7 +305,14 @@ class TDataShard::TTxApplyChangeRecords: public TTransactionBase<TDataShard> {
                 return false;
         }
 
-        txc.DB.Update(tableInfo.LocalTid, rop, Key, Value, TRowVersion(record.GetStep(), record.GetTxId()));
+        if (!MvccReadWriteVersion) {
+            auto [readVersion, writeVersion] = Self->GetReadWriteVersions();
+            Y_DEBUG_ABORT_UNLESS(readVersion == writeVersion);
+            MvccReadWriteVersion = writeVersion;
+            Pipeline.AddCommittingOp(*MvccReadWriteVersion);
+        }
+
+        txc.DB.Update(tableInfo.LocalTid, rop, Key, Value, *MvccReadWriteVersion);
         Self->GetConflictsCache().GetTableCache(tableInfo.LocalTid).RemoveUncommittedWrites(KeyCells.GetCells(), txc.DB);
         tableInfo.Stats.UpdateTime = TAppData::TimeProvider->Now();
         AddRecordStatus(ctx, record.GetOrder(), NKikimrChangeExchange::TEvStatus::STATUS_OK);
@@ -314,8 +321,9 @@ class TDataShard::TTxApplyChangeRecords: public TTransactionBase<TDataShard> {
     }
 
 public:
-    explicit TTxApplyChangeRecords(TDataShard* self, TEvChangeExchange::TEvApplyRecords::TPtr ev)
+    explicit TTxApplyChangeRecords(TDataShard* self, TPipeline& pipeline, TEvChangeExchange::TEvApplyRecords::TPtr ev)
         : TTransactionBase(self)
+        , Pipeline(pipeline)
         , Ev(std::move(ev))
         , Status(new TEvChangeExchange::TEvStatus)
     {
@@ -392,6 +400,10 @@ public:
     void Complete(const TActorContext& ctx) override {
         Y_ABORT_UNLESS(Status);
 
+        if (MvccReadWriteVersion) {
+            Pipeline.RemoveCommittingOp(*MvccReadWriteVersion);
+        }
+
         if (Status->Record.GetStatus() == NKikimrChangeExchange::TEvStatus::STATUS_OK) {
             Self->IncCounter(COUNTER_CHANGE_EXCHANGE_SUCCESSFUL_APPLY);
         } else {
@@ -402,6 +414,7 @@ public:
     }
 
 private:
+    TPipeline& Pipeline;
     TEvChangeExchange::TEvApplyRecords::TPtr Ev;
     THolder<TEvChangeExchange::TEvStatus> Status;
 
@@ -410,7 +423,7 @@ private:
 
     TVector<TRawTypeValue> Key;
     TVector<NTable::TUpdateOp> Value;
-
+    std::optional<TRowVersion> MvccReadWriteVersion;
 }; // TTxApplyChangeRecords
 
 void TDataShard::StartCollectingChangeExchangeHandshakes(const TActorContext& ctx) {
@@ -446,7 +459,7 @@ void TDataShard::Handle(TEvChangeExchange::TEvApplyRecords::TPtr& ev, const TAct
         << ": origin# " << ev->Get()->Record.GetOrigin()
         << ", generation# " << ev->Get()->Record.GetGeneration()
         << ", at tablet# " << TabletID());
-    Execute(new TTxApplyChangeRecords(this, ev), ctx);
+    Execute(new TTxApplyChangeRecords(this, Pipeline, ev), ctx);
 }
 
 }

@@ -1392,6 +1392,8 @@ class TDataShard
 
     void Handle(TEvPrivate::TEvRemoveSchemaSnapshots::TPtr& ev, const TActorContext& ctx);
 
+    void Handle(TEvDataShard::TEvRestoreFinished::TPtr& ev, const TActorContext& ctx);
+
     void HandleByReplicationSourceOffsetsServer(STATEFN_SIG);
 
     void DoPeriodicTasks(const TActorContext &ctx);
@@ -2128,7 +2130,8 @@ public:
 
     THolder<NTable::IScan> CreateVolatileStreamScan(
             TPathId tablePathId,
-            const TPathId& streamPathId);
+            const TPathId& streamPathId,
+            ui64 txId);
 
 private:
     ///
@@ -2967,6 +2970,9 @@ private:
     ui32 StatisticsScanTableId = 0;
     ui64 StatisticsScanId = 0;
 
+    bool RestoreStarted = false;
+    bool RestoreFinished = false;
+
 public:
     auto& GetLockChangeRecords() {
         return LockChangeRecords;
@@ -3158,6 +3164,7 @@ protected:
             HFunc(NStat::TEvStatistics::TEvStatisticsRequest, Handle);
             HFunc(TEvPrivate::TEvStatisticsScanFinished, Handle);
             HFuncTraced(TEvPrivate::TEvRemoveSchemaSnapshots, Handle);
+            HFunc(TEvDataShard::TEvRestoreFinished, Handle);
             default:
                 if (!HandleDefaultEvents(ev, SelfId())) {
                     ALOG_WARN(NKikimrServices::TX_DATASHARD, "TDataShard::StateWork unhandled event type: " << ev->GetTypeRewrite() << " event: " << ev->ToString());

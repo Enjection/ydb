@@ -482,6 +482,7 @@ class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeReco
             hFunc(TEvents::TEvWakeup, Start);
             hFunc(NChangeExchange::TEvChangeExchange::TEvRequestRecords, Handle);
             IgnoreFunc(NChangeExchange::TEvChangeExchange::TEvRemoveRecords);
+            hFunc(TEvChangeExchange::TEvAllSent, Handle);
             // IgnoreFunc(TDataShard::TEvPrivate::TEvConfirmReadonlyLease);
             default: Y_ABORT("unexpected event Type# 0x%08" PRIx32, ev->GetTypeRewrite());
         }
@@ -489,6 +490,10 @@ class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeReco
 
     void Start(TEvents::TEvWakeup::TPtr&) {
         Driver->Touch(EScan::Feed);
+    }
+
+    void Handle(TEvChangeExchange::TEvAllSent::TPtr&) {
+        Driver->Touch(EScan::Final);
     }
 
     void Handle(NChangeExchange::TEvChangeExchange::TEvRequestRecords::TPtr& ev) {
@@ -502,7 +507,7 @@ class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeReco
             records.emplace_back(it->second);
         }
 
-        Send(ChangeSender, new NChangeExchange::TEvChangeExchange::TEvRecords(std::make_shared<TChangeRecordContainer<NKikimr::NDataShard::TChangeRecord>>(std::move(records))));
+        Send(ev->Sender, new NChangeExchange::TEvChangeExchange::TEvRecords(std::make_shared<TChangeRecordContainer<NKikimr::NDataShard::TChangeRecord>>(std::move(records))));
     }
 
     void Handle(TEvDataShard::TEvCdcStreamScanRequest::TPtr& ev) {
@@ -572,7 +577,7 @@ class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeReco
                 } else {
                     Serialize(body, ERowOp::Erase, key, keyTags, {});
                 }
-                auto recordPtr = TChangeRecordBuilder(TChangeRecord::EKind::CdcDataChange)
+                auto recordPtr = TChangeRecordBuilder(TChangeRecord::EKind::AsyncIndex)
                     .WithOrder(++Order)
                     .WithGroup(0)
                     .WithStep(ReadVersion.Step)
@@ -594,6 +599,10 @@ class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeReco
             Send(ChangeSender, new NChangeExchange::TEvChangeExchange::TEvEnqueueRecords(records));
             // Self->MaybeActivateChangeSender(TlsActivationContext->AsActorContext());
             // Self->EnqueueChangeRecords(std::move(changeRecords), reservationCookie);
+
+            if (NoMoreData) {
+                Send(ChangeSender, new TEvChangeExchange::TEvNoMoreData());
+            }
 
             return NoMoreData ? EScan::Sleep : EScan::Feed;
         }
@@ -733,6 +742,10 @@ public:
     EScan Exhausted() noexcept override {
         NoMoreData = true;
 
+        if (!Buffer && IncrRestore) {
+            return EScan::Sleep;
+        }
+
         if (!Buffer) {
             return EScan::Final;
         }
@@ -741,6 +754,10 @@ public:
     }
 
     TAutoPtr<IDestructable> Finish(EAbort abort) noexcept override {
+        if (IncrRestore) {
+            Send(DataShard.ActorId, new TEvDataShard::TEvRestoreFinished{TxId});
+        }
+
         if (abort != EAbort::None) {
             Reply(NKikimrTxDataShard::TEvCdcStreamScanResponse::ABORTED);
         } else {
@@ -942,14 +959,23 @@ void TDataShard::Handle(TEvPrivate::TEvCdcStreamScanProgress::TPtr& ev, const TA
     Execute(new TTxCdcStreamScanProgress(this, ev), ctx);
 }
 
+void TDataShard::Handle(TEvDataShard::TEvRestoreFinished::TPtr& ev, const TActorContext& ctx) {
+    RestoreFinished = true;
+
+    TOperation::TPtr op = Pipeline.FindOp(ev->Get()->TxId);
+    if (op) {
+        ForwardEventToOperation(ev, op, ctx);
+    }
+}
+
 THolder<NTable::IScan> TDataShard::CreateVolatileStreamScan(
         TPathId tablePathId,
-        const TPathId& streamPathId)
+        const TPathId& streamPathId,
+        ui64 txId)
 {
-    const ui64 localTxId = NextTieBreakerIndex++;
     return MakeHolder<TCdcStreamScan>(
         this,
-        localTxId,
+        txId, // why not tie breaker?
         tablePathId,
         streamPathId);
 }

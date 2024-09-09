@@ -63,7 +63,11 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
 
     void Handshake() {
         if (NoLease) {
-            Become(&TThis::StateWaitingRecords);
+            auto handshake = MakeHolder<TEvChangeExchange::TEvHandshake>();
+            handshake->Record.SetOrigin(DataShard.TabletId);
+            handshake->Record.SetGeneration(DataShard.Generation);
+            Send(LeaderPipeCache, new TEvPipeCache::TEvForward(handshake.Release(), ShardId, true));
+            Become(&TThis::StateHandshake);
             return;
         }
         Send(DataShard.ActorId, new TDataShard::TEvPrivate::TEvConfirmReadonlyLease, 0, ++LeaseConfirmationCookie);
@@ -126,7 +130,6 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
     }
 
     void Handle(NChangeExchange::TEvChangeExchange::TEvRecords::TPtr& ev) {
-        Y_ABORT("got records?");
         LOG_D("Handle " << ev->Get()->ToString());
 
         auto records = MakeHolder<TEvChangeExchange::TEvApplyRecords>();
@@ -159,8 +162,9 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
         record.SetPathOwnerId(IndexTablePathId.OwnerId);
         record.SetLocalPathId(IndexTablePathId.LocalPathId);
 
-        Y_ABORT_UNLESS(record.HasAsyncIndex());
-        AdjustTags(*record.MutableAsyncIndex());
+       // // record.MutableAsyncIndex(); // FIXME(+active)
+        // Y_ABORT_UNLESS(record.HasAsyncIndex());
+        // AdjustTags(*record.MutableAsyncIndex());
     }
 
     void AdjustTags(NKikimrChangeExchange::TDataChange& record) const {
@@ -203,7 +207,6 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
         switch (record.GetStatus()) {
         case NKikimrChangeExchange::TEvStatus::STATUS_OK:
             LastRecordOrder = record.GetLastRecordOrder();
-            Y_ABORT("done?");
             return Ready();
         // TODO: REJECT?
         default:
@@ -727,7 +730,20 @@ class TAsyncIndexChangeSenderMain
     /// Main
 
     STATEFN(StateMain) {
-        return StateBase(ev);
+        switch (ev->GetTypeRewrite()) {
+            hFunc(TEvChangeExchange::TEvNoMoreData, Handle);
+        default:
+            return StateBase(ev);
+        }
+    }
+
+    void Handle(TEvChangeExchange::TEvNoMoreData::TPtr& ev) {
+        LOG_D("Handle " << ev->Get()->ToString());
+        NoMoreData = true;
+
+        if (AllReady()) {
+            Send(DataShard.ActorId, new TEvChangeExchange::TEvAllSent());
+        }
     }
 
     void Resolve() override {
@@ -761,6 +777,10 @@ class TAsyncIndexChangeSenderMain
     void Handle(NChangeExchange::TEvChangeExchangePrivate::TEvReady::TPtr& ev) {
         LOG_D("Handle " << ev->Get()->ToString());
         OnReady(ev->Get()->PartitionId);
+
+        if (NoMoreData && AllReady()) {
+            Send(DataShard.ActorId, new TEvChangeExchange::TEvAllSent());
+        }
     }
 
     void Handle(NChangeExchange::TEvChangeExchangePrivate::TEvGone::TPtr& ev) {
@@ -835,6 +855,7 @@ private:
     const TDataShardId DataShard;
     const TTableId UserTableId;
     mutable TMaybe<TString> LogPrefix;
+    bool NoMoreData = false;
 
     THashMap<TString, TTag> MainColumnToTag;
     TMap<TTag, TTag> TagMap; // from main to index
