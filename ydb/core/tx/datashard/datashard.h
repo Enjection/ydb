@@ -332,6 +332,8 @@ struct TEvDataShard {
         EvSampleKRequest,
         EvSampleKResponse,
 
+        EvRestoreFinished,
+
         EvEnd
     };
 
@@ -1715,6 +1717,18 @@ struct TEvDataShard {
             Record.SetStatus(status);
             Record.SetErrorDescription(error);
         }
+    };
+
+    struct TEvRestoreFinished
+        : public TEventLocal<TEvRestoreFinished,
+                          EvRestoreFinished>
+    {
+        TEvRestoreFinished(ui64 txId)
+            : TxId(txId)
+        { }
+
+        ui64 TxId;
+        // todo restore tx id + persist
     };
 };
 

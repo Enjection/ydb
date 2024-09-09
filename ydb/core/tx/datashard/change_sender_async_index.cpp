@@ -62,6 +62,14 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
     /// Handshake
 
     void Handshake() {
+        if (NoLease) {
+            auto handshake = MakeHolder<TEvChangeExchange::TEvHandshake>();
+            handshake->Record.SetOrigin(DataShard.TabletId);
+            handshake->Record.SetGeneration(DataShard.Generation);
+            Send(LeaderPipeCache, new TEvPipeCache::TEvForward(handshake.Release(), ShardId, true));
+            Become(&TThis::StateHandshake);
+            return;
+        }
         Send(DataShard.ActorId, new TDataShard::TEvPrivate::TEvConfirmReadonlyLease, 0, ++LeaseConfirmationCookie);
         Become(&TThis::StateHandshake);
     }
@@ -154,8 +162,9 @@ class TAsyncIndexChangeSenderShard: public TActorBootstrapped<TAsyncIndexChangeS
         record.SetPathOwnerId(IndexTablePathId.OwnerId);
         record.SetLocalPathId(IndexTablePathId.LocalPathId);
 
-        Y_ABORT_UNLESS(record.HasAsyncIndex());
-        AdjustTags(*record.MutableAsyncIndex());
+       // // record.MutableAsyncIndex(); // FIXME(+active)
+        // Y_ABORT_UNLESS(record.HasAsyncIndex());
+        // AdjustTags(*record.MutableAsyncIndex());
     }
 
     void AdjustTags(NKikimrChangeExchange::TDataChange& record) const {
@@ -286,7 +295,7 @@ public:
     }
 
     TAsyncIndexChangeSenderShard(const TActorId& parent, const TDataShardId& dataShard, ui64 shardId,
-            const TPathId& indexTablePathId, const TMap<TTag, TTag>& tagMap)
+            const TPathId& indexTablePathId, const TMap<TTag, TTag>& tagMap, bool noLease = false)
         : Parent(parent)
         , DataShard(dataShard)
         , ShardId(shardId)
@@ -294,6 +303,7 @@ public:
         , TagMap(tagMap)
         , LeaseConfirmationCookie(0)
         , LastRecordOrder(0)
+        , NoLease(noLease)
     {
     }
 
@@ -327,6 +337,7 @@ private:
     static constexpr auto MaxDelay = TDuration::MilliSeconds(50);
     ui32 Attempt = 0;
     TDuration Delay = TDuration::MilliSeconds(10);
+    bool NoLease;
 
 }; // TAsyncIndexChangeSenderShard
 
@@ -507,7 +518,11 @@ class TAsyncIndexChangeSenderMain
         request->ResultSet.emplace_back(MakeNavigateEntry(PathId, TNavigate::OpList));
 
         Send(MakeSchemeCacheID(), new TEvNavigate(request.Release()));
-        Become(&TThis::StateResolveIndex);
+        if (!IncrRestore) {
+            Become(&TThis::StateResolveIndex);
+        } else {
+            Become(&TThis::StateResolveIndexTable);
+        }
     }
 
     STATEFN(StateResolveIndex) {
@@ -599,7 +614,9 @@ class TAsyncIndexChangeSenderMain
 
         const auto& entry = result->ResultSet.at(0);
 
-        if (!CheckTableId(entry, IndexTablePathId)) {
+        if (IncrRestore && !CheckTableId(entry, PathId)) {
+            return;
+        } else if (!IncrRestore && !CheckTableId(entry, IndexTablePathId)) {
             return;
         }
 
@@ -611,6 +628,7 @@ class TAsyncIndexChangeSenderMain
             return;
         }
 
+        // FIXME(+active)
         TagMap.clear();
         TVector<NScheme::TTypeInfo> keyColumnTypes;
 
@@ -680,7 +698,9 @@ class TAsyncIndexChangeSenderMain
 
         auto& entry = result->ResultSet.at(0);
 
-        if (!CheckTableId(entry, IndexTablePathId)) {
+        if (IncrRestore && !CheckTableId(entry, PathId)) {
+            return;
+        } else if (!IncrRestore && !CheckTableId(entry, IndexTablePathId)) {
             return;
         }
 
@@ -700,13 +720,30 @@ class TAsyncIndexChangeSenderMain
         KeyDesc = std::move(entry.KeyDescription);
         CreateSenders(MakePartitionIds(KeyDesc->GetPartitions()), versionChanged);
 
+        if (IncrRestore) {
+            Send(DataShard.ActorId, new TEvents::TEvWakeup);
+        }
+
         Become(&TThis::StateMain);
     }
 
     /// Main
 
     STATEFN(StateMain) {
-        return StateBase(ev);
+        switch (ev->GetTypeRewrite()) {
+            hFunc(TEvChangeExchange::TEvNoMoreData, Handle);
+        default:
+            return StateBase(ev);
+        }
+    }
+
+    void Handle(TEvChangeExchange::TEvNoMoreData::TPtr& ev) {
+        LOG_D("Handle " << ev->Get()->ToString());
+        NoMoreData = true;
+
+        if (AllReady()) {
+            Send(DataShard.ActorId, new TEvChangeExchange::TEvAllSent());
+        }
     }
 
     void Resolve() override {
@@ -718,7 +755,7 @@ class TAsyncIndexChangeSenderMain
     }
 
     IActor* CreateSender(ui64 partitionId) const override {
-        return new TAsyncIndexChangeSenderShard(SelfId(), DataShard, partitionId, IndexTablePathId, TagMap);
+        return new TAsyncIndexChangeSenderShard(SelfId(), DataShard, partitionId, IncrRestore ? PathId : IndexTablePathId, TagMap, IncrRestore);
     }
 
     void Handle(NChangeExchange::TEvChangeExchange::TEvEnqueueRecords::TPtr& ev) {
@@ -740,6 +777,10 @@ class TAsyncIndexChangeSenderMain
     void Handle(NChangeExchange::TEvChangeExchangePrivate::TEvReady::TPtr& ev) {
         LOG_D("Handle " << ev->Get()->ToString());
         OnReady(ev->Get()->PartitionId);
+
+        if (NoMoreData && AllReady()) {
+            Send(DataShard.ActorId, new TEvChangeExchange::TEvAllSent());
+        }
     }
 
     void Handle(NChangeExchange::TEvChangeExchangePrivate::TEvGone::TPtr& ev) {
@@ -774,12 +815,13 @@ public:
         return NKikimrServices::TActivity::CHANGE_SENDER_ASYNC_INDEX_ACTOR_MAIN;
     }
 
-    explicit TAsyncIndexChangeSenderMain(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& indexPathId)
+    explicit TAsyncIndexChangeSenderMain(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& indexPathId, bool incrRestore = false)
         : TActorBootstrapped()
         , TBaseChangeSender(this, this, this, dataShard.ActorId, indexPathId)
         , DataShard(dataShard)
         , UserTableId(userTableId)
         , IndexTableVersion(0)
+        , IncrRestore(incrRestore)
     {
     }
 
@@ -813,6 +855,7 @@ private:
     const TDataShardId DataShard;
     const TTableId UserTableId;
     mutable TMaybe<TString> LogPrefix;
+    bool NoMoreData = false;
 
     THashMap<TString, TTag> MainColumnToTag;
     TMap<TTag, TTag> TagMap; // from main to index
@@ -820,11 +863,15 @@ private:
     TPathId IndexTablePathId;
     ui64 IndexTableVersion;
     THolder<TKeyDesc> KeyDesc;
-
+    bool IncrRestore;
 }; // TAsyncIndexChangeSenderMain
 
 IActor* CreateAsyncIndexChangeSender(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& indexPathId) {
     return new TAsyncIndexChangeSenderMain(dataShard, userTableId, indexPathId);
+}
+
+IActor* CreateIncrRestoreChangeSender(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& restoreTargetPathId) {
+    return new TAsyncIndexChangeSenderMain(dataShard, userTableId, restoreTargetPathId, true);
 }
 
 }

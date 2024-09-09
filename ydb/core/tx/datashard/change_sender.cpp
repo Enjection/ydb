@@ -59,6 +59,8 @@ class TChangeSender: public TActor<TChangeSender> {
             return Register(CreateAsyncIndexChangeSender(DataShard, userTableId, pathId));
         case ESenderType::CdcStream:
             return Register(CreateCdcStreamChangeSender(DataShard, pathId));
+        case ESenderType::IncrRestore:
+            return Register(CreateIncrRestoreChangeSender(DataShard, userTableId, pathId));
         }
     }
 
@@ -107,6 +109,7 @@ class TChangeSender: public TActor<TChangeSender> {
 
         auto it = Senders.find(msg.PathId);
         if (it != Senders.end()) {
+            Y_ABORT("Trying to create multiple senders");
             Y_ABORT_UNLESS(it->second.UserTableId == msg.UserTableId);
             Y_ABORT_UNLESS(it->second.Type == msg.Type);
             LOG_W("Trying to add duplicate sender"

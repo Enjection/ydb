@@ -1435,6 +1435,9 @@ TOperation::TPtr TPipeline::BuildOperation(TEvDataShard::TEvProposeTransaction::
     tx->Orbit = std::move(ev->Get()->Orbit);
     tx->OperationSpan = std::move(operationSpan);
 
+    const TString msg = TStringBuilder() << "Got " << "<" << tx->IsSchemeTx() << ">" << rec.GetTxBody() << " tx";
+    LOG_ERROR_S(TActivationContext::AsActorContext(), NKikimrServices::TX_DATASHARD, msg);
+
     auto malformed = [&](const TStringBuf txType, const TString& txBody) {
         const TString error = TStringBuilder() << "Malformed " << txType << " tx"
             << " at tablet " << Self->TabletID()

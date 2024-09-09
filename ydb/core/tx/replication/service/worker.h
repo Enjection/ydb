@@ -75,6 +75,11 @@ IActor* CreateWorker(
     std::function<IActor*(void)>&& createReaderFn,
     std::function<IActor*(void)>&& createWriterFn);
 
+IActor* CreateWorker(
+    const TActorId& parent,
+    const TActorId& preparedReader,
+    std::function<IActor*(void)>&& createWriterFn);
+
 }
 
 Y_DECLARE_OUT_SPEC(inline, NKikimr::NReplication::NService::TEvWorker::TEvData::TRecord, o, x) {

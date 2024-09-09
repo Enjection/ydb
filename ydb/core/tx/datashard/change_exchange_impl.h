@@ -6,6 +6,7 @@
 namespace NKikimr {
 namespace NDataShard {
 
+IActor* CreateIncrRestoreChangeSender(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& restoreTargetPathId);
 IActor* CreateAsyncIndexChangeSender(const TDataShardId& dataShard, const TTableId& userTableId, const TPathId& indexPathId);
 IActor* CreateCdcStreamChangeSender(const TDataShardId& dataShard, const TPathId& streamPathId);
 

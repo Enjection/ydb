@@ -1,12 +1,17 @@
 #include "cdc_stream_scan.h"
 #include "change_record_body_serializer.h"
 #include "datashard_impl.h"
+#include "change_exchange_impl.h"
 
 #include <ydb/core/protos/datashard_config.pb.h>
 #include <ydb/core/protos/tx_datashard.pb.h>
 
 #include <util/generic/maybe.h>
 #include <util/string/builder.h>
+
+#undef LOG_D
+#undef LOG_I
+#undef LOG_W
 
 #define LOG_D(stream) LOG_DEBUG_S(ctx, NKikimrServices::TX_DATASHARD, "[CdcStreamScan][" << TabletID() << "] " << stream)
 #define LOG_I(stream) LOG_INFO_S(ctx, NKikimrServices::TX_DATASHARD, "[CdcStreamScan][" << TabletID() << "] " << stream)
@@ -417,7 +422,7 @@ public:
 
 }; // TTxCdcStreamScanProgress
 
-class TCdcStreamScan: public IActorCallback, public IScan {
+class TCdcStreamScan: public IActorCallback, public IScan, protected TChangeRecordBodySerializer {
     using TStats = TCdcStreamScanManager::TStats;
 
     struct TDataShardId {
@@ -474,7 +479,35 @@ class TCdcStreamScan: public IActorCallback, public IScan {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvDataShard::TEvCdcStreamScanRequest, Handle);
             hFunc(TDataShard::TEvPrivate::TEvCdcStreamScanContinue, Handle);
+            hFunc(TEvents::TEvWakeup, Start);
+            hFunc(NChangeExchange::TEvChangeExchange::TEvRequestRecords, Handle);
+            IgnoreFunc(NChangeExchange::TEvChangeExchange::TEvRemoveRecords);
+            hFunc(TEvChangeExchange::TEvAllSent, Handle);
+            // IgnoreFunc(TDataShard::TEvPrivate::TEvConfirmReadonlyLease);
+            default: Y_ABORT("unexpected event Type# 0x%08" PRIx32, ev->GetTypeRewrite());
         }
+    }
+
+    void Start(TEvents::TEvWakeup::TPtr&) {
+        Driver->Touch(EScan::Feed);
+    }
+
+    void Handle(TEvChangeExchange::TEvAllSent::TPtr&) {
+        Driver->Touch(EScan::Final);
+    }
+
+    void Handle(NChangeExchange::TEvChangeExchange::TEvRequestRecords::TPtr& ev) {
+        // LOG_D("Handltypename e " << ev->Get()->ToString());
+
+        TVector<TChangeRecord::TPtr> records(::Reserve(ev->Get()->Records.size()));
+
+        for (const auto& record : ev->Get()->Records) {
+            auto it = PendingRecords.find(record.Order);
+            Y_ABORT_UNLESS(it != PendingRecords.end());
+            records.emplace_back(it->second);
+        }
+
+        Send(ev->Sender, new NChangeExchange::TEvChangeExchange::TEvRecords(std::make_shared<TChangeRecordContainer<NKikimr::NDataShard::TChangeRecord>>(std::move(records))));
     }
 
     void Handle(TEvDataShard::TEvCdcStreamScanRequest::TPtr& ev) {
@@ -482,13 +515,103 @@ class TCdcStreamScan: public IActorCallback, public IScan {
         Reply(NKikimrTxDataShard::TEvCdcStreamScanResponse::IN_PROGRESS);
     }
 
-    void Progress() {
+    static TVector<TRawTypeValue> MakeKey(TArrayRef<const TCell> cells, TUserTable::TCPtr table) {
+        TVector<TRawTypeValue> key(Reserve(cells.size()));
+
+        Y_ABORT_UNLESS(cells.size() == table->KeyColumnTypes.size());
+        for (TPos pos = 0; pos < cells.size(); ++pos) {
+            key.emplace_back(cells.at(pos).AsRef(), table->KeyColumnTypes.at(pos));
+        }
+
+        return key;
+    }
+
+    static std::optional<TVector<TUpdateOp>> MakeRestoreUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TUserTable::TCPtr table) {
+        Y_ABORT_UNLESS(cells.size() >= 1);
+        TVector<TUpdateOp> updates(::Reserve(cells.size() - 1));
+
+        bool foundSpecialColumn = false;
+        Y_ABORT_UNLESS(cells.size() == tags.size());
+        for (TPos pos = 0; pos < cells.size(); ++pos) {
+            const auto tag = tags.at(pos);
+            auto it = table->Columns.find(tag);
+            Y_ABORT_UNLESS(it != table->Columns.end());
+            if (it->second.Name == "__ydb_incrBackupImpl_deleted") {
+                if (const auto& cell = cells.at(pos); !cell.IsNull() && cell.AsValue<bool>()) {
+                    return std::nullopt;
+                }
+                foundSpecialColumn = true;
+                continue;
+            }
+            updates.emplace_back(tag, ECellOp::Set, TRawTypeValue(cells.at(pos).AsRef(), it->second.Type));
+        }
+        Y_ABORT_UNLESS(foundSpecialColumn);
+
+        return updates;
+    }
+
+    EScan Progress() {
         Stats.RowsProcessed += Buffer.Rows();
         Stats.BytesProcessed += Buffer.Bytes();
+
+        if (IncrRestore) {
+            auto& ctx = TlsActivationContext->AsActorContext();
+            auto TabletID = [&]() { return DataShard.TabletId; };
+            LOG_D("IncrRestore@Progress()"
+                << ": Buffer.Rows()# " << Buffer.Rows());
+
+            // auto reservationCookie = Self->ReserveChangeQueueCapacity(Buffer.Rows());
+            auto rows = Buffer.Flush();
+            TVector<IDataShardChangeCollector::TChange> changeRecords;
+            TVector<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords::TRecordInfo> records;
+
+            auto table = Self->GetUserTables().at(TablePathId.LocalPathId);
+            for (auto& [k, v] : rows) {
+                LOG_D("IncrRestore@Progress()#iter"
+                    << ": k.GetCells().size()# " << k.GetCells().size() << ", v.GetCells().size()# " << v.GetCells().size());
+                const auto key = MakeKey(k.GetCells(), table);
+                const auto& keyTags = table->KeyColumnIds;
+                NKikimrChangeExchange::TDataChange body;
+                if (auto updates = MakeRestoreUpdates(v.GetCells(), ValueTags, table); updates) {
+                    Serialize(body, ERowOp::Upsert, key, keyTags, *updates);
+                } else {
+                    Serialize(body, ERowOp::Erase, key, keyTags, {});
+                }
+                auto recordPtr = TChangeRecordBuilder(TChangeRecord::EKind::AsyncIndex)
+                    .WithOrder(++Order)
+                    .WithGroup(0)
+                    .WithStep(ReadVersion.Step)
+                    .WithTxId(ReadVersion.TxId)
+                    .WithPathId(StreamPathId)
+                    .WithTableId(TablePathId)
+                    .WithSchemaVersion(table->GetTableSchemaVersion())
+                    .WithBody(body.SerializeAsString())
+                    .WithSource(TChangeRecord::ESource::InitialScan)
+                    .Build();
+
+                const auto& record = *recordPtr;
+
+                records.emplace_back(record.GetOrder(), record.GetPathId(), record.GetBody().size());
+                // Self->ChangesQueue.emplace(record.GetOrder(), record);
+                PendingRecords.emplace(record.GetOrder(), recordPtr);
+            }
+
+            Send(ChangeSender, new NChangeExchange::TEvChangeExchange::TEvEnqueueRecords(records));
+            // Self->MaybeActivateChangeSender(TlsActivationContext->AsActorContext());
+            // Self->EnqueueChangeRecords(std::move(changeRecords), reservationCookie);
+
+            if (NoMoreData) {
+                Send(ChangeSender, new TEvChangeExchange::TEvNoMoreData());
+            }
+
+            return NoMoreData ? EScan::Sleep : EScan::Feed;
+        }
 
         Send(DataShard.ActorId, new TDataShard::TEvPrivate::TEvCdcStreamScanProgress(
             TablePathId, StreamPathId, ReadVersion, ValueTags, std::move(Buffer.Flush()), Stats
         ));
+
+        return EScan::Sleep;
     }
 
     void Handle(TDataShard::TEvPrivate::TEvCdcStreamScanContinue::TPtr&) {
@@ -526,8 +649,40 @@ public:
         , Driver(nullptr)
         , NoMoreData(false)
         , Stats(stats)
+        , IncrRestore(false)
     {
     }
+
+    static TVector<TTag> InitValueTags(TDataShard* self, const TPathId& tablePathId) {
+        auto table = self->GetUserTables().at(tablePathId.LocalPathId);
+        TVector<TTag> valueTags;
+        valueTags.reserve(table->Columns.size() - 1);
+        for (const auto& [tag, column] : table->Columns) {
+            if (!column.IsKey) {
+                valueTags.push_back(tag);
+            }
+        }
+
+        return valueTags;
+    }
+
+    explicit TCdcStreamScan(
+        TDataShard* self,
+        ui64 txId,
+        const TPathId& tablePathId,
+        const TPathId& streamPathId)
+        : IActorCallback(static_cast<TReceiveFunc>(&TCdcStreamScan::StateWork), NKikimrServices::TActivity::CDC_STREAM_SCAN_ACTOR)
+        , DataShard{self->SelfId(), self->TabletID()}
+        , TxId(txId)
+        , TablePathId(tablePathId)
+        , StreamPathId(streamPathId)
+        , ReadVersion({})
+        , ValueTags(InitValueTags(self, tablePathId))
+        , Limits({})
+        , Stats({})
+        , IncrRestore(true)
+        , Self(self)
+    {}
 
     void Describe(IOutputStream& o) const noexcept override {
         o << "CdcStreamScan {"
@@ -541,11 +696,21 @@ public:
         TlsActivationContext->AsActorContext().RegisterWithSameMailbox(this);
         Driver = driver;
         Y_ABORT_UNLESS(!LastKey || LastKey->GetCells().size() == scheme->Tags(true).size());
+
+        if (IncrRestore) {
+            return {EScan::Sleep, {}};
+        }
+
         return {EScan::Feed, {}};
     }
 
     void Registered(TActorSystem* sys, const TActorId&) override {
-        sys->Send(DataShard.ActorId, new TDataShard::TEvPrivate::TEvCdcStreamScanRegistered(TxId, SelfId()));
+        if (IncrRestore) {
+            auto ds = NKikimr::NDataShard::TDataShardId(Self->TabletID(), Self->Generation(), SelfId());
+            ChangeSender = RegisterWithSameMailbox(CreateIncrRestoreChangeSender(ds, TablePathId, StreamPathId));
+        } else {
+            sys->Send(DataShard.ActorId, new TDataShard::TEvPrivate::TEvCdcStreamScanRegistered(TxId, SelfId()));
+        }
     }
 
     EScan Seek(TLead& lead, ui64) noexcept override {
@@ -577,15 +742,22 @@ public:
     EScan Exhausted() noexcept override {
         NoMoreData = true;
 
+        if (!Buffer && IncrRestore) {
+            return EScan::Sleep;
+        }
+
         if (!Buffer) {
             return EScan::Final;
         }
 
-        Progress();
-        return EScan::Sleep;
+        return Progress();
     }
 
     TAutoPtr<IDestructable> Finish(EAbort abort) noexcept override {
+        if (IncrRestore) {
+            Send(DataShard.ActorId, new TEvDataShard::TEvRestoreFinished{TxId});
+        }
+
         if (abort != EAbort::None) {
             Reply(NKikimrTxDataShard::TEvCdcStreamScanResponse::ABORTED);
         } else {
@@ -611,7 +783,11 @@ private:
     bool NoMoreData;
     TBuffer Buffer;
     TStats Stats;
-
+    bool IncrRestore;
+    TDataShard* Self;
+    ui64 Order = 0;
+    TActorId ChangeSender;
+    TMap<ui64, TChangeRecord::TPtr> PendingRecords;
 }; // TCdcStreamScan
 
 class TDataShard::TTxCdcStreamScanRun: public TTransactionBase<TDataShard> {
@@ -781,6 +957,27 @@ void TDataShard::Handle(TEvPrivate::TEvCdcStreamScanRegistered::TPtr& ev, const 
 
 void TDataShard::Handle(TEvPrivate::TEvCdcStreamScanProgress::TPtr& ev, const TActorContext& ctx) {
     Execute(new TTxCdcStreamScanProgress(this, ev), ctx);
+}
+
+void TDataShard::Handle(TEvDataShard::TEvRestoreFinished::TPtr& ev, const TActorContext& ctx) {
+    RestoreFinished = true;
+
+    TOperation::TPtr op = Pipeline.FindOp(ev->Get()->TxId);
+    if (op) {
+        ForwardEventToOperation(ev, op, ctx);
+    }
+}
+
+THolder<NTable::IScan> TDataShard::CreateVolatileStreamScan(
+        TPathId tablePathId,
+        const TPathId& streamPathId,
+        ui64 txId)
+{
+    return MakeHolder<TCdcStreamScan>(
+        this,
+        txId, // why not tie breaker?
+        tablePathId,
+        streamPathId);
 }
 
 }

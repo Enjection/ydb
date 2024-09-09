@@ -92,6 +92,13 @@ class TWorker: public TActorBootstrapped<TWorker> {
         {
         }
 
+        explicit TActorInfo(const TActorId& actorId)
+            : ActorId(actorId)
+            , InitDone(true)
+            , CreateAttempt(0)
+        {
+        }
+
         operator TActorId() const {
             return ActorId;
         }
@@ -101,7 +108,10 @@ class TWorker: public TActorBootstrapped<TWorker> {
         }
 
         void Register(IActorOps* ops) {
-            ActorId = ops->RegisterWithSameMailbox(CreateFn());
+            if (CreateFn) {
+                ActorId = ops->RegisterWithSameMailbox(CreateFn());
+            }
+
             ops->Send(ActorId, new TEvWorker::TEvHandshake());
             InitDone = false;
             ++CreateAttempt;
@@ -274,6 +284,17 @@ public:
     {
     }
 
+    explicit TWorker(
+            const TActorId& parent,
+            const TActorId& preparedReader,
+            std::function<IActor*(void)>&& createWriterFn)
+        : Parent(parent)
+        , Reader(preparedReader)
+        , Writer(std::move(createWriterFn))
+        , Lag(TDuration::Zero())
+    {
+    }
+
     void Bootstrap() {
         for (auto* actor : {&Reader, &Writer}) {
             actor->Register(this);
@@ -312,6 +333,14 @@ IActor* CreateWorker(
         std::function<IActor*(void)>&& createWriterFn)
 {
     return new TWorker(parent, std::move(createReaderFn), std::move(createWriterFn));
+}
+
+IActor* CreateWorker(
+        const TActorId& parent,
+        const TActorId& preparedReader,
+        std::function<IActor*(void)>&& createWriterFn)
+{
+    return new TWorker(parent, preparedReader, std::move(createWriterFn));
 }
 
 }

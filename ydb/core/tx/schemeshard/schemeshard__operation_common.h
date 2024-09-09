@@ -487,7 +487,7 @@ protected:
 
     TString DebugHint() const override {
         return TStringBuilder() << "TDone"
-            << " opId# " << OperationId;
+            << " opId# " << OperationId << " ";
     }
 
 public:

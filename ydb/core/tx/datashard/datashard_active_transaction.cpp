@@ -366,7 +366,7 @@ void TActiveTransaction::FillTxData(TDataShard *self,
         if (DataTx->HasStreamResponse())
             SetStreamSink(DataTx->GetSink());
     } else if (IsSchemeTx()) {
-        BuildSchemeTx();
+        Y_ABORT_UNLESS(BuildSchemeTx());
     } else if (IsSnapshotTx()) {
         BuildSnapshotTx();
     } else if (IsDistributedEraseTx()) {
@@ -440,7 +440,8 @@ bool TActiveTransaction::BuildSchemeTx()
         + (ui32)SchemeTx->HasCreateCdcStreamNotice()
         + (ui32)SchemeTx->HasAlterCdcStreamNotice()
         + (ui32)SchemeTx->HasDropCdcStreamNotice()
-        + (ui32)SchemeTx->HasMoveIndex();
+        + (ui32)SchemeTx->HasMoveIndex()
+        + (ui32)SchemeTx->HasRestoreIncrementalBackupSrc();
     if (count != 1)
         return false;
 
@@ -476,6 +477,8 @@ bool TActiveTransaction::BuildSchemeTx()
         SchemeTxType = TSchemaOperation::ETypeDropCdcStream;
     else if (SchemeTx->HasMoveIndex())
         SchemeTxType = TSchemaOperation::ETypeMoveIndex;
+    else if (SchemeTx->HasRestoreIncrementalBackupSrc())
+        SchemeTxType = TSchemaOperation::ETypeRestoreIncrementalBackupSrc;
     else
         SchemeTxType = TSchemaOperation::ETypeUnknown;
 
@@ -858,6 +861,7 @@ void TActiveTransaction::BuildExecutionPlan(bool loaded)
         plan.push_back(EExecutionUnitKind::CreateCdcStream);
         plan.push_back(EExecutionUnitKind::AlterCdcStream);
         plan.push_back(EExecutionUnitKind::DropCdcStream);
+        plan.push_back(EExecutionUnitKind::RestoreIncrementalBackupSrc);
         plan.push_back(EExecutionUnitKind::CompleteOperation);
         plan.push_back(EExecutionUnitKind::CompletedOperations);
     } else {
