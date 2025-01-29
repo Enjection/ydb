@@ -133,13 +133,13 @@ void TConfigsManager::Handle(TEvBlobStorage::TEvControllerValidateConfigRequest:
         return;
     }
     auto result = ValidateConfigAndReplaceMetadata(yamlConfig);
-    if (result.ErrorReason || result.HasForbiddenUnknown) {
+    if (result.ErrorReason || !result.UnknownFields.empty()) {
         record.SetStatus(NKikimrBlobStorage::TEvControllerValidateConfigResponse::ConfigNotValid);
         if (!result.ErrorReason) {
             record.SetErrorReason("has forbidden unknown fields");
         } else {
             record.SetErrorReason(*result.ErrorReason);
-            if (result.HasForbiddenUnknown) {
+            if (!result.UnknownFields.empty()) {
                 record.SetErrorReason(record.GetErrorReason() + " + has forbidden unknown fields");
             }
         }

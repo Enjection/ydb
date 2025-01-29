@@ -66,24 +66,25 @@ public:
     bool Execute(TTransactionContext &txc, const TActorContext &ctx) override
     {
         NIceDb::TNiceDb db(txc.DB);
-        TValidateConfigResult result = Self->ValidateConfigAndReplaceMetadata(Config, Force, AllowUnknownFields);
+        TValidateConfigResult result = Self->ValidateConfigAndReplaceMetadata(Config, Force);
+        bool hasForbiddenUnknown = !result.UnknownFields.empty() && !AllowUnknownFields;
         if (result.ErrorReason) {
             HandleError(result.ErrorReason.value(), ctx);
             return true;
         }
 
         try {
-            auto fillResponse = [&](auto& ev, auto errorLevel){
+            auto fillResponse = [&](auto& ev, auto errorLevel) {
                 for (auto& [path, info] : result.UnknownFields) {
                     auto *issue = ev->Record.AddIssues();
-                        issue->set_severity(errorLevel);
-                        issue->set_message(TStringBuilder{} << "Unknown key# " << info.first << " in proto# " << info.second << " found in path# " << path);
+                    issue->set_severity(errorLevel);
+                    issue->set_message(TStringBuilder{} << "Unknown key# " << info.first << " in proto# " << info.second << " found in path# " << path);
                 }
 
                 for (auto& [path, info] : result.DeprecatedFields) {
                     auto *issue = ev->Record.AddIssues();
-                        issue->set_severity(NYql::TSeverityIds::S_WARNING);
-                        issue->set_message(TStringBuilder{} << "Deprecated key# " << info.first << " in proto# " << info.second << " found in path# " << path);
+                    issue->set_severity(NYql::TSeverityIds::S_WARNING);
+                    issue->set_message(TStringBuilder{} << "Deprecated key# " << info.first << " in proto# " << info.second << " found in path# " << path);
                 }
 
                 Response = MakeHolder<NActors::IEventHandle>(Sender, ctx.SelfID, ev.Release());
@@ -95,7 +96,7 @@ public:
             Version = result.Version;
             UpdatedConfig = result.UpdatedConfig;
             Cluster = result.Cluster;
-            Modify = result.Modify;
+            Modify = result.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
             if (!isMainConfig && !isDatabaseConfig) {
                 Error = true;
@@ -158,24 +159,22 @@ public:
                 return true;
             }
 
-            if (result.ValidationFinished) {
-                if (!DryRun && !result.HasForbiddenUnknown) {
-                    DoInternalAudit(txc, ctx);
+            if (!result.ErrorReason && !DryRun && hasForbiddenUnknown) {
+                DoInternalAudit(txc, ctx);
 
-                    db.Table<Schema::YamlConfig>().Key(Version + 1)
-                        .Update<Schema::YamlConfig::Config>(UpdatedConfig)
-                        // set config dropped by default to support rollback to previous versions
-                        // where new config layout is not supported
-                        // it will lead to ignoring config from new versions
-                        .Update<Schema::YamlConfig::Dropped>(true);
+                db.Table<Schema::YamlConfig>().Key(Version + 1)
+                    .Update<Schema::YamlConfig::Config>(UpdatedConfig)
+                    // set config dropped by default to support rollback to previous versions
+                    // where new config layout is not supported
+                    // it will lead to ignoring config from new versions
+                    .Update<Schema::YamlConfig::Dropped>(true);
 
-                    /* Later we shift this boundary to support rollback and history */
-                    db.Table<Schema::YamlConfig>().Key(Version)
-                        .Delete();
-                }
+                /* Later we shift this boundary to support rollback and history */
+                db.Table<Schema::YamlConfig>().Key(Version)
+                    .Delete();
             }
 
-            if (result.HasForbiddenUnknown) {
+            if (hasForbiddenUnknown) {
                 Error = true;
                 auto ev = MakeHolder<TEvConsole::TEvGenericError>();
                 ev->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);

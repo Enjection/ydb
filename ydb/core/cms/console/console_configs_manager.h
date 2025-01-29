@@ -34,14 +34,11 @@ private:
 
     struct TValidateConfigResult {
         std::optional<TString> ErrorReason;
-        bool Modify = false;
         TString UpdatedConfig;
         ui32 Version;
         TString Cluster;
-        bool HasForbiddenUnknown = false;
         TMap<TString, std::pair<TString, TString>> DeprecatedFields;
         TMap<TString, std::pair<TString, TString>> UnknownFields;
-        bool ValidationFinished = false;
     };
 
 public:
@@ -69,7 +66,7 @@ public:
     bool CheckConfig(const NKikimrConsole::TConfigsConfig &config,
                      Ydb::StatusIds::StatusCode &code,
                      TString &error);
-    TValidateConfigResult ValidateConfigAndReplaceMetadata(const TString& config, bool force = false, bool allowUnknownFields = false);
+    TValidateConfigResult ValidateConfigAndReplaceMetadata(const TString& config, bool force = false);
 
     void SendInReply(const TActorId& sender, const TActorId& icSession, std::unique_ptr<IEventBase> ev, ui64 cookie = 0);
 

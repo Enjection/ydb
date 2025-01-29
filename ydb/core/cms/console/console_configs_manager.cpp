@@ -52,13 +52,11 @@ bool TConfigsManager::CheckConfig(const NKikimrConsole::TConfigsConfig &config,
     return true;
 }
 
-TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplaceMetadata(const TString &config, bool force, bool allowUnknownFields) {
+TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplaceMetadata(const TString &config, bool force) {
     TValidateConfigResult result;
     bool isDatabaseConfig = NYamlConfig::IsDatabaseConfig(config);
 
     if (isDatabaseConfig) {
-        result.HasForbiddenUnknown = false;
-        result.ValidationFinished = true;
         return result;
     }
 
@@ -77,10 +75,7 @@ TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplace
                 .Cluster = result.Cluster,
             });
 
-        result.HasForbiddenUnknown = false;
         if (result.UpdatedConfig != YamlConfig || YamlDropped) {
-            result.Modify = true;
-
             auto tree = NFyaml::TDocument::Parse(result.UpdatedConfig);
             auto resolved = NYamlConfig::ResolveAll(tree);
 
@@ -116,13 +111,11 @@ TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplace
                     result.UnknownFields[path] = info;
                 }
             }
-
-            result.HasForbiddenUnknown = !result.UnknownFields.empty() && !allowUnknownFields;
-            result.ValidationFinished = true;
         }
     } catch (const yexception &e) {
         result.ErrorReason = e.what();
     }
+
     return result;
 }
 
@@ -691,6 +684,7 @@ void TConfigsManager::Handle(TEvConsole::TEvToggleConfigValidatorRequest::TPtr &
 
 void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, const TActorContext &ctx)
 {
+    // Validate?
     TxProcessor->ProcessTx(CreateTxReplaceYamlConfig(ev), ctx);
 }
 
