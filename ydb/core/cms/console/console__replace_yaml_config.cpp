@@ -66,22 +66,26 @@ public:
     bool Execute(TTransactionContext &txc, const TActorContext &ctx) override
     {
         NIceDb::TNiceDb db(txc.DB);
-        TValidateConfigResult result = Self->ValidateConfigAndReplaceMetadata(Config, Force);
-        bool hasForbiddenUnknown = !result.UnknownFields.empty() && !AllowUnknownFields;
-        if (result.ErrorReason) {
-            HandleError(result.ErrorReason.value(), ctx);
+
+        TUpdateConfigOpContext opCtx;
+        Self->ReplaceMainConfigMetadata(Config, false, opCtx);
+        Self->ValidateMainConfig(opCtx);
+
+        bool hasForbiddenUnknown = !opCtx.UnknownFields.empty() && !AllowUnknownFields;
+        if (opCtx.Error) {
+            HandleError(opCtx.Error.value(), ctx);
             return true;
         }
 
         try {
             auto fillResponse = [&](auto& ev, auto errorLevel) {
-                for (auto& [path, info] : result.UnknownFields) {
+                for (auto& [path, info] : opCtx.UnknownFields) {
                     auto *issue = ev->Record.AddIssues();
                     issue->set_severity(errorLevel);
                     issue->set_message(TStringBuilder{} << "Unknown key# " << info.first << " in proto# " << info.second << " found in path# " << path);
                 }
 
-                for (auto& [path, info] : result.DeprecatedFields) {
+                for (auto& [path, info] : opCtx.DeprecatedFields) {
                     auto *issue = ev->Record.AddIssues();
                     issue->set_severity(NYql::TSeverityIds::S_WARNING);
                     issue->set_message(TStringBuilder{} << "Deprecated key# " << info.first << " in proto# " << info.second << " found in path# " << path);
@@ -93,10 +97,10 @@ public:
             bool isMainConfig = NYamlConfig::IsMainConfig(Config);
             bool isDatabaseConfig = NYamlConfig::IsDatabaseConfig(Config);
 
-            Version = result.Version;
-            UpdatedConfig = result.UpdatedConfig;
-            Cluster = result.Cluster;
-            Modify = result.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
+            Version = opCtx.Version;
+            UpdatedConfig = opCtx.UpdatedConfig;
+            Cluster = opCtx.Cluster;
+            Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
             if (!isMainConfig && !isDatabaseConfig) {
                 Error = true;
