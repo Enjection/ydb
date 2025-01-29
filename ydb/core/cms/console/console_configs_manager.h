@@ -32,8 +32,8 @@ private:
 
     using TBase = TActorBootstrapped<TConfigsManager>;
 
-    struct TValidateConfigResult {
-        std::optional<TString> ErrorReason;
+    struct TUpdateConfigOpContext {
+        std::optional<TString> Error;
         TString UpdatedConfig;
         ui32 Version;
         TString Cluster;
@@ -66,7 +66,10 @@ public:
     bool CheckConfig(const NKikimrConsole::TConfigsConfig &config,
                      Ydb::StatusIds::StatusCode &code,
                      TString &error);
-    TValidateConfigResult ValidateConfigAndReplaceMetadata(const TString& config, bool force = false);
+
+
+    void ReplaceMainConfigMetadata(const TString &config, bool force, TUpdateConfigOpContext& opCtx);
+    void ValidateMainConfig(TUpdateConfigOpContext& opCtx);
 
     void SendInReply(const TActorId& sender, const TActorId& icSession, std::unique_ptr<IEventBase> ev, ui64 cookie = 0);
 

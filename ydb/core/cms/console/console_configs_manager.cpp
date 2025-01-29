@@ -52,33 +52,37 @@ bool TConfigsManager::CheckConfig(const NKikimrConsole::TConfigsConfig &config,
     return true;
 }
 
-TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplaceMetadata(const TString &config, bool force) {
-    TValidateConfigResult result;
-
+void TConfigsManager::ReplaceMainConfigMetadata(const TString &config, bool force, TUpdateConfigOpContext& opCtx) {
     try {
         if (!force) {
             auto metadata = NYamlConfig::GetMetadata(config);
-            result.Cluster = metadata.Cluster.value_or(TString("unknown"));
-            result.Version = metadata.Version.value_or(0);
+            opCtx.Cluster = metadata.Cluster.value_or(TString("unknown"));
+            opCtx.Version = metadata.Version.value_or(0);
         } else {
-            result.Cluster = ClusterName;
-            result.Version = YamlVersion;
+            opCtx.Cluster = ClusterName;
+            opCtx.Version = YamlVersion;
         }
 
-        result.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMainMetadata{
-                .Version = result.Version + 1,
-                .Cluster = result.Cluster,
+        opCtx.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMainMetadata{
+                .Version = opCtx.Version + 1,
+                .Cluster = opCtx.Cluster,
             });
+    } catch (const yexception &e) {
+        opCtx.Error = e.what();
+    }
+}
 
-        if (result.UpdatedConfig != YamlConfig || YamlDropped) {
-            auto tree = NFyaml::TDocument::Parse(result.UpdatedConfig);
+void TConfigsManager::ValidateMainConfig(TUpdateConfigOpContext& opCtx) {
+    try {
+        if (opCtx.UpdatedConfig != YamlConfig || YamlDropped) {
+            auto tree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
             auto resolved = NYamlConfig::ResolveAll(tree);
 
-            if (ClusterName != result.Cluster) {
+            if (ClusterName != opCtx.Cluster) {
                 ythrow yexception() << "ClusterName mismatch";
             }
 
-            if (result.Version != YamlVersion) {
+            if (opCtx.Version != YamlVersion) {
                 ythrow yexception() << "Version mismatch";
             }
 
@@ -101,17 +105,15 @@ TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplace
 
             for (const auto& [path, info] : unknownFieldsCollector->GetUnknownKeys()) {
                 if (deprecatedPaths.contains(path)) {
-                    result.DeprecatedFields[path] = info;
+                    opCtx.DeprecatedFields[path] = info;
                 } else {
-                    result.UnknownFields[path] = info;
+                    opCtx.UnknownFields[path] = info;
                 }
             }
         }
     } catch (const yexception &e) {
-        result.ErrorReason = e.what();
+        opCtx.Error = e.what();
     }
-
-    return result;
 }
 
 void TConfigsManager::Bootstrap(const TActorContext &ctx)

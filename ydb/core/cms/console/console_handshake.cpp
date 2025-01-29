@@ -132,20 +132,22 @@ void TConfigsManager::Handle(TEvBlobStorage::TEvControllerValidateConfigRequest:
     if (!CheckSession(*ev, response, NKikimrBlobStorage::TEvControllerValidateConfigResponse::IdPipeServerMismatch)) {
         return;
     }
-    auto result = ValidateConfigAndReplaceMetadata(yamlConfig);
-    if (result.ErrorReason || !result.UnknownFields.empty()) {
+    TUpdateConfigOpContext opCtx;
+    ReplaceMainConfigMetadata(yamlConfig, false, opCtx);
+    ValidateMainConfig(opCtx);
+    if (opCtx.Error || !opCtx.UnknownFields.empty()) {
         record.SetStatus(NKikimrBlobStorage::TEvControllerValidateConfigResponse::ConfigNotValid);
-        if (!result.ErrorReason) {
+        if (!opCtx.Error) {
             record.SetErrorReason("has forbidden unknown fields");
         } else {
-            record.SetErrorReason(*result.ErrorReason);
-            if (!result.UnknownFields.empty()) {
+            record.SetErrorReason(*opCtx.Error);
+            if (!opCtx.UnknownFields.empty()) {
                 record.SetErrorReason(record.GetErrorReason() + " + has forbidden unknown fields");
             }
         }
     } else {
         record.SetStatus(NKikimrBlobStorage::TEvControllerValidateConfigResponse::ConfigIsValid);
-        record.SetYAML(result.UpdatedConfig);
+        record.SetYAML(opCtx.UpdatedConfig);
     }
     SendInReply(ev->Sender, ev->InterconnectSession, std::move(response), ev->Cookie);
 }
