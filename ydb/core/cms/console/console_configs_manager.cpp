@@ -54,11 +54,6 @@ bool TConfigsManager::CheckConfig(const NKikimrConsole::TConfigsConfig &config,
 
 TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplaceMetadata(const TString &config, bool force) {
     TValidateConfigResult result;
-    bool isDatabaseConfig = NYamlConfig::IsDatabaseConfig(config);
-
-    if (isDatabaseConfig) {
-        return result;
-    }
 
     try {
         if (!force) {
@@ -70,7 +65,7 @@ TConfigsManager::TValidateConfigResult TConfigsManager::ValidateConfigAndReplace
             result.Version = YamlVersion;
         }
 
-        result.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMetadata{
+        result.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMainMetadata{
                 .Version = result.Version + 1,
                 .Cluster = result.Cluster,
             });
@@ -684,8 +679,19 @@ void TConfigsManager::Handle(TEvConsole::TEvToggleConfigValidatorRequest::TPtr &
 
 void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, const TActorContext &ctx)
 {
-    // Validate?
-    TxProcessor->ProcessTx(CreateTxReplaceYamlConfig(ev), ctx);
+    auto metadata = NYamlConfig::GetGenericMetadata(ev->Get()->Record.GetRequest().config());
+
+    std::visit(TOverloaded{
+        [&](const NYamlConfig::TMainMetadata& /* value */) {
+            TxProcessor->ProcessTx(CreateTxReplaceYamlConfig(ev), ctx);
+        },
+        [](const NYamlConfig::TDatabaseMetadata& /* value */) {
+            // TODO
+        },
+        [](auto&...) {
+            // ERROR
+        }
+        }, metadata);
 }
 
 void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, const TActorContext &ctx)

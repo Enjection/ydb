@@ -159,7 +159,7 @@ public:
                 return true;
             }
 
-            if (!result.ErrorReason && !DryRun && hasForbiddenUnknown) {
+            if (!DryRun && hasForbiddenUnknown) {
                 DoInternalAudit(txc, ctx);
 
                 db.Table<Schema::YamlConfig>().Key(Version + 1)

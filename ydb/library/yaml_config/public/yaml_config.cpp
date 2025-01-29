@@ -627,7 +627,7 @@ ui64 GetVersion(const TString& config) {
     return metadata.Version.value_or(0);
 }
 
-TMetadata GetMetadata(const TString& config) {
+TMainMetadata GetMetadata(const TString& config) {
     if (config.empty()) {
         return {};
     }
@@ -637,9 +637,28 @@ TMetadata GetMetadata(const TString& config) {
     if (auto node = doc.Root().Map()["metadata"]; node) {
         auto versionNode = node.Map()["version"];
         auto clusterNode = node.Map()["cluster"];
-        return TMetadata{
+        return TMainMetadata{
             .Version = versionNode ? std::optional{FromString<ui64>(versionNode.Scalar())} : std::nullopt,
             .Cluster = clusterNode ? std::optional{clusterNode.Scalar()} : std::nullopt,
+        };
+    }
+
+    return {};
+}
+
+TDatabaseMetadata GetDatabaseMetadata(const TString& config) {
+    if (config.empty()) {
+        return {};
+    }
+
+    auto doc = NFyaml::TDocument::Parse(config);
+
+    if (auto node = doc.Root().Map()["metadata"]; node) {
+        auto databaseNode = node.Map()["database"];
+        auto versionNode = node.Map()["version"];
+        return TDatabaseMetadata{
+            .Version = versionNode ? std::optional{FromString<ui64>(versionNode.Scalar())} : std::nullopt,
+            .Database = databaseNode ? std::optional{databaseNode.Scalar()} : std::nullopt,
         };
     }
 
@@ -702,7 +721,7 @@ TString ReplaceMetadata(const TString& config, const std::function<void(TStringS
     return sstr.Str();
 }
 
-TString ReplaceMetadata(const TString& config, const TMetadata& metadata) {
+TString ReplaceMetadata(const TString& config, const TMainMetadata& metadata) {
     auto serializeMetadata = [&](TStringStream& sstr) {
         sstr
           << "metadata:"
@@ -766,6 +785,22 @@ TString StripMetadata(const TString& config) {
     }
 
     return sstr.Str();
+}
+
+std::variant<TMainMetadata, TDatabaseMetadata, std::monostate> GetGenericMetadata(const TString& config) {
+    try {
+        auto doc = NFyaml::TDocument::Parse(config);
+        auto kind = doc.Root().Map().at("metadata").Map().at("kind").Scalar();
+        if (kind == "MainConfig") {
+            return GetMetadata(config);
+        } else if (kind == "DatabaseConfig") {
+            return GetDatabaseMetadata(config);
+        } else {
+            return {};
+        }
+    } catch (yexception& e) {
+        return {};
+    }
 }
 
 } // namespace NKikimr::NYamlConfig
