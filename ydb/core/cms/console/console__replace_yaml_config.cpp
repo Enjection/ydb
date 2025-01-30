@@ -13,33 +13,38 @@ namespace NKikimr::NConsole {
 
 using namespace NKikimrConsole;
 
-class TConfigsManager::TTxReplaceYamlConfig : public TTransactionBase<TConfigsManager> {
+class TConfigsManager::TTxReplaceYamlConfigBase
+    : public TTransactionBase<TConfigsManager>
+{
     template <class T>
-    TTxReplaceYamlConfig(TConfigsManager *self,
-                         T &ev,
-                         bool force)
-        : TBase(self)
-        , Config(ev->Get()->Record.GetRequest().config())
-        , Peer(ev->Get()->Record.GetPeerName())
-        , Sender(ev->Sender)
-        , UserToken(ev->Get()->Record.GetUserToken())
-        , Force(force)
-        , AllowUnknownFields(ev->Get()->Record.GetRequest().allow_unknown_fields())
-        , DryRun(ev->Get()->Record.GetRequest().dry_run())
-        , Database(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
+    TTxReplaceYamlConfigBase(
+        TConfigsManager *self,
+        T &ev,
+        bool force)
+            : TBase(self)
+            , Config(ev->Get()->Record.GetRequest().config())
+            , Peer(ev->Get()->Record.GetPeerName())
+            , Sender(ev->Sender)
+            , UserToken(ev->Get()->Record.GetUserToken())
+            , Force(force)
+            , AllowUnknownFields(ev->Get()->Record.GetRequest().allow_unknown_fields())
+            , DryRun(ev->Get()->Record.GetRequest().dry_run())
+            , Database(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
     {
     }
 
 public:
-    TTxReplaceYamlConfig(TConfigsManager *self,
-                         TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
-        : TTxReplaceYamlConfig(self, ev, false)
+    TTxReplaceYamlConfigBase(
+        TConfigsManager *self,
+        TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev, false)
     {
     }
 
-    TTxReplaceYamlConfig(TConfigsManager *self,
-                         TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
-        : TTxReplaceYamlConfig(self, ev, true)
+    TTxReplaceYamlConfigBase(
+        TConfigsManager *self,
+        TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev, true)
     {
     }
 
@@ -247,7 +252,7 @@ public:
         Response = MakeHolder<NActors::IEventHandle>(Sender, ctx.SelfID, ev.Release());
     }
 
-private:
+protected:
     const TString Config;
     const TString Peer;
     const TActorId Sender;
@@ -267,14 +272,62 @@ private:
     bool WarnDatabaseByPass = false;
 };
 
-ITransaction *TConfigsManager::CreateTxReplaceYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+class TConfigsManager::TTxReplaceMainYamlConfig
+    : public TConfigsManager::TTxReplaceYamlConfigBase
 {
-    return new TTxReplaceYamlConfig(this, ev);
+public:
+     TTxReplaceMainYamlConfig(
+        TConfigsManager *self,
+        TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev)
+    {
+    }
+
+    TTxReplaceMainYamlConfig(
+        TConfigsManager *self,
+        TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev)
+    {
+    }
+};
+
+class TConfigsManager::TTxReplaceDatabaseYamlConfig
+    : public TConfigsManager::TTxReplaceYamlConfigBase
+{
+public:
+     TTxReplaceDatabaseYamlConfig(
+        TConfigsManager *self,
+        TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev)
+    {
+    }
+
+    TTxReplaceDatabaseYamlConfig(
+        TConfigsManager *self,
+        TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
+            : TTxReplaceYamlConfigBase(self, ev)
+    {
+    }
+};
+
+ITransaction *TConfigsManager::CreateTxReplaceMainYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+{
+    return new TTxReplaceMainYamlConfig(this, ev);
 }
 
-ITransaction *TConfigsManager::CreateTxSetYamlConfig(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
+ITransaction *TConfigsManager::CreateTxSetMainYamlConfig(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
 {
-    return new TTxReplaceYamlConfig(this, ev);
+    return new TTxReplaceMainYamlConfig(this, ev);
+}
+
+ITransaction *TConfigsManager::CreateTxReplaceDatabaseYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
+{
+    return new TTxReplaceDatabaseYamlConfig(this, ev);
+}
+
+ITransaction *TConfigsManager::CreateTxSetDatabaseYamlConfig(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev)
+{
+    return new TTxReplaceDatabaseYamlConfig(this, ev);
 }
 
 } // namespace NKikimr::NConsole

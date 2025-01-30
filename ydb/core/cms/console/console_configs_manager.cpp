@@ -684,21 +684,45 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
     auto metadata = NYamlConfig::GetGenericMetadata(ev->Get()->Record.GetRequest().config());
 
     std::visit(TOverloaded{
-        [&](const NYamlConfig::TMainMetadata& /* value */) {
-            TxProcessor->ProcessTx(CreateTxReplaceYamlConfig(ev), ctx);
-        },
-        [](const NYamlConfig::TDatabaseMetadata& /* value */) {
-            // TODO
-        },
-        [](auto&...) {
-            // ERROR
-        }
+            [&](const NYamlConfig::TMainMetadata& /* value */) {
+                TxProcessor->ProcessTx(CreateTxReplaceMainYamlConfig(ev), ctx);
+            },
+            [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
+                TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
+            },
+            [&](auto&...) {
+                auto resp = MakeHolder<TEvConsole::TEvGenericError>();
+                resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
+                auto *issue = resp->Record.AddIssues();
+                issue->set_severity(NYql::TSeverityIds::S_ERROR);
+                issue->set_message("Unknown config kind or format");
+                auto response = MakeHolder<NActors::IEventHandle>(ev->Sender, ctx.SelfID, resp.Release());
+                ctx.Send(response.Release());
+            }
         }, metadata);
 }
 
 void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, const TActorContext &ctx)
 {
-    TxProcessor->ProcessTx(CreateTxSetYamlConfig(ev), ctx);
+    auto metadata = NYamlConfig::GetGenericMetadata(ev->Get()->Record.GetRequest().config());
+
+    std::visit(TOverloaded{
+            [&](const NYamlConfig::TMainMetadata& /* value */) {
+                TxProcessor->ProcessTx(CreateTxSetMainYamlConfig(ev), ctx);
+            },
+            [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
+                TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
+            },
+            [&](auto&...) {
+                auto resp = MakeHolder<TEvConsole::TEvGenericError>();
+                resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
+                auto *issue = resp->Record.AddIssues();
+                issue->set_severity(NYql::TSeverityIds::S_ERROR);
+                issue->set_message("Unknown config kind or format");
+                auto response = MakeHolder<NActors::IEventHandle>(ev->Sender, ctx.SelfID, resp.Release());
+                ctx.Send(response.Release());
+            }
+        }, metadata);
 }
 
 void TConfigsManager::Handle(TEvConsole::TEvDropConfigRequest::TPtr &ev, const TActorContext &ctx)
