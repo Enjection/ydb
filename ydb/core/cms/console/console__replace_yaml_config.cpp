@@ -289,7 +289,10 @@ public:
                 return true;
             }
 
-            Self->YamlConfigPerDatabase[*InputDatabase] = Config;
+            Self->YamlConfigPerDatabase[*InputDatabase] = TDatabaseYamlConfig {
+                .Config = Config,
+                .Version = Version,
+            };
             // FIXME
             Modify = true;
             // TODO

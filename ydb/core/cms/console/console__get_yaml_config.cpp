@@ -22,7 +22,7 @@ public:
 
         if (Database) {
             if (Self->YamlConfigPerDatabase.contains(*Database)) {
-                Response->Record.MutableResponse()->set_config(Self->YamlConfigPerDatabase[*Database]);
+                Response->Record.MutableResponse()->set_config(Self->YamlConfigPerDatabase[*Database].Config);
             }
 
             return true;

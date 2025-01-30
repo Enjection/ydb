@@ -13,6 +13,11 @@
 
 namespace NKikimr::NConsole {
 
+struct TDatabaseYamlConfig {
+    TString Config;
+    ui32 Version;
+};
+
 class TConfigsProvider : public TActorBootstrapped<TConfigsProvider> {
 public:
     struct TEvPrivate {
@@ -110,14 +115,14 @@ public:
 
             TEvUpdateYamlConfig(
                 const TString &yamlConfig,
-                const THashMap<TString, TString> &yamlConfigPerDatabase)
+                const THashMap<TString, TDatabaseYamlConfig> &yamlConfigPerDatabase)
                 : YamlConfig(yamlConfig)
                 , YamlConfigPerDatabase(yamlConfigPerDatabase)
             {
             }
 
             TString YamlConfig;
-            THashMap<TString, TString> YamlConfigPerDatabase;
+            THashMap<TString, TDatabaseYamlConfig> YamlConfigPerDatabase;
             TMap<ui64, TString> VolatileYamlConfigs;
         };
 
@@ -240,7 +245,7 @@ private:
 
     TString YamlConfig;
     TMap<ui64, TString> VolatileYamlConfigs;
-    THashMap<TString, TString> YamlConfigPerDatabase;
+    THashMap<TString, TDatabaseYamlConfig> YamlConfigPerDatabase;
     ui64 YamlConfigVersion = 0;
     TMap<ui64, ui64> VolatileYamlConfigHashes;
 };

@@ -1266,7 +1266,7 @@ void TConfigsProvider::Handle(TEvPrivate::TEvUpdateYamlConfig::TPtr &ev, const T
             subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
 
             if (YamlConfigPerDatabase.contains(subscription->Tenant)) {
-                request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant]);
+                request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
             }
 
             ctx.Send(subscription->Worker, request.Release());
