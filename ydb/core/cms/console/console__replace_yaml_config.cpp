@@ -58,7 +58,7 @@ public:
 
         auto& yamlConfigChange = *logData.MutableYamlConfigChange();
         yamlConfigChange.SetOldYamlConfig(Self->YamlConfig);
-        yamlConfigChange.SetNewYamlConfig(UpdatedConfig);
+        // yamlConfigChange.SetNewYamlConfig(UpdatedConfig); // FIXME
         for (auto& [id, config] : Self->VolatileYamlConfigs) {
             auto& oldVolatileConfig = *yamlConfigChange.AddOldVolatileYamlConfigs();
             oldVolatileConfig.SetId(id);
@@ -66,44 +66,6 @@ public:
         }
 
         Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
-    }
-
-    void Complete(const TActorContext &ctx) override
-    {
-        LOG_DEBUG(ctx, NKikimrServices::CMS_CONFIGS, "TTxReplaceYamlConfig Complete");
-
-        ctx.Send(Response.Release());
-
-        if (!Error && Modify && !DryRun) {
-            AuditLogReplaceConfigTransaction(
-                /* peer = */ Peer,
-                /* userSID = */ UserToken.GetUserSID(),
-                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
-                /* oldConfig = */ Self->YamlConfig,
-                /* newConfig = */ Config,
-                /* reason = */ {},
-                /* success = */ true);
-
-            Self->YamlVersion = Version + 1;
-            Self->YamlConfig = UpdatedConfig;
-            Self->YamlDropped = false;
-
-            Self->VolatileYamlConfigs.clear();
-
-            auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(Self->YamlConfig, Self->YamlConfigPerDatabase);
-            ctx.Send(Self->ConfigsProvider, resp.Release());
-        } else if (Error && !DryRun) {
-            AuditLogReplaceConfigTransaction(
-                /* peer = */ Peer,
-                /* userSID = */ UserToken.GetUserSID(),
-                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
-                /* oldConfig = */ Self->YamlConfig,
-                /* newConfig = */ Config,
-                /* reason = */ ErrorReason,
-                /* success = */ false);
-        }
-
-        Self->TxProcessor->TxCompleted(this, ctx);
     }
 
     void HandleError(const TString& error, const TActorContext& ctx) {
@@ -132,7 +94,6 @@ protected:
     TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> UnknownFieldsCollector = nullptr;
     ui32 Version;
     TString Cluster;
-    TString UpdatedConfig;
     TMaybe<TString> Database;
     bool WarnDatabaseByPass = false;
 };
@@ -230,6 +191,47 @@ public:
 
         return true;
     }
+
+    void Complete(const TActorContext &ctx) override
+    {
+        LOG_DEBUG(ctx, NKikimrServices::CMS_CONFIGS, "TTxReplaceYamlConfig Complete");
+
+        ctx.Send(Response.Release());
+
+        if (!Error && Modify && !DryRun) {
+            AuditLogReplaceConfigTransaction(
+                /* peer = */ Peer,
+                /* userSID = */ UserToken.GetUserSID(),
+                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+                /* oldConfig = */ Self->YamlConfig,
+                /* newConfig = */ Config,
+                /* reason = */ {},
+                /* success = */ true);
+
+            Self->YamlVersion = Version + 1;
+            Self->YamlConfig = UpdatedConfig;
+            Self->YamlDropped = false;
+
+            Self->VolatileYamlConfigs.clear();
+
+            auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(Self->YamlConfig, Self->YamlConfigPerDatabase);
+            ctx.Send(Self->ConfigsProvider, resp.Release());
+        } else if (Error && !DryRun) {
+            AuditLogReplaceConfigTransaction(
+                /* peer = */ Peer,
+                /* userSID = */ UserToken.GetUserSID(),
+                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+                /* oldConfig = */ Self->YamlConfig,
+                /* newConfig = */ Config,
+                /* reason = */ ErrorReason,
+                /* success = */ false);
+        }
+
+        Self->TxProcessor->TxCompleted(this, ctx);
+    }
+
+private:
+    TString UpdatedConfig;
 };
 
 class TConfigsManager::TTxReplaceDatabaseYamlConfig
@@ -282,9 +284,9 @@ public:
             };
 
             Version = opCtx.Version;
-            UpdatedConfig = opCtx.UpdatedConfig;
+            // UpdatedConfig = opCtx.UpdatedConfig;
             Cluster = opCtx.Cluster;
-            Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
+            // Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
             // if (!Database) { FIXME: extract database from config itself
             //     WarnDatabaseByPass = true;
@@ -306,7 +308,6 @@ public:
             Self->YamlConfigPerDatabase[*Database] = Config;
             // FIXME
             Modify = true;
-            UpdatedConfig = Self->YamlConfig;
             // TODO
             // 1) send
             // 1) persist
@@ -317,20 +318,20 @@ public:
             auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
             fillResponse(ev, NYql::TSeverityIds::S_WARNING);
 
-            if (!DryRun && !hasForbiddenUnknown) {
-                DoInternalAudit(txc, ctx);
+            // if (!DryRun && !hasForbiddenUnknown) {
+            //     DoInternalAudit(txc, ctx);
 
-                db.Table<Schema::YamlConfig>().Key(Version + 1)
-                    .Update<Schema::YamlConfig::Config>(UpdatedConfig)
-                    // set config dropped by default to support rollback to previous versions
-                    // where new config layout is not supported
-                    // it will lead to ignoring config from new versions
-                    .Update<Schema::YamlConfig::Dropped>(true);
+            //     db.Table<Schema::YamlConfig>().Key(Version + 1)
+            //         .Update<Schema::YamlConfig::Config>(UpdatedConfig)
+            //         // set config dropped by default to support rollback to previous versions
+            //         // where new config layout is not supported
+            //         // it will lead to ignoring config from new versions
+            //         .Update<Schema::YamlConfig::Dropped>(true);
 
-                /* Later we shift this boundary to support rollback and history */
-                db.Table<Schema::YamlConfig>().Key(Version)
-                    .Delete();
-            }
+            //     /* Later we shift this boundary to support rollback and history */
+            //     db.Table<Schema::YamlConfig>().Key(Version)
+            //         .Delete();
+            // }
 
             if (hasForbiddenUnknown) {
                 Error = true;
@@ -352,6 +353,14 @@ public:
 
         return true;
     }
+
+    void Complete(const TActorContext &ctx) override
+    {
+        Y_UNUSED(ctx); // TODO
+    }
+
+private:
+    // TODO
 };
 
 ITransaction *TConfigsManager::CreateTxReplaceMainYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
