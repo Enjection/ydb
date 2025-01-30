@@ -29,7 +29,7 @@ class TConfigsManager::TTxReplaceYamlConfigBase
             , Force(force)
             , AllowUnknownFields(ev->Get()->Record.GetRequest().allow_unknown_fields())
             , DryRun(ev->Get()->Record.GetRequest().dry_run())
-            , Database(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
+            , InputDatabase(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
     {
     }
 
@@ -90,8 +90,8 @@ protected:
     TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> UnknownFieldsCollector = nullptr;
     ui32 Version;
     TString Cluster;
-    TMaybe<TString> Database;
-    bool WarnDatabaseByPass = false;
+    TMaybe<TString> InputDatabase;
+    bool WarnDatabaseBypass = false;
 };
 
 class TConfigsManager::TTxReplaceMainYamlConfig
@@ -132,8 +132,8 @@ public:
             Cluster = opCtx.Cluster;
             Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
-            if (Database) {
-                WarnDatabaseByPass = true;
+            if (InputDatabase) {
+                WarnDatabaseBypass = true;
             }
 
             if (!DryRun && !hasForbiddenUnknown) {
@@ -272,8 +272,8 @@ public:
             Cluster = opCtx.Cluster;
             // Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
-            // if (!Database) { FIXME: extract database from config itself
-            //     WarnDatabaseByPass = true;
+            // if (!InputDatabase) { FIXME: extract database from config itself
+            //     WarnDatabaseBypass = true;
             // }
 
             if (!AppData(ctx)->FeatureFlags.GetPerDatabaseConfigAllowed()) {
@@ -289,7 +289,7 @@ public:
                 return true;
             }
 
-            Self->YamlConfigPerDatabase[*Database] = Config;
+            Self->YamlConfigPerDatabase[*InputDatabase] = Config;
             // FIXME
             Modify = true;
             // TODO
@@ -347,14 +347,10 @@ public:
         logData.MutableAction()->AddActions()->MutableModifyConfigItem()->MutableConfigItem();
         logData.AddAffectedKinds(NKikimrConsole::TConfigItem::DatabaseYamlConfigChangeItem);
 
-        // auto& yamlConfigChange = *logData.MutableYamlConfigChange();
-        // yamlConfigChange.SetOldYamlConfig(Self->YamlConfig);
-        // yamlConfigChange.SetNewYamlConfig(UpdatedConfig);
-        // for (auto& [id, config] : Self->VolatileYamlConfigs) {
-        //     auto& oldVolatileConfig = *yamlConfigChange.AddOldVolatileYamlConfigs();
-        //     oldVolatileConfig.SetId(id);
-        //     oldVolatileConfig.SetConfig(config);
-        // }
+        auto& databaseConfigChange = *logData.MutableDatabaseConfigChange();
+        databaseConfigChange.SetDatabase(TargetDatabase);
+        databaseConfigChange.SetOldYamlConfig("old");
+        databaseConfigChange.SetNewYamlConfig("new");
 
         Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
     }
@@ -365,7 +361,7 @@ public:
     }
 
 private:
-    // TODO
+    TString TargetDatabase;
 };
 
 ITransaction *TConfigsManager::CreateTxReplaceMainYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)
