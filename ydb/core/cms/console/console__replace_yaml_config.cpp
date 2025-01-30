@@ -267,22 +267,6 @@ public:
         }
 
         try {
-            auto fillResponse = [&](auto& ev, auto errorLevel) {
-                for (auto& [path, info] : opCtx.UnknownFields) {
-                    auto *issue = ev->Record.AddIssues();
-                    issue->set_severity(errorLevel);
-                    issue->set_message(TStringBuilder{} << "Unknown key# " << info.first << " in proto# " << info.second << " found in path# " << path);
-                }
-
-                for (auto& [path, info] : opCtx.DeprecatedFields) {
-                    auto *issue = ev->Record.AddIssues();
-                    issue->set_severity(NYql::TSeverityIds::S_WARNING);
-                    issue->set_message(TStringBuilder{} << "Deprecated key# " << info.first << " in proto# " << info.second << " found in path# " << path);
-                }
-
-                Response = MakeHolder<NActors::IEventHandle>(Sender, ctx.SelfID, ev.Release());
-            };
-
             Version = opCtx.Version;
             // UpdatedConfig = opCtx.UpdatedConfig;
             Cluster = opCtx.Cluster;
@@ -316,7 +300,8 @@ public:
             // 4) support dry-run
             // 5) support audit
             auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
-            fillResponse(ev, NYql::TSeverityIds::S_WARNING);
+            Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
+            return true;
 
             // if (!DryRun && !hasForbiddenUnknown) {
             //     DoInternalAudit(txc, ctx);
@@ -338,13 +323,13 @@ public:
                 auto ev = MakeHolder<TEvConsole::TEvGenericError>();
                 ev->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
                 ErrorReason = "Unknown keys in config.";
-                fillResponse(ev, NYql::TSeverityIds::S_ERROR);
+                Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_ERROR, ctx);
             } else if (!Force) {
                 auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
-                fillResponse(ev, NYql::TSeverityIds::S_WARNING);
+                Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
             } else {
                 auto ev = MakeHolder<TEvConsole::TEvSetYamlConfigResponse>();
-                fillResponse(ev, NYql::TSeverityIds::S_WARNING);
+                Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
             }
         }
         catch (const yexception& ex) {
