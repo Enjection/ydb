@@ -64,26 +64,6 @@ public:
         return MakeHolder<NActors::IEventHandle>(Sender, ctx.SelfID, ev.Release());
     }
 
-    void DoInternalAudit(TTransactionContext &txc, const TActorContext &ctx)
-    {
-        auto logData = NKikimrConsole::TLogRecordData{};
-
-        // for backward compatibility in ui
-        logData.MutableAction()->AddActions()->MutableModifyConfigItem()->MutableConfigItem();
-        logData.AddAffectedKinds(NKikimrConsole::TConfigItem::YamlConfigChangeItem);
-
-        auto& yamlConfigChange = *logData.MutableYamlConfigChange();
-        yamlConfigChange.SetOldYamlConfig(Self->YamlConfig);
-        // yamlConfigChange.SetNewYamlConfig(UpdatedConfig); // FIXME
-        for (auto& [id, config] : Self->VolatileYamlConfigs) {
-            auto& oldVolatileConfig = *yamlConfigChange.AddOldVolatileYamlConfigs();
-            oldVolatileConfig.SetId(id);
-            oldVolatileConfig.SetConfig(config);
-        }
-
-        Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
-    }
-
     void HandleError(const TString& error, const TActorContext& ctx) {
         Error = true;
         auto ev = MakeHolder<TEvConsole::TEvGenericError>();
@@ -230,6 +210,26 @@ public:
         Self->TxProcessor->TxCompleted(this, ctx);
     }
 
+    void DoInternalAudit(TTransactionContext &txc, const TActorContext &ctx)
+    {
+        auto logData = NKikimrConsole::TLogRecordData{};
+
+        // for backward compatibility in ui
+        logData.MutableAction()->AddActions()->MutableModifyConfigItem()->MutableConfigItem();
+        logData.AddAffectedKinds(NKikimrConsole::TConfigItem::YamlConfigChangeItem);
+
+        auto& yamlConfigChange = *logData.MutableYamlConfigChange();
+        yamlConfigChange.SetOldYamlConfig(Self->YamlConfig);
+        yamlConfigChange.SetNewYamlConfig(UpdatedConfig);
+        for (auto& [id, config] : Self->VolatileYamlConfigs) {
+            auto& oldVolatileConfig = *yamlConfigChange.AddOldVolatileYamlConfigs();
+            oldVolatileConfig.SetId(id);
+            oldVolatileConfig.SetConfig(config);
+        }
+
+        Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
+    }
+
 private:
     TString UpdatedConfig;
 };
@@ -257,8 +257,8 @@ public:
         NIceDb::TNiceDb db(txc.DB);
 
         TUpdateConfigOpContext opCtx;
-        Self->ReplaceMainConfigMetadata(Config, false, opCtx);
-        Self->ValidateMainConfig(opCtx);
+        Self->ReplaceMainConfigMetadata(Config, false, opCtx); // FIXME
+        Self->ValidateMainConfig(opCtx); // FIXME
 
         bool hasForbiddenUnknown = !opCtx.UnknownFields.empty() && !AllowUnknownFields;
         if (opCtx.Error) {
@@ -303,8 +303,8 @@ public:
             Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
             return true;
 
-            // if (!DryRun && !hasForbiddenUnknown) {
-            //     DoInternalAudit(txc, ctx);
+            if (!DryRun && !hasForbiddenUnknown) {
+                DoInternalAudit(txc, ctx);
 
             //     db.Table<Schema::YamlConfig>().Key(Version + 1)
             //         .Update<Schema::YamlConfig::Config>(UpdatedConfig)
@@ -316,7 +316,7 @@ public:
             //     /* Later we shift this boundary to support rollback and history */
             //     db.Table<Schema::YamlConfig>().Key(Version)
             //         .Delete();
-            // }
+            }
 
             if (hasForbiddenUnknown) {
                 Error = true;
@@ -337,6 +337,26 @@ public:
         }
 
         return true;
+    }
+
+    void DoInternalAudit(TTransactionContext &txc, const TActorContext &ctx)
+    {
+        auto logData = NKikimrConsole::TLogRecordData{};
+
+        // for backward compatibility in ui
+        logData.MutableAction()->AddActions()->MutableModifyConfigItem()->MutableConfigItem();
+        logData.AddAffectedKinds(NKikimrConsole::TConfigItem::DatabaseYamlConfigChangeItem);
+
+        // auto& yamlConfigChange = *logData.MutableYamlConfigChange();
+        // yamlConfigChange.SetOldYamlConfig(Self->YamlConfig);
+        // yamlConfigChange.SetNewYamlConfig(UpdatedConfig);
+        // for (auto& [id, config] : Self->VolatileYamlConfigs) {
+        //     auto& oldVolatileConfig = *yamlConfigChange.AddOldVolatileYamlConfigs();
+        //     oldVolatileConfig.SetId(id);
+        //     oldVolatileConfig.SetConfig(config);
+        // }
+
+        Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
     }
 
     void Complete(const TActorContext &ctx) override

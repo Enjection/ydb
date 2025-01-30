@@ -147,7 +147,8 @@ message TConfigItem {
         NamedConfigsItem = 100;
         ClusterYamlConfigItem = 101;
 
-        // synthetic kind for audit purposes only
+        // synthetic kinds for audit purposes only
+        DatabaseYamlConfigChangeItem = 32767;
         YamlConfigChangeItem = 32768;
     }
 
