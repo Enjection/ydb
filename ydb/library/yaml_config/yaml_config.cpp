@@ -37,9 +37,12 @@ void ResolveAndParseYamlConfig(
     const TMap<ui64, TString>& volatileYamlConfigs,
     const TMap<TString, TString>& labels,
     NKikimrConfig::TAppConfig& appConfig,
+    std::optional<TString> databaseConfig,
     TString* resolvedYamlConfig,
     TString* resolvedJsonConfig)
 {
+    // TODO
+    Y_UNUSED(databaseConfig);
     auto tree = NFyaml::TDocument::Parse(yamlConfig);
 
     for (auto& [_, config] : volatileYamlConfigs) {

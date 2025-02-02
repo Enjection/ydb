@@ -262,6 +262,7 @@ private:
     TString YamlConfig;
     TMap<ui64, TString> VolatileYamlConfigs;
     TMap<ui64, size_t> VolatileYamlConfigHashes;
+    std::optional<TString> DatabaseYamlConfig;
     TString ResolvedYamlConfig;
     TString ResolvedJsonConfig;
     NKikimrConfig::TAppConfig YamlProtoConfig;
@@ -378,6 +379,7 @@ NKikimrConfig::TAppConfig TConfigsDispatcher::ParseYamlProtoConfig()
             VolatileYamlConfigs,
             Labels,
             newYamlProtoConfig,
+            DatabaseYamlConfig,
             &ResolvedYamlConfig,
             &ResolvedJsonConfig);
     } catch (const yexception& ex) {

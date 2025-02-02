@@ -699,7 +699,8 @@ NKikimrConfig::TAppConfig GetYamlConfigFromResult(const IConfigurationResult& re
             result.GetYamlConfig(),
             result.GetVolatileYamlConfigs(),
             labels,
-            yamlConfig);
+            yamlConfig,
+            result.HasDatabaseYamlConfig() ? std::optional{result.GetDatabaseYamlConfig()} : std::nullopt);
     }
     return yamlConfig;
 }
