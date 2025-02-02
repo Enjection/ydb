@@ -288,11 +288,6 @@ public:
                 return true;
             }
 
-            Self->YamlConfigPerDatabase[*IngressDatabase] = TDatabaseYamlConfig {
-                .Config = Config,
-                .Version = Version,
-            };
-
             // FIXME ?
             auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
             Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
@@ -347,6 +342,38 @@ public:
 
     void Complete(const TActorContext &ctx) override
     {
+        LOG_DEBUG(ctx, NKikimrServices::CMS_CONFIGS, "TTxReplaceYamlConfig Complete");
+
+        ctx.Send(Response.Release());
+
+        if (!Error && Modify && !DryRun) {
+            // AuditLogReplaceConfigTransaction(
+            //     /* peer = */ Peer,
+            //     /* userSID = */ UserToken.GetUserSID(),
+            //     /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+            //     /* oldConfig = */ Self->YamlConfig,
+            //     /* newConfig = */ Config,
+            //     /* reason = */ {},
+            //     /* success = */ true);
+
+            Self->YamlConfigPerDatabase[*IngressDatabase] = TDatabaseYamlConfig {
+                .Config = UpdatedConfig,
+                .Version = Version + 1,
+            };
+
+            auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(Self->YamlConfig, Self->YamlConfigPerDatabase);
+            ctx.Send(Self->ConfigsProvider, resp.Release());
+        } else if (Error && !DryRun) {
+            // AuditLogReplaceConfigTransaction(
+            //     /* peer = */ Peer,
+            //     /* userSID = */ UserToken.GetUserSID(),
+            //     /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+            //     /* oldConfig = */ Self->YamlConfig,
+            //     /* newConfig = */ Config,
+            //     /* reason = */ ErrorReason,
+            //     /* success = */ false);
+        }
+
         Self->TxProcessor->TxCompleted(this, ctx);
     }
 
