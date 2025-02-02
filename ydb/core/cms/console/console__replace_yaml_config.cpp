@@ -326,6 +326,12 @@ public:
 
     void DoInternalAudit(TTransactionContext &txc, const TActorContext &ctx)
     {
+        TString oldConfig;
+
+        if (Self->YamlConfigPerDatabase.contains(TargetDatabase)) {
+            oldConfig = Self->YamlConfigPerDatabase[TargetDatabase].Config;
+        }
+
         auto logData = NKikimrConsole::TLogRecordData{};
 
         // for backward compatibility in ui
@@ -334,8 +340,8 @@ public:
 
         auto& databaseConfigChange = *logData.MutableDatabaseConfigChange();
         databaseConfigChange.SetDatabase(TargetDatabase);
-        databaseConfigChange.SetOldYamlConfig("old");
-        databaseConfigChange.SetNewYamlConfig("new");
+        databaseConfigChange.SetOldYamlConfig(oldConfig);
+        databaseConfigChange.SetNewYamlConfig(UpdatedConfig);
 
         Self->Logger.DbLogData(UserToken.GetUserSID(), logData, txc, ctx);
     }
@@ -346,15 +352,22 @@ public:
 
         ctx.Send(Response.Release());
 
+        TString oldConfig;
+
+        if (Self->YamlConfigPerDatabase.contains(TargetDatabase)) {
+            oldConfig = Self->YamlConfigPerDatabase[TargetDatabase].Config;
+        }
+
         if (!Error && Modify && !DryRun) {
-            // AuditLogReplaceConfigTransaction(
-            //     /* peer = */ Peer,
-            //     /* userSID = */ UserToken.GetUserSID(),
-            //     /* sanitizedToken = */ UserToken.GetSanitizedToken(),
-            //     /* oldConfig = */ Self->YamlConfig,
-            //     /* newConfig = */ Config,
-            //     /* reason = */ {},
-            //     /* success = */ true);
+            AuditLogReplaceDatabaseConfigTransaction(
+                /* peer = */ Peer,
+                /* userSID = */ UserToken.GetUserSID(),
+                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+                /* database =  */ TargetDatabase,
+                /* oldConfig = */ oldConfig,
+                /* newConfig = */ Config,
+                /* reason = */ {},
+                /* success = */ true);
 
             Self->YamlConfigPerDatabase[*IngressDatabase] = TDatabaseYamlConfig {
                 .Config = UpdatedConfig,
@@ -364,14 +377,15 @@ public:
             auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(Self->YamlConfig, Self->YamlConfigPerDatabase);
             ctx.Send(Self->ConfigsProvider, resp.Release());
         } else if (Error && !DryRun) {
-            // AuditLogReplaceConfigTransaction(
-            //     /* peer = */ Peer,
-            //     /* userSID = */ UserToken.GetUserSID(),
-            //     /* sanitizedToken = */ UserToken.GetSanitizedToken(),
-            //     /* oldConfig = */ Self->YamlConfig,
-            //     /* newConfig = */ Config,
-            //     /* reason = */ ErrorReason,
-            //     /* success = */ false);
+            AuditLogReplaceDatabaseConfigTransaction(
+                /* peer = */ Peer,
+                /* userSID = */ UserToken.GetUserSID(),
+                /* sanitizedToken = */ UserToken.GetSanitizedToken(),
+                /* database =  */ TargetDatabase,
+                /* oldConfig = */ oldConfig,
+                /* newConfig = */ Config,
+                /* reason = */ ErrorReason,
+                /* success = */ false);
         }
 
         Self->TxProcessor->TxCompleted(this, ctx);
