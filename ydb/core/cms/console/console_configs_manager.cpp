@@ -117,20 +117,24 @@ void TConfigsManager::ValidateMainConfig(TUpdateConfigOpContext& opCtx) {
 }
 
 void TConfigsManager::ReplaceDatabaseConfigMetadata(const TString &config, bool force, TUpdateDatabaseConfigOpContext& opCtx) {
-    // FIXME
     try {
+        auto metadata = NYamlConfig::GetDatabaseMetadata(config);
+
+        if (!metadata.Database) {
+            ythrow yexception() << "metadata.database is not present, unable to infer target database";
+        }
+
+        opCtx.TargetDatabase = *metadata.Database;
+
         if (!force) {
-            auto metadata = NYamlConfig::GetMetadata(config);
-            opCtx.Cluster = metadata.Cluster.value_or(TString("unknown"));
             opCtx.Version = metadata.Version.value_or(0);
         } else {
-            opCtx.Cluster = ClusterName;
             opCtx.Version = YamlVersion;
         }
 
-        opCtx.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMainMetadata{
+        opCtx.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TDatabaseMetadata{
                 .Version = opCtx.Version + 1,
-                .Cluster = opCtx.Cluster,
+                .Database = opCtx.TargetDatabase,
             });
     } catch (const yexception &e) {
         opCtx.Error = e.what();
@@ -143,10 +147,6 @@ void TConfigsManager::ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opC
         if (opCtx.UpdatedConfig != YamlConfig || YamlDropped) {
             auto tree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
             auto resolved = NYamlConfig::ResolveAll(tree);
-
-            if (ClusterName != opCtx.Cluster) {
-                ythrow yexception() << "ClusterName mismatch";
-            }
 
             if (opCtx.Version != YamlVersion) {
                 ythrow yexception() << "Version mismatch";

@@ -51,6 +51,7 @@ private:
         : public TUpdateConfigOpBaseContext
     {
         TString UpdatedConfig;
+        TString TargetDatabase;
         ui32 Version;
     };
 

@@ -223,6 +223,11 @@ TVolatileMetadata GetVolatileMetadata(const TString& config);
 TString ReplaceMetadata(const TString& config, const TMainMetadata& metadata);
 
 /**
+ * Replaces metadata in database config
+ */
+TString ReplaceMetadata(const TString& config, const TDatabaseMetadata& metadata);
+
+/**
  * Replaces volatile metadata in config
  */
 TString ReplaceMetadata(const TString& config, const TVolatileMetadata& metadata);

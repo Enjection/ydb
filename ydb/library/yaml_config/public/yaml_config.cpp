@@ -732,6 +732,17 @@ TString ReplaceMetadata(const TString& config, const TMainMetadata& metadata) {
     return ReplaceMetadata(config, serializeMetadata);
 }
 
+TString ReplaceMetadata(const TString& config, const TDatabaseMetadata& metadata) {
+    auto serializeMetadata = [&](TStringStream& sstr) {
+        sstr
+          << "metadata:"
+          << "\n  kind: DatabaseConfig"
+          << "\n  database: \"" << *metadata.Database << "\""
+          << "\n  version: " << *metadata.Version;
+    };
+    return ReplaceMetadata(config, serializeMetadata);
+}
+
 TString ReplaceMetadata(const TString& config, const TVolatileMetadata& metadata) {
     auto serializeMetadata = [&](TStringStream& sstr) {
         sstr
