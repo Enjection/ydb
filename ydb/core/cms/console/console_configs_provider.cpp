@@ -1223,54 +1223,59 @@ void TConfigsProvider::Handle(TEvPrivate::TEvUpdateSubscriptions::TPtr &ev, cons
 }
 
 void TConfigsProvider::Handle(TEvPrivate::TEvUpdateYamlConfig::TPtr &ev, const TActorContext &ctx) {
-    YamlConfig = ev->Get()->YamlConfig;
     YamlConfigPerDatabase = ev->Get()->YamlConfigPerDatabase;
-    VolatileYamlConfigs.clear();
+    if (!ev->Get()->ChangedDatabase) {
+        YamlConfig = ev->Get()->YamlConfig;
+        VolatileYamlConfigs.clear();
 
-    YamlConfigVersion = NYamlConfig::GetVersion(YamlConfig);
-    VolatileYamlConfigHashes.clear();
+        YamlConfigVersion = NYamlConfig::GetVersion(YamlConfig);
+        VolatileYamlConfigHashes.clear();
 
-    for (auto& [id, config] : ev->Get()->VolatileYamlConfigs) {
-        auto doc = NFyaml::TDocument::Parse(config);
-        // we strip it to provide old format for config dispatcher
-        auto node = doc.Root().Map().at("selector_config");
-        TString strippedConfig = "\n" + config.substr(node.BeginMark().InputPos, node.EndMark().InputPos - node.BeginMark().InputPos) + "\n";
-        VolatileYamlConfigs[id] = strippedConfig;
-        VolatileYamlConfigHashes[id] = THash<TString>()(strippedConfig);
-    }
-
-    for (auto &[_, subscription] : InMemoryIndex.GetSubscriptions()) {
-        if (subscription->ServeYaml) {
-            auto request = MakeHolder<TEvConsole::TEvConfigSubscriptionNotification>(
-                    subscription->Generation,
-                    NKikimrConfig::TAppConfig{},
-                    THashSet<ui32>{});
-
-            if (subscription->YamlConfigVersion != YamlConfigVersion) {
-                subscription->YamlConfigVersion = YamlConfigVersion;
-                request->Record.SetYamlConfig(YamlConfig);
-            } else {
-                request->Record.SetYamlConfigNotChanged(true);
-            }
-
-            for (auto &[id, hash] : VolatileYamlConfigHashes) {
-                auto *volatileConfig = request->Record.AddVolatileConfigs();
-                volatileConfig->SetId(id);
-                if (auto it = subscription->VolatileYamlConfigHashes.find(id); it != subscription->VolatileYamlConfigHashes.end() && it->second == hash) {
-                    volatileConfig->SetNotChanged(true);
-                } else {
-                    volatileConfig->SetConfig(VolatileYamlConfigs[id]);
-                }
-            }
-
-            subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
-
-            if (YamlConfigPerDatabase.contains(subscription->Tenant)) {
-                request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
-            }
-
-            ctx.Send(subscription->Worker, request.Release());
+        for (auto& [id, config] : ev->Get()->VolatileYamlConfigs) {
+            auto doc = NFyaml::TDocument::Parse(config);
+            // we strip it to provide old format for config dispatcher
+            auto node = doc.Root().Map().at("selector_config");
+            TString strippedConfig = "\n" + config.substr(node.BeginMark().InputPos, node.EndMark().InputPos - node.BeginMark().InputPos) + "\n";
+            VolatileYamlConfigs[id] = strippedConfig;
+            VolatileYamlConfigHashes[id] = THash<TString>()(strippedConfig);
         }
+
+        for (auto &[_, subscription] : InMemoryIndex.GetSubscriptions()) {
+            if (subscription->ServeYaml) {
+                auto request = MakeHolder<TEvConsole::TEvConfigSubscriptionNotification>(
+                        subscription->Generation,
+                        NKikimrConfig::TAppConfig{},
+                        THashSet<ui32>{});
+
+                if (subscription->YamlConfigVersion != YamlConfigVersion) {
+                    subscription->YamlConfigVersion = YamlConfigVersion;
+                    request->Record.SetYamlConfig(YamlConfig);
+                } else {
+                    request->Record.SetYamlConfigNotChanged(true);
+                }
+
+                for (auto &[id, hash] : VolatileYamlConfigHashes) {
+                    auto *volatileConfig = request->Record.AddVolatileConfigs();
+                    volatileConfig->SetId(id);
+                    if (auto it = subscription->VolatileYamlConfigHashes.find(id); it != subscription->VolatileYamlConfigHashes.end() && it->second == hash) {
+                        volatileConfig->SetNotChanged(true);
+                    } else {
+                        volatileConfig->SetConfig(VolatileYamlConfigs[id]);
+                    }
+                }
+
+                subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
+
+                if (YamlConfigPerDatabase.contains(subscription->Tenant)) {
+                    request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
+                }
+
+                ctx.Send(subscription->Worker, request.Release());
+            }
+        }
+    } else {
+        const auto* subs = InMemoryIndex.GetSubscriptions(ev->Get()->ChangedDatabase);
+        Y_UNUSED(subs);
     }
 }
 

@@ -684,6 +684,7 @@ public:
     TInMemorySubscription::TPtr GetSubscription(const TActorId &subscriber);
 
     const THashMap<TActorId, TInMemorySubscription::TPtr> &GetSubscriptions() const;
+    const TInMemorySubscriptionSet *GetSubscriptions(const TString &path) const;
 
     void AddSubscription(TInMemorySubscription::TPtr subscription);
 
