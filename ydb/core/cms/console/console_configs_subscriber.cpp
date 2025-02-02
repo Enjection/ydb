@@ -361,7 +361,6 @@ private:
 
         request->Record.SetGeneration(Generation = NextGeneration++);
         request->Record.MutableOptions()->SetNodeId(SelfId().NodeId());
-        Cerr << " xxx 2 " << Tenant << Endl;
         request->Record.MutableOptions()->SetTenant(Tenant);
         request->Record.MutableOptions()->SetNodeType(NodeType);
         request->Record.MutableOptions()->SetHost(FQDNHostName());
