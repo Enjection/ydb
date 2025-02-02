@@ -1129,7 +1129,7 @@ void TConfigsManager::Handle(TEvPrivate::TEvStateLoaded::TPtr &/*ev*/, const TAc
     ctx.Send(ConfigsProvider, new TConfigsProvider::TEvPrivate::TEvSetSubscriptions(SubscriptionIndex.GetSubscriptions()));
     ctx.Send(GetNameserviceActorId(), new TEvInterconnect::TEvListNodes());
     if (!YamlConfig.empty()) {
-        ctx.Send(ConfigsProvider, new TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig(YamlConfig, VolatileYamlConfigs));
+        ctx.Send(ConfigsProvider, new TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig(YamlConfig, YamlConfigPerDatabase, VolatileYamlConfigs));
     }
     ScheduleLogCleanup(ctx);
 }

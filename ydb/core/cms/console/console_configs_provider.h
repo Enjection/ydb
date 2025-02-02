@@ -121,6 +121,16 @@ public:
             {
             }
 
+            TEvUpdateYamlConfig(
+                const TString &yamlConfig,
+                const THashMap<TString, TDatabaseYamlConfig> &yamlConfigPerDatabase,
+                const TMap<ui64, TString> &volatileYamlConfigs)
+                : YamlConfig(yamlConfig)
+                , YamlConfigPerDatabase(yamlConfigPerDatabase)
+                , VolatileYamlConfigs(volatileYamlConfigs)
+            {
+            }
+
             TString YamlConfig;
             THashMap<TString, TDatabaseYamlConfig> YamlConfigPerDatabase;
             TMap<ui64, TString> VolatileYamlConfigs;
