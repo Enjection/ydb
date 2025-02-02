@@ -197,10 +197,14 @@ struct TDatabaseMetadata {
     std::optional<TString> Database;
 };
 
+struct TError {
+    TString Error;
+};
+
 /**
  * Parses config metadata
  */
-std::variant<TMainMetadata, TDatabaseMetadata, std::monostate> GetGenericMetadata(const TString& config);
+std::variant<TMainMetadata, TDatabaseMetadata, TError> GetGenericMetadata(const TString& config);
 
 /**
  * Parses config metadata

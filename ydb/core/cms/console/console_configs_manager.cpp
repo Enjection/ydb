@@ -759,8 +759,16 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
                 }
                 TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
             },
-            [&](auto&...) {
-                return FailReplaceConfig(ev->Sender, "Unknown config kind or format", ctx);
+            [&](const NYamlConfig::TError& error) {
+                AuditLogReplaceConfigTransaction(
+                    /* peer = */ ev->Get()->Record.GetPeerName(),
+                    /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
+                    /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
+                    /* oldConfig = */ YamlConfig,
+                    /* newConfig = */ ev->Get()->Record.GetRequest().config(),
+                    /* reason = */ error.Error,
+                    /* success = */ false);
+                return FailReplaceConfig(ev->Sender, error.Error, ctx);
             }
         }, metadata);
 }
@@ -779,8 +787,16 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
                 }
                 TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
             },
-            [&](auto&...) {
-                return FailReplaceConfig(ev->Sender, "Unknown config kind or format", ctx);
+            [&](const NYamlConfig::TError& error) {
+                AuditLogReplaceConfigTransaction(
+                    /* peer = */ ev->Get()->Record.GetPeerName(),
+                    /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
+                    /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
+                    /* oldConfig = */ YamlConfig,
+                    /* newConfig = */ ev->Get()->Record.GetRequest().config(),
+                    /* reason = */ error.Error,
+                    /* success = */ false);
+                return FailReplaceConfig(ev->Sender, error.Error, ctx);
             }
         }, metadata);
 }

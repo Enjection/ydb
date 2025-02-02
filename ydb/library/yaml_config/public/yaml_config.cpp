@@ -798,7 +798,7 @@ TString StripMetadata(const TString& config) {
     return sstr.Str();
 }
 
-std::variant<TMainMetadata, TDatabaseMetadata, std::monostate> GetGenericMetadata(const TString& config) {
+std::variant<TMainMetadata, TDatabaseMetadata, TError> GetGenericMetadata(const TString& config) {
     try {
         auto doc = NFyaml::TDocument::Parse(config);
         auto kind = doc.Root().Map().at("metadata").Map().at("kind").Scalar();
@@ -807,10 +807,14 @@ std::variant<TMainMetadata, TDatabaseMetadata, std::monostate> GetGenericMetadat
         } else if (kind == "DatabaseConfig") {
             return GetDatabaseMetadata(config);
         } else {
-            return {};
+            return TError {
+                .Error = TString("Unknown kind: ") + kind,
+            };
         }
     } catch (yexception& e) {
-        return {};
+        return TError {
+            .Error = e.what(),
+        };
     }
 }
 
