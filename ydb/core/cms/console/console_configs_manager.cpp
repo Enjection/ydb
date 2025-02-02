@@ -455,14 +455,18 @@ bool TConfigsManager::DbLoadState(TTransactionContext &txc,
     auto subscriptionRowset = db.Table<Schema::ConfigSubscriptions>().Range().Select<Schema::ConfigSubscriptions::TColumns>();
     auto validatorsRowset = db.Table<Schema::DisabledValidators>().Range().Select<Schema::DisabledValidators::TColumns>();
     auto yamlConfigRowset = db.Table<Schema::YamlConfig>().Reverse().Select<Schema::YamlConfig::TColumns>();
+    auto perDatabaseYamlConfigRowset = db.Table<Schema::PerTenantYamlConfig>().Select<Schema::PerTenantYamlConfig::TColumns>();
 
     if (!configItemRowset.IsReady()
         || !nextConfigItemIdRow.IsReady()
         || !nextSubscriptionIdRow.IsReady()
         || !subscriptionRowset.IsReady()
         || !validatorsRowset.IsReady()
-        || !yamlConfigRowset.IsReady())
+        || !yamlConfigRowset.IsReady()
+        || !perDatabaseYamlConfigRowset.IsReady())
+    {
         return false;
+    }
 
     if (nextConfigItemIdRow.IsValid()) {
         TString value = nextConfigItemIdRow.GetValue<Schema::Config::Value>();
@@ -494,6 +498,21 @@ bool TConfigsManager::DbLoadState(TTransactionContext &txc,
         // ignore this as deprecated
         // now used only for disabling new config layout for older console
         YamlDropped = false;
+    }
+
+    while (!perDatabaseYamlConfigRowset.EndOfSet()) {
+        TString tenant = perDatabaseYamlConfigRowset.GetValue<Schema::PerTenantYamlConfig::Path>();
+        ui32 version = perDatabaseYamlConfigRowset.GetValue<Schema::PerTenantYamlConfig::Version>();
+        TString config = perDatabaseYamlConfigRowset.GetValue<Schema::PerTenantYamlConfig::Config>();
+
+        YamlConfigPerDatabase[tenant] = TDatabaseYamlConfig {
+            .Config = config,
+            .Version = version,
+        };
+
+        if (!perDatabaseYamlConfigRowset.Next()) {
+            return false;
+        }
     }
 
     while (!configItemRowset.EndOfSet()) {

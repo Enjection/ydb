@@ -288,15 +288,11 @@ public:
                 return true;
             }
 
-            // FIXME ?
-            auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
-            Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
-
             if (!DryRun && !hasForbiddenUnknown) {
                 DoInternalAudit(txc, ctx);
 
                 db.Table<Schema::PerTenantYamlConfig>().Key(TargetDatabase, Version + 1)
-                    .Update<Schema::YamlConfig::Config>(Config);
+                    .Update<Schema::PerTenantYamlConfig::Config>(Config);
 
                 /* Later we shift this boundary to support rollback and history */
                 db.Table<Schema::PerTenantYamlConfig>().Key(TargetDatabase, Version)
