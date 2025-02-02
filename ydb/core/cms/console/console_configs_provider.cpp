@@ -709,6 +709,8 @@ void TConfigsProvider::CheckSubscription(TInMemorySubscription::TPtr subscriptio
 
     subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
 
+    // FIXME
+
     ctx.Send(subscription->Worker, request.Release());
 
     subscription->FirstUpdateSent = true;
@@ -1099,6 +1101,10 @@ void TConfigsProvider::Handle(TEvConsole::TEvGetNodeConfigRequest::TPtr &ev, con
             item.SetId(id);
             item.SetConfig(config);
         }
+
+        if (auto it = YamlConfigPerDatabase.find(rec.GetNode().GetTenant()); it != YamlConfigPerDatabase.end()) {
+            response->Record.SetDatabaseYamlConfig(it->second.Config);
+        }
     }
 
     ctx.Send(ev->Sender, response.Release(), 0, ev->Cookie);
@@ -1284,7 +1290,7 @@ void TConfigsProvider::UpdateConfig(TInMemorySubscription::TPtr subscription,
     if (auto it = YamlConfigPerDatabase.find(subscription->Tenant); it != YamlConfigPerDatabase.end()) {
         if (!subscription->DatabaseYamlConfigVersion || *subscription->DatabaseYamlConfigVersion != it->second.Version) {
             subscription->DatabaseYamlConfigVersion = it->second.Version;
-            request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
+            request->Record.SetDatabaseConfig(it->second.Config);
         } else {
             request->Record.SetDatabaseConfigNotChanged(true);
         }

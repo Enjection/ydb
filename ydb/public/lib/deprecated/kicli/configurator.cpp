@@ -66,7 +66,6 @@ const TString& TConfigurationResult::GetDatabaseYamlConfig() const
     return Record().GetGetNodeConfigResponse().GetDatabaseYamlConfig();
 }
 
-
 TNodeConfigurator::TNodeConfigurator(TKikimr& kikimr)
     : Kikimr(&kikimr)
 {
