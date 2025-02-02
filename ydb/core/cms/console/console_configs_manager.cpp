@@ -821,7 +821,6 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
 }
 
 void TConfigsManager::FailReplaceConfig(TActorId Sender, const TString& error, const TActorContext &ctx) {
-    // TODO: +audit
     auto resp = MakeHolder<TEvConsole::TEvGenericError>();
     resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
     auto *issue = resp->Record.AddIssues();
