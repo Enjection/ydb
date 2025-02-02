@@ -1281,8 +1281,13 @@ void TConfigsProvider::UpdateConfig(TInMemorySubscription::TPtr subscription,
 
     subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
 
-    if (YamlConfigPerDatabase.contains(subscription->Tenant)) {
-        request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
+    if (auto it = YamlConfigPerDatabase.find(subscription->Tenant); it != YamlConfigPerDatabase.end()) {
+        if (!subscription->DatabaseYamlConfigVersion || *subscription->DatabaseYamlConfigVersion != it->second.Version) {
+            subscription->DatabaseYamlConfigVersion = it->second.Version;
+            request->Record.SetDatabaseConfig(YamlConfigPerDatabase[subscription->Tenant].Config);
+        } else {
+            request->Record.SetDatabaseConfigNotChanged(true);
+        }
     }
 
     ctx.Send(subscription->Worker, request.Release());

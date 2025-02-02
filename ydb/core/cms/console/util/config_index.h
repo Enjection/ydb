@@ -669,6 +669,7 @@ struct TInMemorySubscription : public TThrRefBase {
     ui64 YamlApiVersion = 0;
     ui64 YamlConfigVersion = 0;
     TMap<ui64, ui64> VolatileYamlConfigHashes;
+    std::optional<ui64> DatabaseYamlConfigVersion;
 
     bool FirstUpdateSent = false;
 
