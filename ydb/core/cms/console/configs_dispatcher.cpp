@@ -815,6 +815,9 @@ try {
     dcClient->SavedResult = configs;
     configs->Config = rec.GetRawConsoleConfig();
     configs->YamlConfig = rec.GetYamlConfig();
+    if (rec.HasDatabaseConfig()) {
+        configs->DatabaseYamlConfig = rec.GetDatabaseConfig();
+    }
     // TODO volatile
     RecordedInitialConfiguratorDeps->DynConfigClient = std::move(dcClient);
     auto deps = RecordedInitialConfiguratorDeps->GetDeps();
