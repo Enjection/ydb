@@ -202,6 +202,8 @@ private:
     void Handle(TEvBlobStorage::TEvControllerConsoleCommitRequest::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvBlobStorage::TEvControllerValidateConfigRequest::TPtr &ev, const TActorContext &ctx);
 
+    void FailReplaceConfig(TActorId Sender, const TString& error, const TActorContext &ctx);
+
     static bool CheckRights(const TString& userToken);
 
     template <typename TRequestEvent, typename TResponse>

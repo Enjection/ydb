@@ -753,18 +753,15 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
             [&](const NYamlConfig::TMainMetadata& /* value */) {
                 TxProcessor->ProcessTx(CreateTxReplaceMainYamlConfig(ev), ctx);
             },
-            [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
-                // TODO: validate database exists && user has rights to change it
+            [&](const NYamlConfig::TDatabaseMetadata&  value) {
+                if (!value.Database || !Self.HasTenant(*value.Database)) {
+                    // TODO fail
+                    return;
+                }
                 TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
             },
             [&](auto&...) {
-                auto resp = MakeHolder<TEvConsole::TEvGenericError>();
-                resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
-                auto *issue = resp->Record.AddIssues();
-                issue->set_severity(NYql::TSeverityIds::S_ERROR);
-                issue->set_message("Unknown config kind or format");
-                auto response = MakeHolder<NActors::IEventHandle>(ev->Sender, ctx.SelfID, resp.Release());
-                ctx.Send(response.Release());
+                return FailReplaceConfig(ev->Sender, "Unknown config kind or format", ctx);
             }
         }, metadata);
 }
@@ -777,20 +774,27 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
             [&](const NYamlConfig::TMainMetadata& /* value */) {
                 TxProcessor->ProcessTx(CreateTxSetMainYamlConfig(ev), ctx);
             },
-            [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
-                // TODO: validate database exists && user has rights to change it
+            [&](const NYamlConfig::TDatabaseMetadata& value) {
+                if (!value.Database || !Self.HasTenant(*value.Database)) {
+                    // TODO fail
+                    return;
+                }
                 TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
             },
             [&](auto&...) {
-                auto resp = MakeHolder<TEvConsole::TEvGenericError>();
-                resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
-                auto *issue = resp->Record.AddIssues();
-                issue->set_severity(NYql::TSeverityIds::S_ERROR);
-                issue->set_message("Unknown config kind or format");
-                auto response = MakeHolder<NActors::IEventHandle>(ev->Sender, ctx.SelfID, resp.Release());
-                ctx.Send(response.Release());
+                return FailReplaceConfig(ev->Sender, "Unknown config kind or format", ctx);
             }
         }, metadata);
+}
+
+void TConfigsManager::FailReplaceConfig(TActorId Sender, const TString& error, const TActorContext &ctx) {
+     auto resp = MakeHolder<TEvConsole::TEvGenericError>();
+    resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
+    auto *issue = resp->Record.AddIssues();
+    issue->set_severity(NYql::TSeverityIds::S_ERROR);
+    issue->set_message(error);
+    auto response = MakeHolder<NActors::IEventHandle>(Sender, ctx.SelfID, resp.Release());
+    ctx.Send(response.Release());
 }
 
 void TConfigsManager::Handle(TEvConsole::TEvDropConfigRequest::TPtr &ev, const TActorContext &ctx)
