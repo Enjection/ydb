@@ -754,6 +754,7 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
                 TxProcessor->ProcessTx(CreateTxReplaceMainYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
+                // TODO: validate database exists && user has rights to change it
                 TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
             },
             [&](auto&...) {
@@ -777,6 +778,7 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
                 TxProcessor->ProcessTx(CreateTxSetMainYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TDatabaseMetadata& /* value */) {
+                // TODO: validate database exists && user has rights to change it
                 TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
             },
             [&](auto&...) {
