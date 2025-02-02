@@ -709,7 +709,14 @@ void TConfigsProvider::CheckSubscription(TInMemorySubscription::TPtr subscriptio
 
     subscription->VolatileYamlConfigHashes = VolatileYamlConfigHashes;
 
-    // FIXME
+    if (auto it = YamlConfigPerDatabase.find(subscription->Tenant); it != YamlConfigPerDatabase.end()) {
+        if (!subscription->DatabaseYamlConfigVersion || *subscription->DatabaseYamlConfigVersion != it->second.Version) {
+            subscription->DatabaseYamlConfigVersion = it->second.Version;
+            request->Record.SetDatabaseConfig(it->second.Config);
+        } else {
+            request->Record.SetDatabaseConfigNotChanged(true);
+        }
+    }
 
     ctx.Send(subscription->Worker, request.Release());
 
