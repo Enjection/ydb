@@ -886,25 +886,11 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvConfigSubscriptionNotification::T
 
     auto newYamlConfig = rec.GetYamlConfig();
 
-    bool isYamlChanged = newYamlConfig != YamlConfig || rec.HasDatabaseConfig();
+    bool isYamlChanged = newYamlConfig != YamlConfig;
 
-    if (rec.HasDatabaseConfig()) {
-        auto in = rec.GetDatabaseConfig();
-        auto pos = in.find("config:");
-        in = in.substr(pos);
-        TString newname;
-        newname += "- description: dbconfig\n";
-        newname += "  selector: \n";
-        newname += "    tenant: ";
-        newname += Labels.at("tenant");
-        newname += "\n  ";
-        for (ui64 i = 0; i < in.size(); i++) {
-            newname += in[i];
-            if(in[i] == '\n' && i != 0)
-                newname += "  ";
-        }
-
-        newYamlConfig.append(newname);
+    if (rec.HasDatabaseConfig() && rec.GetDatabaseConfig() != DatabaseYamlConfig.value_or("")) {
+        DatabaseYamlConfig = rec.GetDatabaseConfig();
+        isYamlChanged = true;
     }
 
     if (rec.VolatileConfigsSize() != VolatileYamlConfigs.size()) {
