@@ -318,20 +318,28 @@ public:
         : Result(std::move(result))
     {}
 
-    const NKikimrConfig::TAppConfig& GetConfig() const {
+    const NKikimrConfig::TAppConfig& GetConfig() const override {
         return Result.GetConfig();
     }
 
-    bool HasYamlConfig() const {
+    bool HasYamlConfig() const override {
         return Result.HasYamlConfig();
     }
 
-    const TString& GetYamlConfig() const {
+    const TString& GetYamlConfig() const override {
         return Result.GetYamlConfig();
     }
 
-    TMap<ui64, TString> GetVolatileYamlConfigs() const {
+    TMap<ui64, TString> GetVolatileYamlConfigs() const override {
         return Result.GetVolatileYamlConfigs();
+    }
+
+    bool HasDatabaseYamlConfig() const override {
+        return Result.HasDatabaseYamlConfig();
+    }
+
+    const TString& GetDatabaseYamlConfig() const override {
+        return Result.GetDatabaseYamlConfig();
     }
 };
 

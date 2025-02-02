@@ -767,25 +767,34 @@ class TConfigurationResult
 {
 public:
     // TODO make ref
-    const NKikimrConfig::TAppConfig& GetConfig() const {
+    const NKikimrConfig::TAppConfig& GetConfig() const override {
         return Config;
     }
 
-    bool HasYamlConfig() const {
+    bool HasYamlConfig() const override {
         return !YamlConfig.empty();
     }
 
-    const TString& GetYamlConfig() const {
+    const TString& GetYamlConfig() const override {
         return YamlConfig;
     }
 
-    TMap<ui64, TString> GetVolatileYamlConfigs() const {
+    TMap<ui64, TString> GetVolatileYamlConfigs() const override {
         return VolatileYamlConfigs;
+    }
+
+    bool HasDatabaseYamlConfig() const override {
+        return !DatabaseYamlConfig.empty();
+    }
+
+    const TString& GetDatabaseYamlConfig() const override {
+        return DatabaseYamlConfig;
     }
 
     NKikimrConfig::TAppConfig Config;
     TString YamlConfig;
     TMap<ui64, TString> VolatileYamlConfigs;
+    TString DatabaseYamlConfig;
 };
 
 void TConfigsDispatcher::UpdateCandidateStartupConfig(TEvConsole::TEvConfigSubscriptionNotification::TPtr &ev)
