@@ -167,6 +167,12 @@ void AppendVolatileConfigs(NFyaml::TDocument& config, NFyaml::TDocument& volatil
 void AppendVolatileConfigs(NFyaml::TDocument& config, NFyaml::TNodeRef& volatileConfig);
 
 /**
+ * Appends database config to the end of selectors list
+ * **Important**: Document should be correct DatabaseConfig
+ */
+void AppendDatabaseConfig(NFyaml::TDocument& config, NFyaml::TDocument& databaseConfig);
+
+/**
  * Parses config version
  */
 ui64 GetVersion(const TString& config);

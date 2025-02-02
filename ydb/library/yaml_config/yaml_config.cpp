@@ -41,9 +41,12 @@ void ResolveAndParseYamlConfig(
     TString* resolvedYamlConfig,
     TString* resolvedJsonConfig)
 {
-    // TODO
-    Y_UNUSED(databaseConfig);
     auto tree = NFyaml::TDocument::Parse(yamlConfig);
+
+    if (databaseConfig) {
+        auto d = NFyaml::TDocument::Parse(*databaseConfig);
+        NYamlConfig::AppendDatabaseConfig(tree, d);
+    }
 
     for (auto& [_, config] : volatileYamlConfigs) {
         auto d = NFyaml::TDocument::Parse(config);

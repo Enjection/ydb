@@ -622,6 +622,23 @@ void AppendVolatileConfigs(NFyaml::TDocument& config, NFyaml::TNodeRef& volatile
     }
 }
 
+void AppendDatabaseConfig(NFyaml::TDocument& config, NFyaml::TDocument& databaseConfig) {
+    auto configRoot = config.Root();
+    if (!configRoot.Map().Has("selector_config")) {
+        configRoot.Map().Append(config.Buildf("selector_config"), config.Buildf("[]"));
+    }
+
+    auto databaseConfigRoot = databaseConfig.Root();
+
+    auto selectors = configRoot.Map().at("selector_config").Sequence();
+    selectors.Append(config.Buildf(R"(
+description: Implicit DatabaseConfig node
+selector: {}
+)"));
+    auto node = databaseConfigRoot.Copy(config);
+    selectors.at(0).Map().Append(config.Buildf("config"), node);
+}
+
 ui64 GetVersion(const TString& config) {
     auto metadata = GetMetadata(config);
     return metadata.Version.value_or(0);
