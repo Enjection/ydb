@@ -48,7 +48,7 @@ public:
     {
     }
 
-    THolder<NActors::IEventHandle> FillResponse(const TUpdateConfigOpContext& opCtx, auto& ev, auto errorLevel, const TActorContext &ctx) {
+    THolder<NActors::IEventHandle> FillResponse(const TUpdateConfigOpBaseContext& opCtx, auto& ev, auto errorLevel, const TActorContext &ctx) {
         for (auto& [path, info] : opCtx.UnknownFields) {
             auto *issue = ev->Record.AddIssues();
             issue->set_severity(errorLevel);
@@ -89,7 +89,6 @@ protected:
     bool Modify = false;
     TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> UnknownFieldsCollector = nullptr;
     ui32 Version;
-    TString Cluster;
     TMaybe<TString> InputDatabase;
     bool WarnDatabaseBypass = false;
 };
@@ -231,6 +230,7 @@ public:
     }
 
 private:
+    TString Cluster;
     TString UpdatedConfig;
 };
 
@@ -256,9 +256,9 @@ public:
     {
         NIceDb::TNiceDb db(txc.DB);
 
-        TUpdateConfigOpContext opCtx;
-        Self->ReplaceMainConfigMetadata(Config, false, opCtx); // FIXME
-        Self->ValidateMainConfig(opCtx); // FIXME
+        TUpdateDatabaseConfigOpContext opCtx;
+        Self->ReplaceDatabaseConfigMetadata(Config, false, opCtx);
+        Self->ValidateDatabaseConfig(opCtx);
 
         bool hasForbiddenUnknown = !opCtx.UnknownFields.empty() && !AllowUnknownFields;
         if (opCtx.Error) {
@@ -268,9 +268,8 @@ public:
 
         try {
             Version = opCtx.Version;
-            // UpdatedConfig = opCtx.UpdatedConfig;
-            Cluster = opCtx.Cluster;
-            // Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
+            UpdatedConfig = opCtx.UpdatedConfig;
+            // Modify = opCtx.UpdatedConfig != Self->YamlConfig;
 
             // if (!InputDatabase) { FIXME: extract database from config itself
             //     WarnDatabaseBypass = true;
@@ -295,13 +294,6 @@ public:
             };
             // FIXME
             Modify = true;
-            // TODO
-            // 1) send
-            // 1) persist
-            // 2) validate
-            // 3) support force
-            // 4) support dry-run
-            // 5) support audit
             auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
             Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
             return true;
@@ -309,16 +301,12 @@ public:
             if (!DryRun && !hasForbiddenUnknown) {
                 DoInternalAudit(txc, ctx);
 
-            //     db.Table<Schema::YamlConfig>().Key(Version + 1)
-            //         .Update<Schema::YamlConfig::Config>(UpdatedConfig)
-            //         // set config dropped by default to support rollback to previous versions
-            //         // where new config layout is not supported
-            //         // it will lead to ignoring config from new versions
-            //         .Update<Schema::YamlConfig::Dropped>(true);
+                db.Table<Schema::PerTenantYamlConfig>().Key(TargetDatabase, Version + 1)
+                    .Update<Schema::YamlConfig::Config>(Config);
 
-            //     /* Later we shift this boundary to support rollback and history */
-            //     db.Table<Schema::YamlConfig>().Key(Version)
-            //         .Delete();
+                /* Later we shift this boundary to support rollback and history */
+                db.Table<Schema::PerTenantYamlConfig>().Key(TargetDatabase, Version)
+                    .Delete();
             }
 
             if (hasForbiddenUnknown) {
@@ -360,11 +348,12 @@ public:
 
     void Complete(const TActorContext &ctx) override
     {
-        Y_UNUSED(ctx); // TODO
+        Self->TxProcessor->TxCompleted(this, ctx);
     }
 
 private:
     TString TargetDatabase;
+    TString UpdatedConfig;
 };
 
 ITransaction *TConfigsManager::CreateTxReplaceMainYamlConfig(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev)

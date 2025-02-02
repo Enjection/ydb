@@ -116,6 +116,72 @@ void TConfigsManager::ValidateMainConfig(TUpdateConfigOpContext& opCtx) {
     }
 }
 
+void TConfigsManager::ReplaceDatabaseConfigMetadata(const TString &config, bool force, TUpdateDatabaseConfigOpContext& opCtx) {
+    // FIXME
+    try {
+        if (!force) {
+            auto metadata = NYamlConfig::GetMetadata(config);
+            opCtx.Cluster = metadata.Cluster.value_or(TString("unknown"));
+            opCtx.Version = metadata.Version.value_or(0);
+        } else {
+            opCtx.Cluster = ClusterName;
+            opCtx.Version = YamlVersion;
+        }
+
+        opCtx.UpdatedConfig = NYamlConfig::ReplaceMetadata(config, NYamlConfig::TMainMetadata{
+                .Version = opCtx.Version + 1,
+                .Cluster = opCtx.Cluster,
+            });
+    } catch (const yexception &e) {
+        opCtx.Error = e.what();
+    }
+}
+
+void TConfigsManager::ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opCtx) {
+    // FIXME
+    try {
+        if (opCtx.UpdatedConfig != YamlConfig || YamlDropped) {
+            auto tree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
+            auto resolved = NYamlConfig::ResolveAll(tree);
+
+            if (ClusterName != opCtx.Cluster) {
+                ythrow yexception() << "ClusterName mismatch";
+            }
+
+            if (opCtx.Version != YamlVersion) {
+                ythrow yexception() << "Version mismatch";
+            }
+
+            TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> unknownFieldsCollector = new NYamlConfig::TBasicUnknownFieldsCollector;
+
+            std::vector<TString> errors;
+            for (auto& [_, config] : resolved.Configs) {
+                auto cfg = NYamlConfig::YamlToProto(
+                    config.second,
+                    true,
+                    true,
+                    unknownFieldsCollector);
+                NKikimr::NConfig::EValidationResult result = NKikimr::NConfig::ValidateConfig(cfg, errors);
+                if (result == NKikimr::NConfig::EValidationResult::Error) {
+                    ythrow yexception() << errors.front();
+                }
+            }
+
+            const auto& deprecatedPaths = NKikimrConfig::TAppConfig::GetReservedChildrenPaths();
+
+            for (const auto& [path, info] : unknownFieldsCollector->GetUnknownKeys()) {
+                if (deprecatedPaths.contains(path)) {
+                    opCtx.DeprecatedFields[path] = info;
+                } else {
+                    opCtx.UnknownFields[path] = info;
+                }
+            }
+        }
+    } catch (const yexception &e) {
+        opCtx.Error = e.what();
+    }
+}
+
 void TConfigsManager::Bootstrap(const TActorContext &ctx)
 {
     LOG_DEBUG(ctx, NKikimrServices::CMS_CONFIGS, "TConfigsManager::Bootstrap");

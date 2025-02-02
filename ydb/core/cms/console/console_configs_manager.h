@@ -32,13 +32,26 @@ private:
 
     using TBase = TActorBootstrapped<TConfigsManager>;
 
-    struct TUpdateConfigOpContext {
+    struct TUpdateConfigOpBaseContext {
         std::optional<TString> Error;
+
+        TMap<TString, std::pair<TString, TString>> DeprecatedFields;
+        TMap<TString, std::pair<TString, TString>> UnknownFields;
+    };
+
+    struct TUpdateConfigOpContext
+        : public TUpdateConfigOpBaseContext
+    {
         TString UpdatedConfig;
         ui32 Version;
         TString Cluster;
-        TMap<TString, std::pair<TString, TString>> DeprecatedFields;
-        TMap<TString, std::pair<TString, TString>> UnknownFields;
+    };
+
+    struct TUpdateDatabaseConfigOpContext
+        : public TUpdateConfigOpBaseContext
+    {
+        TString UpdatedConfig;
+        ui32 Version;
     };
 
 public:
@@ -70,6 +83,9 @@ public:
 
     void ReplaceMainConfigMetadata(const TString &config, bool force, TUpdateConfigOpContext& opCtx);
     void ValidateMainConfig(TUpdateConfigOpContext& opCtx);
+
+    void ReplaceDatabaseConfigMetadata(const TString &config, bool force, TUpdateDatabaseConfigOpContext& opCtx);
+    void ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opCtx);
 
     void SendInReply(const TActorId& sender, const TActorId& icSession, std::unique_ptr<IEventBase> ev, ui64 cookie = 0);
 
