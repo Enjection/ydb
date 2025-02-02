@@ -220,7 +220,7 @@ public:
         bool notChanged = true;
 
         if (ServeYaml) {
-            if (rec.HasDatabaseConfig()) {
+            if (!(rec.HasDatabaseConfigNotChanged() && rec.GetDatabaseConfigNotChanged())) {
                 notChanged = false;
             }
             if (!(rec.HasYamlConfigNotChanged() && rec.GetYamlConfigNotChanged())) {
