@@ -461,6 +461,7 @@ message TGetNodeConfigResponse {
     optional NKikimrConfig.TAppConfig Config = 2;
     optional string YamlConfig = 3;
     repeated TVolatileYamlConfig VolatileConfigs = 4;
+    optional string DatabaseYamlConfig = 5;
 }
 
 message TSubscriber {
