@@ -181,6 +181,9 @@ private:
     void CheckSubscription(TInMemorySubscription::TPtr subscriptions,
                            const TActorContext &ctx);
 
+    void UpdateConfig(TInMemorySubscription::TPtr subscription,
+                      const TActorContext &ctx);
+
     void Handle(NMon::TEvHttpInfo::TPtr &ev);
     void Handle(TEvConsole::TEvConfigSubscriptionRequest::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvConsole::TEvConfigSubscriptionCanceled::TPtr &ev, const TActorContext &ctx);
