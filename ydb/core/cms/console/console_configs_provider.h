@@ -131,9 +131,22 @@ public:
             {
             }
 
+            TEvUpdateYamlConfig(
+                const TString &yamlConfig,
+                const THashMap<TString, TDatabaseYamlConfig> &yamlConfigPerDatabase,
+                const TMap<ui64, TString> &volatileYamlConfigs,
+                const TString& changedDatabase)
+                : YamlConfig(yamlConfig)
+                , YamlConfigPerDatabase(yamlConfigPerDatabase)
+                , VolatileYamlConfigs(volatileYamlConfigs)
+                , ChangedDatabase(changedDatabase)
+            {
+            }
+
             TString YamlConfig;
             THashMap<TString, TDatabaseYamlConfig> YamlConfigPerDatabase;
             TMap<ui64, TString> VolatileYamlConfigs;
+            TString ChangedDatabase;
         };
 
         struct TEvUpdateSubscriptions : public TEventLocal<TEvUpdateSubscriptions, EvUpdateSubscriptions> {

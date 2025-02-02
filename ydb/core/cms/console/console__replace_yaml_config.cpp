@@ -370,7 +370,12 @@ public:
                 .Version = Version + 1,
             };
 
-            auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(Self->YamlConfig, Self->YamlConfigPerDatabase);
+            auto resp = MakeHolder<TConfigsProvider::TEvPrivate::TEvUpdateYamlConfig>(
+                Self->YamlConfig,
+                Self->YamlConfigPerDatabase,
+                Self->VolatileYamlConfigs,
+                TargetDatabase);
+
             ctx.Send(Self->ConfigsProvider, resp.Release());
         } else if (Error && !DryRun) {
             AuditLogReplaceDatabaseConfigTransaction(
