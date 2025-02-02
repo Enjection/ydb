@@ -755,8 +755,7 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
             },
             [&](const NYamlConfig::TDatabaseMetadata&  value) {
                 if (!value.Database || !Self.HasTenant(*value.Database)) {
-                    // TODO fail
-                    return;
+                    return FailReplaceConfig(ev->Sender, "Unknown database", ctx);
                 }
                 TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
             },
@@ -776,8 +775,7 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
             },
             [&](const NYamlConfig::TDatabaseMetadata& value) {
                 if (!value.Database || !Self.HasTenant(*value.Database)) {
-                    // TODO fail
-                    return;
+                    return FailReplaceConfig(ev->Sender, "Unknown database", ctx);
                 }
                 TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
             },
@@ -788,7 +786,8 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
 }
 
 void TConfigsManager::FailReplaceConfig(TActorId Sender, const TString& error, const TActorContext &ctx) {
-     auto resp = MakeHolder<TEvConsole::TEvGenericError>();
+    // TODO: +audit
+    auto resp = MakeHolder<TEvConsole::TEvGenericError>();
     resp->Record.SetYdbStatus(Ydb::StatusIds::BAD_REQUEST);
     auto *issue = resp->Record.AddIssues();
     issue->set_severity(NYql::TSeverityIds::S_ERROR);
