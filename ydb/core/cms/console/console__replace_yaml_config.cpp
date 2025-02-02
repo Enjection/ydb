@@ -29,7 +29,7 @@ class TConfigsManager::TTxReplaceYamlConfigBase
             , Force(force)
             , AllowUnknownFields(ev->Get()->Record.GetRequest().allow_unknown_fields())
             , DryRun(ev->Get()->Record.GetRequest().dry_run())
-            , InputDatabase(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
+            , IngressDatabase(ev->Get()->Record.HasDatabase() ? TMaybe<TString>{ev->Get()->Record.GetDatabase()} : TMaybe<TString>{})
     {
     }
 
@@ -88,8 +88,7 @@ protected:
     TString ErrorReason;
     bool Modify = false;
     TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> UnknownFieldsCollector = nullptr;
-    ui32 Version;
-    TMaybe<TString> InputDatabase;
+    TMaybe<TString> IngressDatabase;
     bool WarnDatabaseBypass = false;
 };
 
@@ -131,7 +130,7 @@ public:
             Cluster = opCtx.Cluster;
             Modify = opCtx.UpdatedConfig != Self->YamlConfig || Self->YamlDropped;
 
-            if (InputDatabase) {
+            if (IngressDatabase) {
                 WarnDatabaseBypass = true;
             }
 
@@ -230,6 +229,7 @@ public:
     }
 
 private:
+    ui32 Version;
     TString Cluster;
     TString UpdatedConfig;
 };
@@ -271,9 +271,9 @@ public:
             UpdatedConfig = opCtx.UpdatedConfig;
             // Modify = opCtx.UpdatedConfig != Self->YamlConfig;
 
-            // if (!InputDatabase) { FIXME: extract database from config itself
-            //     WarnDatabaseBypass = true;
-            // }
+            if (IngressDatabase != opCtx.TargetDatabase) {
+                WarnDatabaseBypass = true;
+            }
 
             if (!AppData(ctx)->FeatureFlags.GetPerDatabaseConfigAllowed()) {
                 Error = true;
@@ -288,15 +288,14 @@ public:
                 return true;
             }
 
-            Self->YamlConfigPerDatabase[*InputDatabase] = TDatabaseYamlConfig {
+            Self->YamlConfigPerDatabase[*IngressDatabase] = TDatabaseYamlConfig {
                 .Config = Config,
                 .Version = Version,
             };
-            // FIXME
-            Modify = true;
+
+            // FIXME ?
             auto ev = MakeHolder<TEvConsole::TEvReplaceYamlConfigResponse>();
             Response = FillResponse(opCtx, ev, NYql::TSeverityIds::S_WARNING, ctx);
-            return true;
 
             if (!DryRun && !hasForbiddenUnknown) {
                 DoInternalAudit(txc, ctx);
@@ -352,6 +351,7 @@ public:
     }
 
 private:
+    ui32 Version;
     TString TargetDatabase;
     TString UpdatedConfig;
 };
