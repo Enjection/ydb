@@ -683,6 +683,26 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                                     }
                                 }
                                 str << "<hr/>" << Endl;
+                                TAG(TH5) {
+                                    str << "Database Config" << Endl;
+                                }
+                                TAG_CLASS_STYLE(TDiv, "configs-dispatcher", "padding: 0 12px;") {
+                                    TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap fold-yaml-config yaml-btn-3"}, {"title", "fold"}}) {
+                                        DIV_CLASS("yaml-sticky-btn") { }
+                                    }
+                                    TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap unfold-yaml-config yaml-btn-2"}, {"title", "unfold"}}) {
+                                        DIV_CLASS("yaml-sticky-btn") { }
+                                    }
+                                    TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap copy-yaml-config yaml-btn-1"}, {"title", "copy"}}) {
+                                        DIV_CLASS("yaml-sticky-btn") { }
+                                    }
+                                    DIV_CLASS("yaml-config-item") {
+                                        if (DatabaseYamlConfig) {
+                                            str << *DatabaseYamlConfig;
+                                        }
+                                    }
+                                }
+                                str << "<hr/>" << Endl;
                                 for (auto &[id, config] : VolatileYamlConfigs) {
                                     DIV() {
                                         TAG(TH5) {
