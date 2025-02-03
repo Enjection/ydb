@@ -23,7 +23,7 @@ public:
         if (IngressDatabase) {
             if (Self->YamlConfigPerDatabase.contains(*IngressDatabase)) {
                 Response->Record.MutableResponse()->add_identity()->set_database(*IngressDatabase);
-                Response->Record.MutableResponse()->add_identity()->set_version(Self->YamlVersion);
+                Response->Record.MutableResponse()->add_identity()->set_version(Self->YamlConfigPerDatabase[*IngressDatabase].Version);
                 Response->Record.MutableResponse()->add_config(Self->YamlConfigPerDatabase[*IngressDatabase].Config);
             }
 
@@ -33,6 +33,12 @@ public:
         Response->Record.MutableResponse()->add_identity()->set_cluster(Self->ClusterName);
         Response->Record.MutableResponse()->add_identity()->set_version(Self->YamlVersion);
         Response->Record.MutableResponse()->add_config(Self->YamlConfig);
+
+        for (const auto& [database, config] : Self->YamlConfigPerDatabase) {
+            Response->Record.MutableResponse()->add_identity()->set_database(database);
+            Response->Record.MutableResponse()->add_identity()->set_version(config.Version);
+            Response->Record.MutableResponse()->add_config(config.Config);
+        }
 
         for (auto &[id, cfg] : Self->VolatileYamlConfigs) {
             auto *config = Response->Record.MutableResponse()->add_volatile_configs();
