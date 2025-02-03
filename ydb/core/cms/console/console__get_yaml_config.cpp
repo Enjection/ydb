@@ -12,7 +12,7 @@ public:
                      TEvConsole::TEvGetAllConfigsRequest::TPtr &ev)
         : TBase(self)
         , Request(std::move(ev))
-        , Database(Request->Get()->Record.HasDatabase() ? TMaybe<TString>{Request->Get()->Record.GetDatabase()} : TMaybe<TString>{})
+        , IngressDatabase(Request->Get()->Record.HasDatabase() ? TMaybe<TString>{Request->Get()->Record.GetDatabase()} : TMaybe<TString>{})
     {
     }
 
@@ -20,17 +20,19 @@ public:
     {
         Response = MakeHolder<TEvConsole::TEvGetAllConfigsResponse>();
 
-        if (Database) {
-            if (Self->YamlConfigPerDatabase.contains(*Database)) {
-                Response->Record.MutableResponse()->set_config(Self->YamlConfigPerDatabase[*Database].Config);
+        if (IngressDatabase) {
+            if (Self->YamlConfigPerDatabase.contains(*IngressDatabase)) {
+                Response->Record.MutableResponse()->add_identity()->set_database(*IngressDatabase);
+                Response->Record.MutableResponse()->add_identity()->set_version(Self->YamlVersion);
+                Response->Record.MutableResponse()->add_config(Self->YamlConfigPerDatabase[*IngressDatabase].Config);
             }
 
             return true;
         }
 
-        Response->Record.MutableResponse()->mutable_identity()->set_cluster(Self->ClusterName);
-        Response->Record.MutableResponse()->mutable_identity()->set_version(Self->YamlVersion);
-        Response->Record.MutableResponse()->set_config(Self->YamlConfig);
+        Response->Record.MutableResponse()->add_identity()->set_cluster(Self->ClusterName);
+        Response->Record.MutableResponse()->add_identity()->set_version(Self->YamlVersion);
+        Response->Record.MutableResponse()->add_config(Self->YamlConfig);
 
         for (auto &[id, cfg] : Self->VolatileYamlConfigs) {
             auto *config = Response->Record.MutableResponse()->add_volatile_configs();
@@ -53,7 +55,7 @@ public:
 private:
     TEvConsole::TEvGetAllConfigsRequest::TPtr Request;
     THolder<TEvConsole::TEvGetAllConfigsResponse> Response;
-    TMaybe<TString> Database;
+    TMaybe<TString> IngressDatabase;
 };
 
 ITransaction *TConfigsManager::CreateTxGetYamlConfig(TEvConsole::TEvGetAllConfigsRequest::TPtr &ev)
