@@ -269,7 +269,11 @@ public:
         try {
             Version = opCtx.Version;
             UpdatedConfig = opCtx.UpdatedConfig;
-            // Modify = opCtx.UpdatedConfig != Self->YamlConfig;
+            TString currentConfig;
+            if (auto it = Self->YamlConfigPerDatabase.find(opCtx.TargetDatabase); it != Self->YamlConfigPerDatabase.end()) {
+                currentConfig = it->second.Config;
+            }
+            Modify = opCtx.UpdatedConfig != currentConfig;
 
             if (IngressDatabase != opCtx.TargetDatabase) {
                 WarnDatabaseBypass = true;

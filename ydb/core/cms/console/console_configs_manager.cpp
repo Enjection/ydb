@@ -142,15 +142,16 @@ void TConfigsManager::ReplaceDatabaseConfigMetadata(const TString &config, bool 
 }
 
 void TConfigsManager::ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opCtx) {
-    // FIXME
     try {
-        if (opCtx.UpdatedConfig != YamlConfig || YamlDropped) {
-            auto tree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
+        TString currentConfig;
+        if (auto it = YamlConfigPerDatabase.find(opCtx.TargetDatabase); it != YamlConfigPerDatabase.end()) {
+            currentConfig = it->second.Config;
+        }
+        if (opCtx.UpdatedConfig != currentConfig) {
+            auto tree = NFyaml::TDocument::Parse(YamlConfig);
+            auto d = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
+            NYamlConfig::AppendDatabaseConfig(tree, d);
             auto resolved = NYamlConfig::ResolveAll(tree);
-
-            if (opCtx.Version != YamlVersion) {
-                ythrow yexception() << "Version mismatch";
-            }
 
             TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> unknownFieldsCollector = new NYamlConfig::TBasicUnknownFieldsCollector;
 
