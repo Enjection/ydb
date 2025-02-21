@@ -607,7 +607,7 @@ NKikimrConsole::TConfigureRequest DumpYamlConfigRequest(const TString &cItem, co
             auto key = item.Key().Copy(separateConfig);
             auto value = item.Value().Copy(separateConfig);
             separateConfig.Root().Map().Append(key, value);
-            auto config = YamlToProto(separateConfig.Root(), true, false);
+            auto config = YamlToProto(TResolvedConfigYaml{separateConfig.Root()}, true, false);
             NKikimrConsole::TConfigItem& configItem = *result.AddActions()->MutableAddConfigItem()->MutableConfigItem();
             configItemCb(configItem);
             configItem.MutableConfig()->CopyFrom(config);

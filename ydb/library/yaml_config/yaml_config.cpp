@@ -11,14 +11,14 @@
 namespace NKikimr::NYamlConfig {
 
 NKikimrConfig::TAppConfig YamlToProto(
-    const NFyaml::TNodeRef& node,
+    const TResolvedConfigYaml& config,
     bool allowUnknown,
     bool preTransform,
     TSimpleSharedPtr<NProtobufJson::IUnknownFieldsCollector> unknownFieldsCollector)
 {
     TStringStream sstr;
 
-    sstr << NFyaml::TJsonEmitter(node);
+    sstr << NFyaml::TJsonEmitter(config.Config);
 
     TString resolvedJsonConfig = sstr.Str();
 

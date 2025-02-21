@@ -59,11 +59,15 @@ private:
     TMap<TString, std::pair<TString, TString>> UnknownKeys;
 };
 
+struct TResolvedConfigYaml {
+    NFyaml::TNodeRef Config;
+};
+
 /**
  * Converts YAML representation to ProtoBuf
  */
 NKikimrConfig::TAppConfig YamlToProto(
-    const NFyaml::TNodeRef& node,
+    const TResolvedConfigYaml& config,
     bool allowUnknown = false,
     bool preTransform = true,
     TSimpleSharedPtr<NProtobufJson::IUnknownFieldsCollector> unknownFieldsCollector = nullptr);
