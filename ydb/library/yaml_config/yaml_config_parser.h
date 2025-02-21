@@ -67,8 +67,16 @@ namespace NKikimr::NYaml {
 
     // TODO: replace bools with something meaningful
 
-    void Parse(const NJson::TJsonValue& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config, bool transform, bool relaxed = false);
-    NKikimrConfig::TAppConfig Parse(const TString& data, bool transform = true);
+    struct TResolvedConfigJson {
+        NJson::TJsonValue Config;
+    };
+
+    struct TResolvedConfig {
+        TString Config;
+    };
+
+    void Parse(const TResolvedConfigJson& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config, bool transform, bool relaxed = false);
+    NKikimrConfig::TAppConfig Parse(const TResolvedConfig& data, bool transform = true);
 
     void ValidateMetadata(const NJson::TJsonValue& metadata);
 

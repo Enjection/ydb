@@ -1488,19 +1488,10 @@ namespace NKikimr::NYaml {
         return replaceRequest;
     }
 
-    void Parse(const NJson::TJsonValue& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config, bool transform, bool relaxed) {
-        auto jsonNode = json;
+    void Parse(const TResolvedConfigJson& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config, bool transform, bool relaxed) {
+        auto jsonNode = json.Config;
         TTransformContext ctx;
         NKikimrConfig::TEphemeralInputFields ephemeralConfig;
-
-        if (json.Has("metadata")) {
-            ValidateMetadata(json["metadata"]);
-
-            Y_ENSURE_BT(json.Has("config") && json["config"].IsMap(),
-                       "'config' must be an object when 'metadata' is present");
-
-            jsonNode = json["config"];
-        }
 
         if (transform) {
             ExtractExtraFields(jsonNode, ctx);
@@ -1518,13 +1509,13 @@ namespace NKikimr::NYaml {
         }
     }
 
-    NKikimrConfig::TAppConfig Parse(const TString& data, bool transform) {
-        auto yamlNode = YAML::Load(data);
+    NKikimrConfig::TAppConfig Parse(const TResolvedConfig& data, bool transform) {
+        auto yamlNode = YAML::Load(data.Config);
         NJson::TJsonValue jsonNode = Yaml2Json(yamlNode, true);
 
         NKikimrConfig::TAppConfig config;
 
-        Parse(jsonNode, GetJsonToProtoConfig(), config, transform);
+        Parse(TResolvedConfigJson{jsonNode}, GetJsonToProtoConfig(), config, transform, true);
 
         return config;
     }

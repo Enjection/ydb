@@ -27,7 +27,12 @@ NKikimrConfig::TAppConfig YamlToProto(
     NJson::ReadJsonTree(resolvedJsonConfig, &json);
 
     NKikimrConfig::TAppConfig yamlProtoConfig;
-    NYaml::Parse(json, NYaml::GetJsonToProtoConfig(allowUnknown, std::move(unknownFieldsCollector)), yamlProtoConfig, preTransform, true);
+    NYaml::Parse(
+        NYaml::TResolvedConfigJson{json},
+        NYaml::GetJsonToProtoConfig(allowUnknown, std::move(unknownFieldsCollector)),
+        yamlProtoConfig,
+        preTransform,
+        true);
 
     return yamlProtoConfig;
 }
@@ -80,7 +85,7 @@ void ResolveAndParseYamlConfig(
     NJson::TJsonValue json;
     Y_ABORT_UNLESS(NJson::ReadJsonTree(resolvedJsonConfigStream.Str(), &json), "Got invalid config from Console");
 
-    NYaml::Parse(json, NYaml::GetJsonToProtoConfig(true), appConfig, true, true);
+    NYaml::Parse(NYaml::TResolvedConfigJson{json}, NYaml::GetJsonToProtoConfig(true), appConfig, true, true);
 }
 
 void ReplaceUnmanagedKinds(const NKikimrConfig::TAppConfig& from, NKikimrConfig::TAppConfig& to) {
