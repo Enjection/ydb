@@ -44,6 +44,7 @@
 
 namespace fs = std::filesystem;
 
+extern TAutoPtr<NKikimrConfig::TActorSystemConfig> DummyActorSystemConfig();
 extern TAutoPtr<NKikimrConfig::TAllocatorConfig> DummyAllocatorConfig();
 
 using namespace NYdb::NConsoleClient;
@@ -1110,6 +1111,11 @@ public:
         LoadMainYamlConfig(refs, yamlConfigFile, storageYamlConfigFile, loadedFromStore, AppConfig);
 
         Option("sys-file", TCfg::TActorSystemConfigFieldTag{});
+
+        if (!AppConfig.HasActorSystemConfig()) {
+            AppConfig.MutableActorSystemConfig()->CopyFrom(*DummyActorSystemConfig());
+            ConfigUpdateTracer.AddUpdate(NKikimrConsole::TConfigItem::ActorSystemConfigItem, TConfigItemInfo::EUpdateKind::SetExplicitly);
+        }
 
         Option("domains-file", TCfg::TDomainsConfigFieldTag{});
         Option("bs-file", TCfg::TBlobStorageConfigFieldTag{});
