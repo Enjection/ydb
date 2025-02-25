@@ -11,6 +11,9 @@
 #include <ydb/core/protos/local.pb.h>
 #include <ydb/core/blobstorage/nodewarden/node_warden_events.h>
 
+#include <util/system/shellcommand.h>
+#include <library/cpp/diff/diff.h>
+
 namespace NKikimr::NGRpcService {
 
 using TEvReplaceStorageConfigRequest =
@@ -133,6 +136,36 @@ void CopyFromConfigResponse(const NKikimrBlobStorage::TConfigResponse &from, Ydb
     config.set_config(NYaml::ParseProtoToYaml(storageConfig));
 }
 
+
+struct TTraceDiffFormatter {
+    bool Reverse = false;
+
+    explicit TTraceDiffFormatter(bool reverse = false)
+        : Reverse(reverse)
+    {
+    }
+
+    TString Special(TStringBuf str) const {
+        return ToString(str);
+    }
+
+    TString Common(TArrayRef<const char> str) const {
+        return TString(str.begin(), str.end());
+    }
+
+    TString Left(TArrayRef<const char> str) const {
+        return "Provided(" +
+               TString(str.begin(), str.end()) +
+               ")";
+    }
+
+    TString Right(TArrayRef<const char> str) const {
+        return "Signed(" +
+               TString(str.begin(), str.end()) +
+               ")";
+    }
+};
+
 class TReplaceStorageConfigRequest : public TBSConfigRequestGrpc<TReplaceStorageConfigRequest, TEvReplaceStorageConfigRequest,
     Ydb::Config::ReplaceConfigResult> {
 public:
@@ -146,10 +179,75 @@ public:
             issues.AddIssue("DryRun is not supported yet.");
             return false;
         }
+
+        TStringBuf configWithSig(request.replace());
+        if (configWithSig.size() != 0) {
+            configWithSig = configWithSig.substr(0, configWithSig.size() - 1);
+        }
+        TStringBuf config;
+        TStringBuf sig;
+        TString sigStart("# signature ");
+
+        if (!configWithSig.TryRSplit('\n', config, sig)) {
+            status = Ydb::StatusIds::BAD_REQUEST;
+            issues.AddIssue("Invalid signature");
+            return false;
+        } else if (!sig.StartsWith(sigStart)) {
+            status = Ydb::StatusIds::BAD_REQUEST;
+            issues.AddIssue("Invalid file format");
+            return false;
+        } else {
+            sig = sig.substr(sigStart.length());
+
+            TString sigDer = Base64Decode(sig);
+            TStringInput input(sigDer);
+            TString signedDoc;
+            TStringOutput output(signedDoc);
+            TString errorStr;
+            TStringOutput error(errorStr);
+
+            TShellCommandOptions options;
+            options.SetInputStream(&input);
+            options.SetOutputStream(&output);
+            options.SetErrorStream(&error);
+            TShellCommand cmd("openssl", {"cms", "-verify", "-inform", "der", "-CAfile", "/etc/ssl/certs/ydb/admin.pem"}, options);
+            auto result = cmd.Run().Wait().GetExitCode();
+
+            TStringStream ss;
+            if (result && !*result && errorStr.StartsWith("Verification successful")) {
+
+                auto sampleConfig = NYamlConfig::StripMetadata(TString(config));
+                sampleConfig += "\n"; // restore after rsplit
+                auto signedConfig = NYamlConfig::StripMetadata(signedDoc);
+                SubstGlobal(signedConfig, "\r", "");
+                if (sampleConfig != signedConfig) {
+                    status = Ydb::StatusIds::BAD_REQUEST;
+
+                    TStringStream res;
+                    TVector<NDiff::TChunk<char>> chunks;
+                    TString delims = "\n";
+                    NDiff::InlineDiff(chunks, sampleConfig, signedConfig, delims);
+                    NDiff::PrintChunks(res, TTraceDiffFormatter(), chunks);
+
+                    issues.AddIssue("Signed and provided config mismatch: " + res.Str());
+
+                    return false;
+                }
+
+                // TODO compare payload with config
+                // with excluded metadata in both
+                return true;
+            }
+
+            status = Ydb::StatusIds::BAD_REQUEST;
+            issues.AddIssue("Invalid signature");
+            return false;
+        }
+
         return true;
     }
 
-    NACLib::EAccessRights GetRequiredAccessRights() const {
+    NACLib::EAccessRights GetRequiredAccessRights() const {        
         return NACLib::GenericManage;
     }
 

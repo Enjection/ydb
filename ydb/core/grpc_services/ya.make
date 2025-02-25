@@ -116,6 +116,8 @@ PEERDIR(
     ydb/core/engine
     ydb/core/formats
     ydb/core/fq/libs/events
+
+    library/cpp/diff
     ydb/core/fq/libs/control_plane_proxy/events
     ydb/core/grpc_services/base
     ydb/core/grpc_services/counters
