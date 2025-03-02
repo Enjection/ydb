@@ -45,6 +45,7 @@ public:
         ConfigKeyNextSubscriptionId,
         ConfigKeyNextLogItemId,
         ConfigKeyMinLogItemId,
+        ConfigKeyConfigsManagerMode,
     };
 
 private:

@@ -265,6 +265,7 @@ message TSetYamlConfigRequest {
     optional bytes UserToken = 2;
     optional string PeerName = 3;
     optional string IngressDatabase = 4;
+    optional bool BSCMarker = 6; // All requests going through bsc / distconf must set it to true
 }
 
 message TSetYamlConfigResponse {
@@ -276,6 +277,7 @@ message TReplaceYamlConfigRequest {
     optional bytes UserToken = 2;
     optional string PeerName = 3;
     optional string IngressDatabase = 4;
+    optional bool BSCMarker = 6; // All requests going through bsc / distconf must set it to true
 }
 
 message TReplaceYamlConfigResponse {

@@ -55,6 +55,13 @@ private:
         ui32 Version;
     };
 
+    enum class EMode : ui64 {
+        ModeDirectManagement = 0,
+        ModeBscManagement,
+
+        UnknownMode, // must always stay last
+    };
+
 public:
     struct TEvPrivate {
         enum EEv {
@@ -303,6 +310,7 @@ public:
 
 private:
     TConsole &Self;
+    EMode Mode;
     TConfigsConfig Config;
     TString DomainName;
     // All config items by id.

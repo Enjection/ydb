@@ -476,6 +476,7 @@ bool TConfigsManager::DbLoadState(TTransactionContext &txc,
     auto validatorsRowset = db.Table<Schema::DisabledValidators>().Range().Select<Schema::DisabledValidators::TColumns>();
     auto yamlConfigRowset = db.Table<Schema::YamlConfig>().Reverse().Select<Schema::YamlConfig::TColumns>();
     auto databaseYamlConfigRowset = db.Table<Schema::DatabaseYamlConfigs>().Select<Schema::DatabaseYamlConfigs::TColumns>();
+    auto modeRow = db.Table<Schema::Config>().Key(TConsole::ConfigKeyConfigsManagerMode).Select<Schema::Config::Value>();
 
     if (!configItemRowset.IsReady()
         || !nextConfigItemIdRow.IsReady()
@@ -618,6 +619,15 @@ bool TConfigsManager::DbLoadState(TTransactionContext &txc,
 
         if (!validatorsRowset.Next())
             return false;
+    }
+
+    if (modeRow.IsValid()) {
+        TString value = modeRow.GetValue<Schema::Config::Value>();
+        ui64 mode = FromString<ui64>(value);
+        Y_ABORT_UNLESS(mode < ui64(EMode::UnknownMode), "Invariant violation: console configs manager unknown mode");
+        Mode = static_cast<EMode>(mode);
+    } else {
+        Mode = EMode::ModeDirectManagement;
     }
 
     return true;
@@ -789,8 +799,24 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
     auto& request = ev->Get()->Record.GetRequest();
     auto metadata = NYamlConfig::GetGenericMetadata(request.config());
 
+    auto doAudit = [&](const TString& error) {
+        AuditLogReplaceConfigTransaction(
+            /* peer = */ ev->Get()->Record.GetPeerName(),
+            /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
+            /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
+            /* oldConfig = */ MainYamlConfig,
+            /* newConfig = */ ev->Get()->Record.GetRequest().config(),
+            /* reason = */ error,
+            /* success = */ false);
+    };
+
     std::visit(TOverloaded{
             [&](const NYamlConfig::TMainMetadata& /* value */) {
+                if (Mode == EMode::ModeDirectManagement && !ev->Get()->Record.GetBSCMarker()) {
+                    doAudit("Config is managed by BSC");
+                    return FailReplaceConfig(ev->Sender, "Config is managed by BSC", ctx);
+                }
+
                 TxProcessor->ProcessTx(CreateTxReplaceMainYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TDatabaseMetadata&  value) {
@@ -800,14 +826,7 @@ void TConfigsManager::Handle(TEvConsole::TEvReplaceYamlConfigRequest::TPtr &ev, 
                 TxProcessor->ProcessTx(CreateTxReplaceDatabaseYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TError& error) {
-                AuditLogReplaceConfigTransaction(
-                    /* peer = */ ev->Get()->Record.GetPeerName(),
-                    /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
-                    /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
-                    /* oldConfig = */ MainYamlConfig,
-                    /* newConfig = */ ev->Get()->Record.GetRequest().config(),
-                    /* reason = */ error.Error,
-                    /* success = */ false);
+                doAudit(error.Error);
                 return FailReplaceConfig(ev->Sender, error.Error, ctx);
             }
         }, metadata);
@@ -818,8 +837,24 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
     auto& request = ev->Get()->Record.GetRequest();
     auto metadata = NYamlConfig::GetGenericMetadata(request.config());
 
+    auto doAudit = [&](const TString& error) {
+        AuditLogReplaceConfigTransaction(
+            /* peer = */ ev->Get()->Record.GetPeerName(),
+            /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
+            /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
+            /* oldConfig = */ MainYamlConfig,
+            /* newConfig = */ ev->Get()->Record.GetRequest().config(),
+            /* reason = */ error,
+            /* success = */ false);
+    };
+
     std::visit(TOverloaded{
             [&](const NYamlConfig::TMainMetadata& /* value */) {
+                if (Mode == EMode::ModeDirectManagement && !ev->Get()->Record.GetBSCMarker()) {
+                    doAudit("Config is managed by BSC");
+                    return FailReplaceConfig(ev->Sender, "Config is managed by BSC", ctx);
+                }
+
                 TxProcessor->ProcessTx(CreateTxSetMainYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TDatabaseMetadata& value) {
@@ -829,14 +864,7 @@ void TConfigsManager::Handle(TEvConsole::TEvSetYamlConfigRequest::TPtr &ev, cons
                 TxProcessor->ProcessTx(CreateTxSetDatabaseYamlConfig(ev), ctx);
             },
             [&](const NYamlConfig::TError& error) {
-                AuditLogReplaceConfigTransaction(
-                    /* peer = */ ev->Get()->Record.GetPeerName(),
-                    /* userSID = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetUserSID(),
-                    /* sanitizedToken = */ NACLib::TUserToken(ev->Get()->Record.GetUserToken()).GetSanitizedToken(),
-                    /* oldConfig = */ MainYamlConfig,
-                    /* newConfig = */ ev->Get()->Record.GetRequest().config(),
-                    /* reason = */ error.Error,
-                    /* success = */ false);
+                doAudit(error.Error);
                 return FailReplaceConfig(ev->Sender, error.Error, ctx);
             }
         }, metadata);
