@@ -42,6 +42,7 @@ namespace TEvPrivate {
         EvRetryNodeSubscribe,
         EvRunDataErasure,
         EvRunTenantDataErasure,
+        EvRunRestoreScan,
         EvEnd
     };
 
@@ -250,6 +251,14 @@ namespace TEvPrivate {
         const TPathId StreamPathId;
 
         TEvRunCdcStreamScan(const TPathId& streamPathId)
+            : StreamPathId(streamPathId)
+        {}
+    };
+
+    struct TEvRunRestoreScan: public TEventLocal<TEvRunRestoreScan, EvRunRestoreScan> {
+        const TPathId StreamPathId;
+
+        TEvRunRestoreScan(const TPathId& streamPathId)
             : StreamPathId(streamPathId)
         {}
     };
