@@ -925,6 +925,89 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         UNIT_ASSERT_VALUES_EQUAL(expected, actual);
     }
 
+    Y_UNIT_TEST(E2EBackupCollectionMany) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table1", SimpleTable());
+        CreateShardedTable(server, edgeActor, "/Root", "Table2", SimpleTable());
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, value) VALUES
+                (1, 10)
+              , (2, 20)
+              , (3, 30)
+              ;
+        )");
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table2` (key, value) VALUES
+                (4, 10)
+              , (5, 20)
+              , (6, 30)
+              ;
+        )");
+
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MyCollection`
+              ( TABLE `/Root/Table1`
+              , TABLE `/Root/Table2`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+            )", false);
+
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, value) VALUES
+            (2, 200);
+        )");
+
+        ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table1` WHERE key=1;)");
+
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table2` (key, value) VALUES
+            (5, 5000);
+        )");
+
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        auto expected1 = KqpSimpleExec(runtime, R"(SELECT key, value FROM `/Root/Table1` ORDER BY key)");
+        auto expected2 = KqpSimpleExec(runtime, R"(SELECT key, value FROM `/Root/Table2` ORDER BY key)");
+
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table1`;)", false);
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
+
+        ExecSQL(server, edgeActor, R"(RESTORE `MyCollection`;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        auto actual1 = KqpSimpleExec(runtime, R"(SELECT key, value FROM `/Root/Table1` ORDER BY key)");
+        auto actual2 = KqpSimpleExec(runtime, R"(SELECT key, value FROM `/Root/Table2` ORDER BY key)");
+
+        UNIT_ASSERT_VALUES_EQUAL(expected1, actual1);
+        UNIT_ASSERT_VALUES_EQUAL(expected2, actual2);
+    }
+
 } // Y_UNIT_TEST_SUITE(IncrementalBackup)
 
 } // NKikimr
