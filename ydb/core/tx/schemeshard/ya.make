@@ -219,6 +219,7 @@ SRCS(
     schemeshard_build_index_tx_base.cpp
     schemeshard_cdc_stream_common.cpp
     schemeshard_cdc_stream_scan.cpp
+    schemeshard_incremental_restore.cpp
     schemeshard_domain_links.cpp
     schemeshard_domain_links.h
     schemeshard_effective_acl.cpp
