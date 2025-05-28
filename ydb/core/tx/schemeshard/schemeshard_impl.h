@@ -1519,6 +1519,7 @@ public:
 
     NTabletFlatExecutor::ITransaction* CreateTxProgressRestoreScan(TEvPrivate::TEvRunRestoreScan::TPtr& ev);
     NTabletFlatExecutor::ITransaction* CreateTxProgressRestoreScan(TEvDataShard::TEvRestoreScanResponse::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreatePipeRetry(TTabletId tabletId);
 
     void Handle(TEvPrivate::TEvRunRestoreScan::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvDataShard::TEvRestoreScanResponse::TPtr& ev, const TActorContext& ctx);

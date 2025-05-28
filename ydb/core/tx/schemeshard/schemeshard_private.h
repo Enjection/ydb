@@ -256,10 +256,10 @@ namespace TEvPrivate {
     };
 
     struct TEvRunRestoreScan: public TEventLocal<TEvRunRestoreScan, EvRunRestoreScan> {
-        const TPathId StreamPathId;
+        const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups RestoreOp;
 
-        TEvRunRestoreScan(const TPathId& streamPathId)
-            : StreamPathId(streamPathId)
+        TEvRunRestoreScan(const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups& restoreOp)
+            : RestoreOp(restoreOp)
         {}
     };
 

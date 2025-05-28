@@ -360,63 +360,6 @@ private:
 
         return true;
     }
-
-    void Bill(const TPathId& pathId, const TShardIdx& shardIdx, ui64 ru, const TActorContext& ctx) {
-        const auto domainPathId = Self->ResolvePathIdForDomain(pathId);
-
-        Y_ABORT_UNLESS(Self->SubDomains.contains(domainPathId));
-        auto domainInfo = Self->SubDomains.at(domainPathId);
-
-        if (!Self->IsServerlessDomain(domainInfo)) {
-            LOG_D("Unable to make a bill"
-                << ": streamPathId# " << pathId
-                << ", reason# " << "domain is not a serverless db");
-            return;
-        }
-
-        Y_ABORT_UNLESS(Self->PathsById.contains(domainPathId));
-        auto domainPath = Self->PathsById.at(domainPathId);
-
-        const auto& attrs = domainPath->UserAttrs->Attrs;
-        if (!attrs.contains("cloud_id")) {
-            LOG_D("Unable to make a bill"
-                << ": streamPathId# " << pathId
-                << ", reason# " << "'cloud_id' not found in user attributes");
-            return;
-        }
-
-        if (!attrs.contains("folder_id")) {
-            LOG_D("Unable to make a bill"
-                << ": streamPathId# " << pathId
-                << ", reason# " << "'folder_id' not found in user attributes");
-            return;
-        }
-
-        if (!attrs.contains("database_id")) {
-            LOG_D("Unable to make a bill"
-                << ": streamPathId# " << pathId
-                << ", reason# " << "'database_id' not found in user attributes");
-            return;
-        }
-
-        const auto now = ctx.Now();
-        const TString id = TStringBuilder() << "cdc_stream_scan"
-            << "-" << pathId.OwnerId << "-" << pathId.LocalPathId
-            << "-" << shardIdx.GetOwnerId() << "-" << shardIdx.GetLocalId();
-        const TString billRecord = TBillRecord()
-            .Id(id)
-            .CloudId(attrs.at("cloud_id"))
-            .FolderId(attrs.at("folder_id"))
-            .ResourceId(attrs.at("database_id"))
-            .SourceWt(now)
-            .Usage(TBillRecord::RequestUnits(Max(ui64(1), ru), now))
-            .ToString();
-
-        LOG_N("Make a bill"
-            << ": streamPathId# " << pathId
-            << ", record# " << billRecord);
-        Metering = MakeHolder<NMetering::TEvMetering::TEvWriteMeteringJson>(std::move(billRecord));
-    }
 };
 
 ITransaction* TSchemeShard::CreateTxProgressRestoreScan(TEvPrivate::TEvRunRestoreScan::TPtr& ev) {
@@ -427,8 +370,10 @@ ITransaction* TSchemeShard::CreateTxProgressRestoreScan(TEvDataShard::TEvRestore
     return new TRestoreScan::TTxProgress(this, ev);
 }
 
-ITransaction* TSchemeShard::CreatePipeRetry(const TPathId& streamPathId, TTabletId tabletId) {
-    return new TRestoreScan::TTxProgress(this, streamPathId, tabletId);
+ITransaction* TSchemeShard::CreatePipeRetry(TTabletId tabletId) {
+    // TODO
+    return nullptr;
+    // return new TRestoreScan::TTxProgress(this, tabletId);
 }
 
 void TSchemeShard::Handle(TEvPrivate::TEvRunRestoreScan::TPtr& ev, const TActorContext& ctx) {
