@@ -1510,6 +1510,27 @@ public:
     void RemoveCdcStreamScanShardStatus(NIceDb::TNiceDb& db, const TPathId& streamPathId, const TShardIdx& shardIdx);
     // } // NCdcStreamScan
 
+    // namespace NRestoreScan {
+    struct TRestoreScan {
+        struct TTxProgress;
+    };
+
+    TDedicatedPipePool<TPathId> RestoreScanPipes;
+
+    NTabletFlatExecutor::ITransaction* CreateTxProgressRestoreScan(TEvPrivate::TEvRunRestoreScan::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreateTxProgressRestoreScan(TEvDataShard::TEvRestoreScanResponse::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreatePipeRetry(TTabletId tabletId);
+
+    void Handle(TEvPrivate::TEvRunRestoreScan::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvDataShard::TEvRestoreScanResponse::TPtr& ev, const TActorContext& ctx);
+
+    void ResumeRestoreScans(const TVector<TPathId>& ids, const TActorContext& ctx);
+
+    void PersistRestoreScanShardStatus(NIceDb::TNiceDb& db, const TPathId& streamPathId, const TShardIdx& shardIdx,
+        const TCdcStreamInfo::TShardStatus& status);
+    void RemoveRestoreScanShardStatus(NIceDb::TNiceDb& db, const TPathId& streamPathId, const TShardIdx& shardIdx);
+    // } // NRestoreScan
+
     // statistics
     TTabletId StatisticsAggregatorId;
     TActorId SAPipeClientId;

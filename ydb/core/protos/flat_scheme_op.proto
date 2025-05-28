@@ -1844,6 +1844,8 @@ enum EPathState {
     EPathStateRestore = 10;
     EPathStateMoving = 11;
     EPathStateOutgoingIncrementalRestore = 12;
+    EPathStateAwaitingOutgoingIncrementalRestore = 13;
+    EPathStateIncomingIncrementalRestore = 14;
 }
 
 message TPathVersion {

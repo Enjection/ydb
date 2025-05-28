@@ -352,6 +352,9 @@ namespace TEvDataShard {
         EvPrefixKMeansRequest,
         EvPrefixKMeansResponse,
 
+        EvRestoreScanRequest,
+        EvRestoreScanResponse,
+
         EvEnd
     };
 
@@ -1803,6 +1806,32 @@ namespace TEvDataShard {
         explicit TEvCdcStreamScanResponse(
                 const NKikimrTxDataShard::TEvCdcStreamScanRequest& request, ui64 tabletId,
                 NKikimrTxDataShard::TEvCdcStreamScanResponse::EStatus status, const TString& error = {})
+        {
+            Record.SetTabletId(tabletId);
+            Record.MutableTablePathId()->CopyFrom(request.GetTablePathId());
+            Record.MutableStreamPathId()->CopyFrom(request.GetStreamPathId());
+            Record.SetStatus(status);
+            Record.SetErrorDescription(error);
+        }
+    };
+
+    struct TEvRestoreScanRequest
+        : public TEventPB<TEvRestoreScanRequest,
+                          NKikimrTxDataShard::TEvRestoreScanRequest,
+                          EvRestoreScanRequest>
+    {
+    };
+
+    struct TEvRestoreScanResponse
+        : public TEventPB<TEvRestoreScanResponse,
+                          NKikimrTxDataShard::TEvRestoreScanResponse,
+                          EvRestoreScanResponse>
+    {
+        TEvRestoreScanResponse() = default;
+
+        explicit TEvRestoreScanResponse(
+                const NKikimrTxDataShard::TEvRestoreScanRequest& request, ui64 tabletId,
+                NKikimrTxDataShard::TEvRestoreScanResponse::EStatus status, const TString& error = {})
         {
             Record.SetTabletId(tabletId);
             Record.MutableTablePathId()->CopyFrom(request.GetTablePathId());

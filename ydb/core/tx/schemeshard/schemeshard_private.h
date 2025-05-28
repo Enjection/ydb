@@ -42,6 +42,7 @@ namespace TEvPrivate {
         EvRetryNodeSubscribe,
         EvRunDataErasure,
         EvRunTenantDataErasure,
+        EvRunRestoreScan,
         EvEnd
     };
 
@@ -251,6 +252,14 @@ namespace TEvPrivate {
 
         TEvRunCdcStreamScan(const TPathId& streamPathId)
             : StreamPathId(streamPathId)
+        {}
+    };
+
+    struct TEvRunRestoreScan: public TEventLocal<TEvRunRestoreScan, EvRunRestoreScan> {
+        const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups RestoreOp;
+
+        TEvRunRestoreScan(const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups& restoreOp)
+            : RestoreOp(restoreOp)
         {}
     };
 
