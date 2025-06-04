@@ -1698,6 +1698,7 @@ TPathElement::EPathState TSchemeShard::CalcPathState(TTxState::ETxType txType, T
     case TTxState::TxMoveSequence:
         return TPathElement::EPathState::EPathStateCreate;
     case TTxState::TxRestoreIncrementalBackupAtTable:
+    case TTxState::TxCreateLongIncrementalRestoreOp: // Set this state for now, maybe we need to be more precise
         return TPathElement::EPathState::EPathStateOutgoingIncrementalRestore;
     }
     return oldState;
@@ -4240,6 +4241,11 @@ void TSchemeShard::PersistRemovePublishingPath(NIceDb::TNiceDb& db, TTxId txId, 
     db.Table<Schema::MigratedPublishingPaths>()
         .Key(txId, pathId.OwnerId, pathId.LocalPathId, version)
         .Delete();
+}
+
+void TSchemeShard::PersistLongIncrementalRestoreOp(NIceDb::TNiceDb& db, const NKikimrSchemeOp::TLongIncrementalRestoreOp& op) {
+    Y_UNUSED(db, op);
+    // TODO
 }
 
 TTabletId TSchemeShard::GetGlobalHive(const TActorContext& ctx) const {
