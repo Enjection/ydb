@@ -1269,6 +1269,9 @@ ISubOperation::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxState::
     case TTxState::ETxType::TxDropSysView:
         return CreateDropSysView(NextPartId(), txState);
 
+    case TTxState::ETxType::TxCreateLongIncrementalRestoreOp:
+        Y_ABORT("TODO: implement");
+
     case TTxState::ETxType::TxInvalid:
         Y_UNREACHABLE();
     }
@@ -1567,6 +1570,8 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
         return CreateBackupIncrementalBackupCollection(op.NextPartId(), tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpRestoreBackupCollection:
         return CreateRestoreBackupCollection(op.NextPartId(), tx, context);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateLongIncrementalRestoreOp:
+        return {CreateLongIncrementalRestoreOpControlPlane(op.NextPartId(), tx)};
 
     // SysView
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateSysView:
