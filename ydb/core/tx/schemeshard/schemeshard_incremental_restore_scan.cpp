@@ -250,11 +250,12 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         }
         // Only the first backup table is used for now (multiple incremental backups per table not yet supported)
         TPathId selectedBackupTablePathId = backupTablePathIds[0];
+        TPath backupTablePath = TPath::Init(selectedBackupTablePathId, Self);
 
         // Use an empty string or a valid working directory if available
         NKikimrSchemeOp::TModifyScheme tx = TransactionTemplate("", NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
         auto* multipleRestore = tx.MutableRestoreMultipleIncrementalBackups();
-        multipleRestore->add_srctablepaths(tablePath.PathString());
+        multipleRestore->add_srctablepaths(backupTablePath.PathString());
         selectedBackupTablePathId.ToProto(multipleRestore->add_srcpathids());
         multipleRestore->set_dsttablepath(tablePath.PathString());
         tablePathId.ToProto(multipleRestore->mutable_dstpathid());
@@ -264,7 +265,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         TTxTransaction newTx;
         newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
         auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
-        newMultipleRestore->add_srctablepaths(tablePath.PathString());
+        newMultipleRestore->add_srctablepaths(backupTablePath.PathString());
         selectedBackupTablePathId.ToProto(newMultipleRestore->add_srcpathids());
         newMultipleRestore->set_dsttablepath(tablePath.PathString());
         tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
@@ -273,7 +274,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         TSchemeShard::TIncrementalRestoreContext context;
         context.SourceBackupTablePathId = selectedBackupTablePathId;
         context.DestinationTablePathId = tablePathId;
-        context.SourceTablePath = tablePath.PathString();
+        context.SourceTablePath = backupTablePath.PathString();
         context.DestinationTablePath = tablePath.PathString();
         context.OriginalOperationId = ui64(operationId.GetTxId());
         Self->IncrementalRestoreContexts[newOperationId] = context;
@@ -355,7 +356,9 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
                 TTxTransaction newTx;
                 newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
                 auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
-                newMultipleRestore->add_srctablepaths(tablePath.PathString());
+                // Get the actual backup table path from the PathId
+                TPath backupTablePath = TPath::Init(selectedBackupTablePathId, Self);
+                newMultipleRestore->add_srctablepaths(backupTablePath.PathString());
                 selectedBackupTablePathId.ToProto(newMultipleRestore->add_srcpathids());
                 newMultipleRestore->set_dsttablepath(tablePath.PathString());
                 tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
@@ -364,7 +367,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
                 TSchemeShard::TIncrementalRestoreContext context;
                 context.SourceBackupTablePathId = selectedBackupTablePathId;
                 context.DestinationTablePathId = tablePathId;
-                context.SourceTablePath = tablePath.PathString();
+                context.SourceTablePath = backupTablePath.PathString();
                 context.DestinationTablePath = tablePath.PathString();
                 context.OriginalOperationId = ui64(PipeRetry.OperationId.GetTxId());
                 Self->IncrementalRestoreContexts[newOperationId] = context;
