@@ -29,7 +29,7 @@ private:
     } PipeRetry;
 
     // Side effects
-    TDeque<std::tuple<TOperationId, TTabletId, THolder<IEventBase>>> RestoreRequests;
+    TDeque<std::tuple<TOperationId, TTabletId, THolder<TEvDataShard::TEvProposeTransaction>>> RestoreRequests;
     TOperationId OperationToProgress;
 
 public:
@@ -68,11 +68,7 @@ public:
                 << ": operationId# " << operationId
                 << ", tabletId# " << tabletId);
             
-            // TODO: Implement dedicated pipe pool for incremental restore like CdcStreamScanPipes
-            // For now, send directly to the DataShard
-            auto pipe = NTabletPipe::CreateClient(ctx.SelfID, ui64(tabletId));
-            auto pipeId = ctx.Register(pipe);
-            NTabletPipe::SendData(ctx, pipeId, ev.Release());
+            Self->PipeClientCache->Send(ctx, ui64(tabletId), ev.Release());
         }
 
         // Schedule next progress check if needed
@@ -170,17 +166,57 @@ private:
                 Y_ABORT_UNLESS(Self->ShardInfos.contains(shard.ShardIdx));
                 const auto tabletId = Self->ShardInfos.at(shard.ShardIdx).TabletID;
 
-                auto ev = MakeHolder<TEvDataShard::TEvRestoreMultipleIncrementalBackups>();
-                ev->Record.SetTxId(op.GetTxId());
-                tablePathId.ToProto(ev->Record.MutablePathId());
+                // Create schema transaction with TRestoreIncrementalBackup
+                NKikimrSchemeOp::TRestoreIncrementalBackup restoreBackup;
                 
-                // Copy backup settings from the operation
-                for (const auto& backup : op.GetIncrementalBackupTrimmedNames()) {
-                    auto* incrementalBackup = ev->Record.AddIncrementalBackups();
-                    incrementalBackup->SetBackupTrimmedName(backup);
+                // Find the backup table path within the backup collection
+                TPathId backupTablePathId;
+                auto tableName = tablePath.Base()->Name;
+                auto backupCollectionPath = Self->PathsById.at(pathId);
+                
+                // Look for the backup table as a child of the backup collection
+                bool foundBackupTable = false;
+                for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
+                    if (childName == tableName) {
+                        backupTablePathId = childPathId;
+                        foundBackupTable = true;
+                        break;
+                    }
                 }
+                
+                if (!foundBackupTable) {
+                    LOG_W("Backup table not found in backup collection"
+                        << ": operationId# " << operationId
+                        << ", tableName# " << tableName
+                        << ", backupCollectionPathId# " << pathId);
+                    continue;
+                }
+                
+                // Set correct paths: SrcPathId = backup table, DstPathId = destination table
+                backupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
+                tablePathId.ToProto(restoreBackup.MutableDstPathId());
 
-                RestoreRequests.emplace_back(operationId, tabletId, std::move(ev));
+                // Create schema transaction body
+                NKikimrTxDataShard::TFlatSchemeTransaction tx;
+                tx.MutableCreateIncrementalRestoreSrc()->CopyFrom(restoreBackup);
+
+                LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                           "[IncrementalRestore] SCHEMA_DEBUG: Creating schema transaction with CreateIncrementalRestoreSrc"
+                           << " srcPathId=" << restoreBackup.GetSrcPathId().DebugString()
+                           << " dstPathId=" << restoreBackup.GetDstPathId().DebugString()
+                           << " hasCreateIncrementalRestoreSrc=" << tx.HasCreateIncrementalRestoreSrc());
+
+                // Set proper sequence number
+                auto seqNo = Self->NextRound();
+                Self->FillSeqNo(tx, seqNo);
+
+                TString txBody;
+                Y_ABORT_UNLESS(tx.SerializeToString(&txBody));
+
+                // Create proper schema transaction proposal
+                auto proposal = Self->MakeDataShardProposal(tablePathId, operationId, txBody, ctx);
+                
+                RestoreRequests.emplace_back(operationId, tabletId, std::move(proposal));
                 
                 LOG_D("Scheduled restore request"
                     << ": operationId# " << operationId
@@ -234,18 +270,56 @@ private:
                 const auto tabletId = Self->ShardInfos.at(shard.ShardIdx).TabletID;
 
                 if (tabletId == PipeRetry.TabletId) {
-                    // Create retry request for this specific DataShard
-                    auto ev = MakeHolder<TEvDataShard::TEvRestoreMultipleIncrementalBackups>();
-                    ev->Record.SetTxId(op.GetTxId());
-                    tablePathId.ToProto(ev->Record.MutablePathId());
+                    // Create schema transaction with TRestoreIncrementalBackup
+                    NKikimrSchemeOp::TRestoreIncrementalBackup restoreBackup;
                     
-                    // Copy backup settings from the operation
-                    for (const auto& backup : op.GetIncrementalBackupTrimmedNames()) {
-                        auto* incrementalBackup = ev->Record.AddIncrementalBackups();
-                        incrementalBackup->SetBackupTrimmedName(backup);
+                    // Find the backup table path within the backup collection
+                    TPathId backupTablePathId;
+                    auto tableName = tablePath.Base()->Name;
+                    
+                    // Get backup collection path from the operation
+                    TPathId backupCollectionPathId;
+                    backupCollectionPathId.OwnerId = op.GetBackupCollectionPathId().GetOwnerId();
+                    backupCollectionPathId.LocalPathId = op.GetBackupCollectionPathId().GetLocalId();
+                    auto backupCollectionPath = Self->PathsById.at(backupCollectionPathId);
+                    
+                    // Look for the backup table as a child of the backup collection
+                    bool foundBackupTable = false;
+                    for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
+                        if (childName == tableName) {
+                            backupTablePathId = childPathId;
+                            foundBackupTable = true;
+                            break;
+                        }
                     }
+                    
+                    if (!foundBackupTable) {
+                        LOG_W("Backup table not found in backup collection during retry"
+                            << ": operationId# " << PipeRetry.OperationId
+                            << ", tableName# " << tableName
+                            << ", backupCollectionPathId# " << backupCollectionPathId);
+                        return true;
+                    }
+                    
+                    // Set correct paths: SrcPathId = backup table, DstPathId = destination table
+                    backupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
+                    tablePathId.ToProto(restoreBackup.MutableDstPathId());
 
-                    RestoreRequests.emplace_back(PipeRetry.OperationId, tabletId, std::move(ev));
+                    // Create schema transaction body
+                    NKikimrTxDataShard::TFlatSchemeTransaction tx;
+                    tx.MutableCreateIncrementalRestoreSrc()->CopyFrom(restoreBackup);
+
+                    // Set proper sequence number
+                    auto seqNo = Self->NextRound();
+                    Self->FillSeqNo(tx, seqNo);
+
+                    TString txBody;
+                    Y_ABORT_UNLESS(tx.SerializeToString(&txBody));
+
+                    // Create proper schema transaction proposal
+                    auto proposal = Self->MakeDataShardProposal(tablePathId, PipeRetry.OperationId, txBody, ctx);
+                    
+                    RestoreRequests.emplace_back(PipeRetry.OperationId, tabletId, std::move(proposal));
                     
                     LOG_D("Scheduled retry restore request"
                         << ": operationId# " << PipeRetry.OperationId
@@ -266,91 +340,6 @@ private:
     }
 }; // TTxProgress
 
-class TTxIncrementalRestoreResponse : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-private:
-    TEvDataShard::TEvRestoreMultipleIncrementalBackupsResponse::TPtr Response;
-    
-public:
-    explicit TTxIncrementalRestoreResponse(TSchemeShard* self, TEvDataShard::TEvRestoreMultipleIncrementalBackupsResponse::TPtr& response)
-        : TTransactionBase(self)
-        , Response(response)
-    {
-    }
-
-    TTxType GetTxType() const override {
-        return TXTYPE_INCREMENTAL_RESTORE_RESPONSE;
-    }
-
-    bool Execute(TTransactionContext&, const TActorContext& ctx) override {
-        LOG_D("Processing incremental restore response from DataShard");
-
-        const auto& record = Response->Get()->Record;
-        const auto txId = record.GetTxId();
-        const auto tabletId = record.GetTabletId();
-        const auto status = record.GetStatus();
-
-        LOG_D("DataShard incremental restore response"
-            << ": txId# " << txId
-            << ", tabletId# " << tabletId
-            << ", status# " << static_cast<ui32>(status));
-
-        // Find the operation by TxId
-        TOperationId operationId;
-        bool operationFound = false;
-        
-        for (const auto& [opId, op] : Self->LongIncrementalRestoreOps) {
-            if (op.GetTxId() == txId) {
-                operationId = opId;
-                operationFound = true;
-                break;
-            }
-        }
-
-        if (!operationFound) {
-            LOG_W("Received response for unknown incremental restore operation"
-                << ": txId# " << txId
-                << ", tabletId# " << tabletId);
-            return true;
-        }
-
-        // TODO: Update shard status in database
-        // For now, just log the response details
-        
-        if (status == NKikimrTxDataShard::TEvRestoreMultipleIncrementalBackupsResponse::SUCCESS) {
-            LOG_N("DataShard incremental restore completed successfully"
-                << ": operationId# " << operationId
-                << ", txId# " << txId
-                << ", tabletId# " << tabletId
-                << ", processedRows# " << record.GetProcessedRows()
-                << ", processedBytes# " << record.GetProcessedBytes());
-        } else {
-            LOG_W("DataShard incremental restore failed"
-                << ": operationId# " << operationId
-                << ", txId# " << txId
-                << ", tabletId# " << tabletId
-                << ", status# " << static_cast<ui32>(status)
-                << ", issueCount# " << record.IssuesSize());
-                
-            for (const auto& issue : record.GetIssues()) {
-                LOG_W("DataShard restore issue: " << issue.message());
-            }
-        }
-
-        return true;
-    }
-
-    void Complete(const TActorContext& ctx) override {
-        // TODO: Implement completion logic
-        // This could include:
-        // 1. Checking if all shards have completed for this operation
-        // 2. Finalizing the operation if all shards are done
-        // 3. Scheduling retries for failed shards
-        // 4. Updating operation progress in database
-        
-        LOG_D("Incremental restore response transaction completed");
-    }
-};
-
 } // namespace NKikimr::NSchemeShard::NIncrementalRestoreScan
 
 namespace NKikimr::NSchemeShard {
@@ -365,16 +354,8 @@ NTabletFlatExecutor::ITransaction* TSchemeShard::CreatePipeRetryIncrementalResto
     return new TTxProgress(this, operationId, tabletId);
 }
 
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxIncrementalRestoreResponse(TEvDataShard::TEvRestoreMultipleIncrementalBackupsResponse::TPtr& ev) {
-    return new TTxIncrementalRestoreResponse(this, ev);
-}
-
 void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
     Execute(CreateTxProgressIncrementalRestore(ev), ctx);
-}
-
-void TSchemeShard::Handle(TEvDataShard::TEvRestoreMultipleIncrementalBackupsResponse::TPtr& ev, const TActorContext& ctx) {
-    Execute(CreateTxIncrementalRestoreResponse(ev), ctx);
 }
 
 } // namespace NKikimr::NSchemeShard

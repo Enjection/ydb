@@ -96,7 +96,6 @@ SRCS(
     datashard_failpoints.cpp
     datashard_failpoints.h
     datashard_impl.h
-    datashard_incremental_restore.cpp
     datashard_kqp.cpp
     datashard_kqp.h
     datashard_kqp_compute.cpp

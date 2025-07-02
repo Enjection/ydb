@@ -58,7 +58,11 @@ public:
         , Columns(table->Columns)
         , KeyColumnTypes(table->KeyColumnTypes)
         , KeyColumnIds(table->KeyColumnIds)
-    {}
+    {
+        LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::DATASHARD_BACKUP, 
+                   "INCREMENTAL_DEBUG: TIncrementalRestoreScan created for txId=" << txId 
+                   << " sourcePathId=" << sourcePathId << " targetPathId=" << targetPathId);
+    }
 
     static TVector<TTag> InitValueTags(TUserTable::TCPtr table) {
         Y_ENSURE(table->Columns.size() >= 2);
@@ -95,6 +99,8 @@ public:
 
     void Start(TEvIncrementalRestoreScan::TEvServe::TPtr& ev) {
         LOG_D("Handle TEvIncrementalRestoreScan::TEvServe " << ev->Get()->ToString());
+        LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::DATASHARD_BACKUP,
+                   "INCREMENTAL_DEBUG: TIncrementalRestoreScan::Start called for txId=" << TxId);
 
         Driver->Touch(EScan::Feed);
     }
