@@ -7,11 +7,13 @@
 #if defined LOG_D || \
     defined LOG_W || \
     defined LOG_N || \
+    defined LOG_I || \
     defined LOG_E
 #error log macro redefinition
 #endif
 
 #define LOG_D(stream) LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[IncrementalRestore] " << stream)
+#define LOG_I(stream) LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[IncrementalRestore] " << stream)
 #define LOG_N(stream) LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[IncrementalRestore] " << stream)
 #define LOG_W(stream) LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[IncrementalRestore] " << stream)
 #define LOG_E(stream) LOG_ERROR_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[IncrementalRestore] " << stream)
@@ -170,30 +172,69 @@ private:
                 NKikimrSchemeOp::TRestoreIncrementalBackup restoreBackup;
                 
                 // Find the backup table path within the backup collection
-                TPathId backupTablePathId;
                 auto tableName = tablePath.Base()->Name;
                 auto backupCollectionPath = Self->PathsById.at(pathId);
                 
-                // Look for the backup table as a child of the backup collection
-                bool foundBackupTable = false;
+                // Look for the backup table within incremental backup entries
+                TVector<TPathId> backupTablePathIds;
+                
+                // Debug: List all children of the backup collection
+                LOG_D("Backup collection children"
+                    << ": operationId# " << operationId
+                    << ", backupCollectionPathId# " << pathId
+                    << ", lookingForTable# " << tableName);
+                
+                // Find incremental backup entries and look for the table within them
                 for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
-                    if (childName == tableName) {
-                        backupTablePathId = childPathId;
-                        foundBackupTable = true;
-                        break;
+                    LOG_D("Found backup collection child"
+                        << ": operationId# " << operationId
+                        << ", childName# " << childName
+                        << ", childPathId# " << childPathId);
+                    
+                    // Check if this is an incremental backup entry (contains "_incremental")
+                    if (childName.Contains("_incremental")) {
+                        LOG_D("Examining incremental backup entry"
+                            << ": operationId# " << operationId
+                            << ", entryName# " << childName
+                            << ", entryPathId# " << childPathId);
+                        
+                        // Look for the table within this incremental backup entry
+                        auto backupEntryPath = Self->PathsById.at(childPathId);
+                        for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
+                            LOG_D("Found table in incremental backup"
+                                << ": operationId# " << operationId
+                                << ", entryName# " << childName
+                                << ", tableName# " << tableNameInEntry
+                                << ", tablePathId# " << tablePathId);
+                            
+                            if (tableNameInEntry == tableName) {
+                                backupTablePathIds.push_back(tablePathId);
+                                LOG_I("Found matching backup table: operationId# " << operationId
+                                    << ", backupEntry# " << childName
+                                    << ", tableName# " << tableName
+                                    << ", backupTablePathId# " << tablePathId);
+                            }
+                        }
                     }
                 }
                 
-                if (!foundBackupTable) {
-                    LOG_W("Backup table not found in backup collection"
+                if (backupTablePathIds.empty()) {
+                    LOG_W("No backup tables found in incremental backup entries"
                         << ": operationId# " << operationId
                         << ", tableName# " << tableName
                         << ", backupCollectionPathId# " << pathId);
                     continue;
                 }
                 
+                LOG_I("Found " << backupTablePathIds.size() << " incremental backup tables"
+                    << ": operationId# " << operationId
+                    << ", tableName# " << tableName);
+                
+                // For now, use the first backup table (we'll process multiple later if needed)
+                TPathId selectedBackupTablePathId = backupTablePathIds[0];
+                
                 // Set correct paths: SrcPathId = backup table, DstPathId = destination table
-                backupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
+                selectedBackupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
                 tablePathId.ToProto(restoreBackup.MutableDstPathId());
 
                 // Create schema transaction body
@@ -274,7 +315,6 @@ private:
                     NKikimrSchemeOp::TRestoreIncrementalBackup restoreBackup;
                     
                     // Find the backup table path within the backup collection
-                    TPathId backupTablePathId;
                     auto tableName = tablePath.Base()->Name;
                     
                     // Get backup collection path from the operation
@@ -283,26 +323,62 @@ private:
                     backupCollectionPathId.LocalPathId = op.GetBackupCollectionPathId().GetLocalId();
                     auto backupCollectionPath = Self->PathsById.at(backupCollectionPathId);
                     
-                    // Look for the backup table as a child of the backup collection
-                    bool foundBackupTable = false;
+                    // Look for the backup table within incremental backup entries
+                    TVector<TPathId> backupTablePathIds;
+                    
+                    // Debug: List all children of the backup collection during retry
+                    LOG_D("Backup collection children during retry"
+                        << ": operationId# " << PipeRetry.OperationId
+                        << ", backupCollectionPathId# " << backupCollectionPathId
+                        << ", lookingForTable# " << tableName);
+                    
+                    // Find incremental backup entries and look for the table within them
                     for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
-                        if (childName == tableName) {
-                            backupTablePathId = childPathId;
-                            foundBackupTable = true;
-                            break;
+                        LOG_D("Found backup collection child during retry"
+                            << ": operationId# " << PipeRetry.OperationId
+                            << ", childName# " << childName
+                            << ", childPathId# " << childPathId);
+                        
+                        // Check if this is an incremental backup entry (contains "_incremental")
+                        if (childName.Contains("_incremental")) {
+                            LOG_D("Examining incremental backup entry during retry"
+                                << ": operationId# " << PipeRetry.OperationId
+                                << ", entryName# " << childName
+                                << ", entryPathId# " << childPathId);
+                            
+                            // Look for the table within this incremental backup entry
+                            auto backupEntryPath = Self->PathsById.at(childPathId);
+                            for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
+                                LOG_D("Found table in incremental backup during retry"
+                                    << ": operationId# " << PipeRetry.OperationId
+                                    << ", entryName# " << childName
+                                    << ", tableName# " << tableNameInEntry
+                                    << ", tablePathId# " << tablePathId);
+                                
+                                if (tableNameInEntry == tableName) {
+                                    backupTablePathIds.push_back(tablePathId);
+                                    LOG_I("Found matching backup table during retry: operationId# " << PipeRetry.OperationId
+                                        << ", backupEntry# " << childName
+                                        << ", tableName# " << tableName
+                                        << ", backupTablePathId# " << tablePathId);
+                                }
+                            }
                         }
                     }
                     
-                    if (!foundBackupTable) {
-                        LOG_W("Backup table not found in backup collection during retry"
+                    if (backupTablePathIds.empty()) {
+                        LOG_W("No backup tables found in incremental backup entries during retry"
                             << ": operationId# " << PipeRetry.OperationId
                             << ", tableName# " << tableName
                             << ", backupCollectionPathId# " << backupCollectionPathId);
                         return true;
                     }
                     
+                    // For now, use the first backup table (we'll process multiple later if needed)
+                    TPathId selectedBackupTablePathId = backupTablePathIds[0];
+                    
                     // Set correct paths: SrcPathId = backup table, DstPathId = destination table
-                    backupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
+                    selectedBackupTablePathId.ToProto(restoreBackup.MutableSrcPathId());
                     tablePathId.ToProto(restoreBackup.MutableDstPathId());
 
                     // Create schema transaction body
