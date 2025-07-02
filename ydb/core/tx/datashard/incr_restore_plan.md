@@ -27,10 +27,12 @@
 ### 3. Add Transaction Completion Notification
 - Implement transaction completion notification handling in `schemeshard_impl.cpp`.
 - Follow the export system's `TxIdToExport.contains(txId)` pattern for cleanup and next-step triggering.
+- The next `TTxProgress` for the following incremental transfer should only be started when the previous transfer is fully finished (transaction completion notification received).
 
 ### 4. Refactor to Apply All Incremental Backups in Order
 - In the incremental restore scan logic, collect all incremental backups for each table, sort them, and apply them one by one (not just the first).
 - Ensure context and transaction flow is preserved for each incremental.
+- Progress state (e.g., which incremental/table is next) must be persisted in SchemeShard's local database, so that the operation can be resumed from the last completed table in case of a restart or failure.
 
 ### 5. Build, Integration, and End-to-End Testing
 - Build the project to verify that all API mismatches are resolved and the transaction pattern is correct.
@@ -46,6 +48,8 @@
 - Use `IncrementalRestorePropose` to create a `TEvModifySchemeTransaction` event with the correct protobuf structure (`MutableRestoreMultipleIncrementalBackups`, `AddSrc()->SetSrcPathId()/SetDstPathId()`).
 - All transaction state and context must be preserved through the lifecycle, as in the export system.
 - The restore scan logic must iterate through all incremental backups for each table, not just the first, and apply them in order.
+- Each incremental transfer must be fully completed before starting the next one.
+- Progress state must be persisted in SchemeShard's local database to allow safe resumption after failures.
 - Success is measured by passing the end-to-end test and matching the expected restored table state.
 
 ---
