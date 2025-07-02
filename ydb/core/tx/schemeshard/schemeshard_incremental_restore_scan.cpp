@@ -64,32 +64,10 @@ public:
     }
 
     void Complete(const TActorContext& ctx) override {
-        // ARCHITECTURAL FIX: Trigger proper SchemeShard operations instead of bypassing the infrastructure
-        // The scan logic should NOT create schema transactions directly. Instead, it should trigger
-        // proper TxRestoreIncrementalBackupAtTable operations that have correct transaction coordination.
-        // This is the correct approach: Let the existing operation infrastructure handle the transaction
-        // coordination via context.OnComplete.BindMsgToPipe() which ensures proper plan steps
-
-        if (OperationToProgress) {
-            if (Self->LongIncrementalRestoreOps.contains(OperationToProgress)) {
-                // Construct the transaction for the restore operation
-                TTxTransaction tx;
-                tx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
-                // TODO: Fill tx fields from op as needed (wire up source/destination paths, etc.)
-                // This may require extending op to store the necessary transaction fields.
-
-                // Register the operation using the correct SchemeShard pattern
-                // Create the suboperation
-                auto subOp = CreateRestoreIncrementalBackupAtTable(OperationToProgress, tx);
-                // Create a new TOperation and add the suboperation
-                auto operation = new TOperation(OperationToProgress.GetTxId());
-                operation->AddPart(subOp);
-                Self->Operations[OperationToProgress.GetTxId()] = operation;
-                LOG_I("Registered SchemeShard operation for incremental restore: "
-                    << ": operationId# " << OperationToProgress);
-            }
-        }
-
+        // NOTE: Operations are now created and scheduled directly in Execute methods
+        // using Self->Execute(CreateRestoreIncrementalBackupAtTable(newOperationId, newTx), ctx)
+        // This ensures proper SchemeShard operation coordination with plan steps.
+        
         // Schedule next progress check if needed
         if (OperationToProgress) {
             TPathId backupCollectionPathId;
@@ -214,13 +192,21 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         multipleRestore->set_dsttablepath(tablePath.PathString());
         tablePathId.ToProto(multipleRestore->mutable_dstpathid());
 
-        // Register the operation using the correct SchemeShard pattern
-        auto subOp = CreateRestoreIncrementalBackupAtTable(operationId, tx);
-        auto operation = new TOperation(operationId.GetTxId());
-        operation->AddPart(subOp);
-        Self->Operations[operationId.GetTxId()] = operation;
-        LOG_I("Registered SchemeShard operation for incremental restore: "
-            << ": operationId# " << operationId
+        // Create a NEW unique operation for this incremental restore (don't reuse the backup collection operation ID)
+        TOperationId newOperationId = Self->GetNextTxId();
+        TTxTransaction newTx;
+        newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackupAtTable);
+        auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
+        newMultipleRestore->add_srctablepaths(tablePath.PathString());
+        selectedBackupTablePathId.ToProto(newMultipleRestore->add_srcpathids());
+        newMultipleRestore->set_dsttablepath(tablePath.PathString());
+        tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
+
+        // Execute/schedule the new operation instead of just registering it
+        Self->Execute(CreateRestoreIncrementalBackupAtTable(newOperationId, newTx), ctx);
+        LOG_I("Scheduled new SchemeShard operation for incremental restore: "
+            << ": newOperationId# " << newOperationId
+            << ", originalOperationId# " << operationId
             << ", srcPathId# " << selectedBackupTablePathId
             << ", dstPathId# " << tablePathId);
         }
@@ -287,18 +273,21 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
                 }
                 // Only the first backup table is used for now (multiple incremental backups per table not yet supported)
                 TPathId selectedBackupTablePathId = backupTablePathIds[0];
-                NKikimrSchemeOp::TModifyScheme tx = TransactionTemplate("", NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackupAtTable);
-                auto* multipleRestore = tx.MutableRestoreMultipleIncrementalBackups();
-                multipleRestore->add_srctablepaths(tablePath.PathString());
-                selectedBackupTablePathId.ToProto(multipleRestore->add_srcpathids());
-                multipleRestore->set_dsttablepath(tablePath.PathString());
-                tablePathId.ToProto(multipleRestore->mutable_dstpathid());
-                auto subOp = CreateRestoreIncrementalBackupAtTable(PipeRetry.OperationId, tx);
-                auto operation = new TOperation(PipeRetry.OperationId.GetTxId());
-                operation->AddPart(subOp);
-                Self->Operations[PipeRetry.OperationId.GetTxId()] = operation;
-                LOG_I("Registered SchemeShard operation for incremental restore (retry): "
-                    << ": operationId# " << PipeRetry.OperationId
+                // Create a NEW unique operation for this incremental restore retry (don't reuse the original operation ID)
+                TOperationId newOperationId = Self->GetNextTxId();
+                TTxTransaction newTx;
+                newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackupAtTable);
+                auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
+                newMultipleRestore->add_srctablepaths(tablePath.PathString());
+                selectedBackupTablePathId.ToProto(newMultipleRestore->add_srcpathids());
+                newMultipleRestore->set_dsttablepath(tablePath.PathString());
+                tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
+
+                // Execute/schedule the new operation instead of just registering it
+                Self->Execute(CreateRestoreIncrementalBackupAtTable(newOperationId, newTx), ctx);
+                LOG_I("Scheduled new SchemeShard operation for incremental restore (retry): "
+                    << ": newOperationId# " << newOperationId
+                    << ", originalOperationId# " << PipeRetry.OperationId
                     << ", srcPathId# " << selectedBackupTablePathId
                     << ", dstPathId# " << tablePathId);
                 return true;
