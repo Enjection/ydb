@@ -199,9 +199,14 @@ public:
         , TargetTablePathId(targetPathId)
         , TargetTableVersion(0)
     {
+        LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::DATASHARD_BACKUP,
+                   "INCREMENTAL_DEBUG: TIncrRestoreChangeSenderMain created for userTableId=" << userTableId 
+                   << " targetPathId=" << targetPathId << " dataShard=" << dataShard.TabletId);
     }
 
     void Bootstrap() {
+        LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::DATASHARD_BACKUP,
+                   "INCREMENTAL_DEBUG: TIncrRestoreChangeSenderMain::Bootstrap called");
         ResolveUserTable();
     }
 
