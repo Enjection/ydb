@@ -12,11 +12,16 @@
 - **Build errors fixed**: All build errors related to event-based logic and operation registration are resolved
 - **Unused/undeclared variable errors fixed**: All references to removed variables (e.g., `op`) are commented out or removed
 
+### ❌ **Current Test Failure**
+- **Incremental restore does not apply data changes**: The test expects only the incremental backup data to be present (e.g., key=2, value=2000), but the full table is restored with old values. No data is transferred or merged by DataShard during restore.
+- **Root cause**: The transaction created by the scan logic is not providing the DataShard with the necessary information to perform the data transfer for incremental restore. The operation is registered and completed, but no data is actually copied or merged.
+
 ### 🔄 **In Progress**
 - **Parameter wiring**: Correct source/destination path parameters are now wired into `TxRestoreIncrementalBackupAtTable` operations. Each operation receives the correct backup and destination table path IDs from scan logic.
+- **Transaction construction**: Need to ensure all required fields for incremental data restore are set, so the DataShard can perform the actual data transfer.
 
 ### 🧪 **Next Steps**
-- [x] Wire correct parameters for backup and destination table paths from scan logic into operation creation
+- [ ] Fix transaction construction in scan logic to provide all required fields for incremental restore
 - [ ] Test that schema transactions now go through the full SchemeShard operation flow
 - [ ] Confirm DataShards receive transactions with plan steps and execution units are triggered
 - [ ] Validate that data changes are applied as expected
@@ -30,6 +35,10 @@
 - Fixed all build errors, including type mismatches and unused/undeclared variable errors
 - Wired correct source/destination path parameters into operation construction
 - Updated this plan to reflect current status and next steps
+- **Tested integration: DataShard receives and completes operation, but no data is transferred or merged**
+- **Identified root cause: Transaction is missing required fields for DataShard to perform incremental restore**
+- **Checked logs and test output**: Confirmed that DataShard receives and completes the operation, but no data is transferred or merged. The test output and logs are now documented for the next agent to review for further debugging.
+- **Next agent action**: Please review the attached logs and test output to further diagnose why the DataShard is not applying incremental data changes. Focus on transaction field wiring and DataShard execution unit triggers. For this iteration they are available here: /home/innokentii/ydbwork2/ydb/ydb/core/tx/datashard/logs
 
 ---
 
