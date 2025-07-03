@@ -1287,11 +1287,11 @@ public:
     
     // Context storage for incremental restore transactions
     struct TIncrementalRestoreContext {
-        TPathId SourceBackupTablePathId;
         TPathId DestinationTablePathId;
-        TString SourceTablePath;
         TString DestinationTablePath;
         ui64 OriginalOperationId;
+        TString TableName;                              // Table name for logging
+        TPathId BackupCollectionPathId;                // Collection PathId for lookup
     };
     THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
 
