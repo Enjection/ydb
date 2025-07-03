@@ -18,7 +18,8 @@ class TConfigurePartsAtTable : public TSubOperationState {
     TString DebugHint() const override {
         return TStringBuilder()
             << "NIncrRestoreState::TConfigurePartsAtTable"
-            << " operationId: " << OperationId;
+            << " operationId: " << OperationId
+            << " currentSource: " << CurrentSourceIndex;
     }
 
     static bool IsExpectedTxType(TTxState::ETxType txType) {
@@ -34,7 +35,8 @@ protected:
     void FillNotice(
         const TPathId& pathId,
         NKikimrTxDataShard::TFlatSchemeTransaction& tx,
-        TOperationContext& context) const
+        TOperationContext& context,
+        ui32 sourceIndex) const
     {
         Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
         auto path = context.SS->PathsById.at(pathId);
@@ -42,9 +44,12 @@ protected:
         Y_ABORT_UNLESS(context.SS->Tables.contains(pathId));
         auto table = context.SS->Tables.at(pathId);
 
+        Y_ABORT_UNLESS(sourceIndex < static_cast<ui32>(RestoreOp.GetSrcPathIds().size()));
+        Y_ABORT_UNLESS(sourceIndex < static_cast<ui32>(RestoreOp.GetSrcTablePaths().size()));
+
         auto& op = *tx.MutableCreateIncrementalRestoreSrc();
-        op.MutableSrcPathId()->CopyFrom(RestoreOp.GetSrcPathIds(0));
-        op.SetSrcTablePath(RestoreOp.GetSrcTablePaths(0));
+        op.MutableSrcPathId()->CopyFrom(RestoreOp.GetSrcPathIds(sourceIndex));
+        op.SetSrcTablePath(RestoreOp.GetSrcTablePaths(sourceIndex));
         pathId.ToProto(op.MutableDstPathId());
         op.SetDstTablePath(RestoreOp.GetDstTablePath());
     }
@@ -55,6 +60,7 @@ public:
             const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups& restoreOp)
         : OperationId(id)
         , RestoreOp(restoreOp)
+        , CurrentSourceIndex(0)
     {
         LOG_TRACE_S(*TlsActivationContext, NKikimrServices::FLAT_TX_SCHEMESHARD, DebugHint() << " Constructed op# " << restoreOp.DebugString());
         IgnoreMessages(DebugHint(), {});
@@ -70,6 +76,13 @@ public:
         Y_ABORT_UNLESS(IsExpectedTxType(txState->TxType));
         const auto& pathId = txState->TargetPathId;
 
+        // Check if we have processed all sources
+        if (CurrentSourceIndex >= static_cast<ui32>(RestoreOp.GetSrcPathIds().size())) {
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       DebugHint() << " All incremental sources processed, moving to next state");
+            return true;
+        }
+
         if (NTableState::CheckPartitioningChangedForTableModification(*txState, context)) {
             NTableState::UpdatePartitioningForTableModification(OperationId, *txState, context);
         }
@@ -77,7 +90,11 @@ public:
         NKikimrTxDataShard::TFlatSchemeTransaction tx;
         context.SS->FillSeqNo(tx, context.SS->StartRound(*txState));
 
-        FillNotice(txState->SourcePathId, tx, context);
+        FillNotice(txState->SourcePathId, tx, context, CurrentSourceIndex);
+
+        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   DebugHint() << " Processing incremental source " << CurrentSourceIndex
+                               << " of " << static_cast<ui32>(RestoreOp.GetSrcPathIds().size()));
 
         txState->ClearShardsInProgress();
         Y_ABORT_UNLESS(txState->Shards.size());
@@ -102,12 +119,35 @@ public:
             return false;
         }
 
+        // When all shards have responded for current source, move to next source
+        auto* txState = context.SS->FindTx(OperationId);
+        Y_ABORT_UNLESS(txState);
+        
+        if (txState->ShardsInProgress.empty()) {
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       DebugHint() << " Completed incremental source " << CurrentSourceIndex
+                                   << ", moving to next source");
+            
+            CurrentSourceIndex++;
+            
+            // If there are more sources to process, restart ProgressState
+            if (CurrentSourceIndex < static_cast<ui32>(RestoreOp.GetSrcPathIds().size())) {
+                LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                           DebugHint() << " Starting processing of incremental source " << CurrentSourceIndex);
+                
+                // Reset state to continue processing
+                txState->State = TTxState::ConfigureParts;
+                return true; // This will trigger ProgressState again
+            }
+        }
+
         return true;
     }
 
 private:
     const TOperationId OperationId;
     const NKikimrSchemeOp::TRestoreMultipleIncrementalBackups RestoreOp;
+    mutable ui32 CurrentSourceIndex;
 }; // TConfigurePartsAtTable
 
 class TProposeAtTable : public TSubOperationState {

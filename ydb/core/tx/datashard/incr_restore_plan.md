@@ -1,19 +1,41 @@
-# YDB Incremental Restore Fix - Focused Implementation Plan
+# YDB Incremental Restore Fix - Updated Implementation Plan
 
 ## Final Target
 - The incremental restore logic must apply all incremental backups in order for each table, not just the first, so that the restored table matches the expected state (including all value changes and deletions) after a full + multiple incrementals restore.
 - The test `SimpleRestoreBackupCollection, WithIncremental` must pass, confirming that the restored table contains only the correct rows and values.
 
-## Immediate Focus: Complete Incremental Restore Transaction Flow
+## ROOT CAUSE IDENTIFIED: SchemeShard Operation Handler Issue
 
-### Current Status (as of July 2, 2025)
-- ✅ Transaction infrastructure and context storage are in place and compiling.
-- ✅ `IncrementalRestorePropose` and transaction lifecycle methods are implemented.
-- 🔄 The logic currently only applies the first incremental backup per table; needs to apply all in order.
+### Current Status (as of July 3, 2025)
+- ✅ **Root cause analysis completed**: The issue is in `TConfigurePartsAtTable::FillNotice()` in `schemeshard__operation_create_restore_incremental_backup.cpp`
+- ✅ **Error pattern confirmed**: All test failures show `deletedMarkerColumnFound` violation in DataShard, indicating wrong source table references
+- ✅ **Architecture verified**: SchemeShard correctly collects and sorts multiple incremental sources, but operation handler only processes the first one
+- 🔄 **Fix pending**: Need to modify operation handler to process ALL sources instead of just `RestoreOp.GetSrcPathIds(0)`
 
----
+## IMMEDIATE ACTION REQUIRED
 
-## Remaining Actions
+### Fix SchemeShard Operation Handler
+**File**: `/ydb/core/tx/schemeshard/schemeshard__operation_create_restore_incremental_backup.cpp`
+**Method**: `TConfigurePartsAtTable::FillNotice()`
+**Current Issue**: Only processes `RestoreOp.GetSrcPathIds(0)` (first source)
+**Required Fix**: Iterate through ALL sources in `RestoreOp.GetSrcPathIds()` and create separate DataShard transactions
+
+### Implementation Strategy
+1. **Modify FillNotice() method**:
+   - Replace single source processing with loop over all sources
+   - Create separate transaction for each incremental backup
+   - Maintain timestamp order for correct sequence
+
+2. **Update ProgressState handling**:
+   - Ensure multiple DataShard transactions are tracked correctly
+   - Process results from all incremental backup operations
+
+3. **Test the fix**:
+   - Build and run `SimpleRestoreBackupCollection, WithIncremental` test
+   - Verify all incremental backups are applied in correct order
+   - Confirm final restored state matches expected values
+
+## ANALYSIS COMPLETED - Architecture Overview (Confirmed Working)
 
 ### 1. Complete OnAllocateResult Implementation
 - Enhance `OnAllocateResult` in `schemeshard_incremental_restore_scan.cpp` to send `IncrementalRestorePropose` with the correct source/destination context for each incremental restore operation.
