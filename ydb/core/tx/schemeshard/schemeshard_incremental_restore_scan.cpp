@@ -440,15 +440,60 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResu
 
     const auto& context = Self->IncrementalRestoreContexts.at(operationId);
     
-    // Create and send the incremental restore proposal for all incremental backups
-    auto propose = IncrementalRestorePropose(
-        Self, 
-        txId, 
-        context.DestinationTablePathId, // Using destination as both src and dst is not correct, but will be handled by the operation
-        context.DestinationTablePathId,
-        context.DestinationTablePath,
-        context.DestinationTablePath
-    );
+    // Re-collect and re-create the transaction with all incremental backups
+    // (we need to do this again because we only stored simplified context)
+    TVector<std::pair<TString, TPathId>> incrementalBackupEntries;
+    auto backupCollectionPath = Self->PathsById.at(context.BackupCollectionPathId);
+    for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
+        if (childName.Contains("_incremental")) {
+            auto backupEntryPath = Self->PathsById.at(childPathId);
+            for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
+                if (tableNameInEntry == context.TableName) {
+                    // Extract timestamp from backup entry name
+                    TString timestamp = childName;
+                    if (timestamp.EndsWith("_incremental")) {
+                        timestamp = timestamp.substr(0, timestamp.size() - 12);
+                    }
+                    incrementalBackupEntries.emplace_back(timestamp, tablePathId);
+                }
+            }
+        }
+    }
+    
+    // Sort incremental backups by timestamp to ensure correct order
+    std::sort(incrementalBackupEntries.begin(), incrementalBackupEntries.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+    
+    // Create the transaction proposal manually with ALL incremental backup paths
+    auto propose = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>(ui64(txId), Self->TabletID());
+    auto& modifyScheme = *propose->Record.AddTransaction();
+    modifyScheme.SetOperationType(NKikimrSchemeOp::ESchemeOpRestoreMultipleIncrementalBackups);
+    modifyScheme.SetInternal(true);
+    
+    // Set WorkingDir - use parent directory of destination table
+    TString workingDir = "/";
+    if (auto pos = context.DestinationTablePath.rfind('/'); pos != TString::npos && pos > 0) {
+        workingDir = context.DestinationTablePath.substr(0, pos);
+    }
+    modifyScheme.SetWorkingDir(workingDir);
+
+    auto& restore = *modifyScheme.MutableRestoreMultipleIncrementalBackups();
+    
+    // Add ALL incremental backup paths in sorted order as sources
+    for (const auto& entry : incrementalBackupEntries) {
+        TPath backupTablePath = TPath::Init(entry.second, Self);
+        restore.add_srctablepaths(backupTablePath.PathString());
+        entry.second.ToProto(restore.add_srcpathids());
+        
+        LOG_D("TTxProgress: Added incremental backup path to OnAllocateResult transaction"
+            << ": timestamp# " << entry.first
+            << ", pathId# " << entry.second
+            << ", path# " << backupTablePath.PathString());
+    }
+    
+    // Set destination table
+    restore.set_dsttablepath(context.DestinationTablePath);
+    context.DestinationTablePathId.ToProto(restore.mutable_dstpathid());
     
     ctx.Send(Self->SelfId(), propose.Release());
     
