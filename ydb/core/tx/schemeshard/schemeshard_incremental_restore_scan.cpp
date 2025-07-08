@@ -24,7 +24,7 @@
 
 namespace NKikimr::NSchemeShard::NIncrementalRestoreScan {
 
-// Propose function following export system pattern
+// Propose function for incremental restore
 THolder<TEvSchemeShard::TEvModifySchemeTransaction> IncrementalRestorePropose(
     TSchemeShard* ss,
     TTxId txId,
@@ -65,7 +65,7 @@ private:
         explicit operator bool() const { return OperationId && TabletId; }
     } PipeRetry;
 
-    // Transaction lifecycle support (following export pattern)
+    // Transaction lifecycle support
     TEvTxAllocatorClient::TEvAllocateResult::TPtr AllocateResult = nullptr;
     TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr ModifyResult = nullptr;
     TTxId CompletedTxId = InvalidTxId;
@@ -88,7 +88,7 @@ public:
     {
     }
 
-    // Transaction lifecycle constructors (following export pattern)
+    // Transaction lifecycle constructors
     explicit TTxProgress(TSelf* self, TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev)
         : TTransactionBase(self)
         , AllocateResult(ev)
@@ -150,7 +150,7 @@ public:
     bool OnRunIncrementalRestore(TTransactionContext&, const TActorContext& ctx);
     bool OnPipeRetry(TTransactionContext&, const TActorContext& ctx);
     
-    // Transaction lifecycle methods (following export pattern)
+    // Transaction lifecycle methods
     bool OnAllocateResult(TTransactionContext& txc, const TActorContext& ctx);
     bool OnModifyResult(TTransactionContext& txc, const TActorContext& ctx);
     bool OnNotifyResult(TTransactionContext& txc, const TActorContext& ctx);
@@ -229,78 +229,36 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         // Create schema transaction for incremental restore once per table
         // (not per shard - the operation framework handles shard distribution)
         
-        // Find the backup table paths within the backup collection
-        TVector<std::pair<TString, TPathId>> incrementalBackupEntries;  // (timestamp, pathId) pairs
+        // Find the first incremental backup table
+        TPathId firstIncrementalBackupPathId;
         auto tableName = tablePath.Base()->Name;
         auto backupCollectionPath = Self->PathsById.at(pathId);
+        bool found = false;
+        
         for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
             if (childName.Contains("_incremental")) {
                 auto backupEntryPath = Self->PathsById.at(childPathId);
-                for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
+                for (auto& [tableNameInEntry, backupTablePathId] : backupEntryPath->GetChildren()) {
                     if (tableNameInEntry == tableName) {
-                        // Extract timestamp from backup entry name (e.g., "19700101000002Z_incremental")
-                        TString timestamp = childName;
-                        if (timestamp.EndsWith("_incremental")) {
-                            timestamp = timestamp.substr(0, timestamp.size() - 12); // Remove "_incremental"
-                        }
-                        incrementalBackupEntries.emplace_back(timestamp, tablePathId);
+                        firstIncrementalBackupPathId = backupTablePathId;
+                        found = true;
+                        break;
                     }
                 }
+                if (found) break;
             }
         }
-        if (incrementalBackupEntries.empty()) {
-            LOG_W("No backup tables found in incremental backup entries"
+        
+        if (!found) {
+            LOG_W("No incremental backup found for table"
                 << ": operationId# " << operationId
-                << ", tableName# " << tableName
-                << ", backupCollectionPathId# " << pathId);
+                << ", tableName# " << tableName);
             continue;
         }
-        
-        // Sort incremental backups by timestamp to ensure correct order
-        std::sort(incrementalBackupEntries.begin(), incrementalBackupEntries.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-        
-        LOG_I("Found incremental backups for table processing"
-            << ": operationId# " << operationId
-            << ", tableName# " << tableName
-            << ", incrementalCount# " << incrementalBackupEntries.size());
 
-        // Create a single transaction that processes ALL incremental backups in order
-        // Use an empty string or a valid working directory if available
-        NKikimrSchemeOp::TModifyScheme tx = TransactionTemplate("", NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
-        auto* multipleRestore = tx.MutableRestoreMultipleIncrementalBackups();
-        
-        // Add ALL incremental backup paths in sorted order
-        for (const auto& entry : incrementalBackupEntries) {
-            TPath backupTablePath = TPath::Init(entry.second, Self);
-            multipleRestore->add_srctablepaths(backupTablePath.PathString());
-            entry.second.ToProto(multipleRestore->add_srcpathids());
-            LOG_D("Added incremental backup path to transaction"
-                << ": timestamp# " << entry.first
-                << ", pathId# " << entry.second
-                << ", path# " << backupTablePath.PathString());
-        }
-        
-        multipleRestore->set_dsttablepath(tablePath.PathString());
-        tablePathId.ToProto(multipleRestore->mutable_dstpathid());
-
-        // Create a NEW unique operation for this incremental restore (don't reuse the backup collection operation ID)
+        // Create operation for single incremental restore
         ui64 newOperationId = ui64(Self->GetCachedTxId(ctx));
-        TTxTransaction newTx;
-        newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
-        auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
-        
-        // Add ALL incremental backup paths in sorted order to the new transaction too
-        for (const auto& entry : incrementalBackupEntries) {
-            TPath backupTablePath = TPath::Init(entry.second, Self);
-            newMultipleRestore->add_srctablepaths(backupTablePath.PathString());
-            entry.second.ToProto(newMultipleRestore->add_srcpathids());
-        }
-        
-        newMultipleRestore->set_dsttablepath(tablePath.PathString());
-        tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
-
-        // Store simplified context for transaction lifecycle
+        // Store context for transaction lifecycle
         TSchemeShard::TIncrementalRestoreContext context;
         context.DestinationTablePathId = tablePathId;
         context.DestinationTablePath = tablePath.PathString();
@@ -308,19 +266,13 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         context.BackupCollectionPathId = pathId;
         Self->IncrementalRestoreContexts[newOperationId] = context;
 
-        // Use proper transaction pattern following export system
+        // Request transaction allocation
         ctx.Send(Self->TxAllocatorClient, new TEvTxAllocatorClient::TEvAllocate(), 0, newOperationId);
-        LOG_I("Requested transaction allocation for incremental restore: "
-            << ": newOperationId# " << newOperationId
-            << ", originalOperationId# " << operationId
-            << ", incrementalCount# " << incrementalBackupEntries.size()
-            << ", dstPathId# " << tablePathId);
         }
 
     LOG_N("Incremental restore operation initiated"
         << ": operationId# " << operationId
-        << ", backupCollectionPathId# " << pathId
-        << ", tableCount# " << Self->LongIncrementalRestoreOps.at(operationId).GetTablePathList().size());
+        << ", backupCollectionPathId# " << pathId);
 
     return true;
 }
@@ -400,7 +352,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
                 context.BackupCollectionPathId = backupCollectionPathId;
                 Self->IncrementalRestoreContexts[newOperationId] = context;
 
-                // Use proper transaction pattern following export system
+                // Use proper transaction pattern
                 ctx.Send(Self->TxAllocatorClient, new TEvTxAllocatorClient::TEvAllocate(), 0, newOperationId);
                 LOG_I("Requested transaction allocation for incremental restore (retry): "
                     << ": newOperationId# " << newOperationId
@@ -417,7 +369,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
     return true;
 }
 
-// Transaction lifecycle methods (following export pattern)
+// Transaction lifecycle methods
 
 bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResult(TTransactionContext& txc, const TActorContext& ctx) {
     Y_UNUSED(txc);
@@ -602,7 +554,7 @@ NTabletFlatExecutor::ITransaction* TSchemeShard::CreatePipeRetryIncrementalResto
     return new TTxProgress(this, operationId, tabletId);
 }
 
-// Transaction lifecycle constructor functions (following export pattern)
+// Transaction lifecycle constructor functions
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxProgressIncrementalRestore(TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev) {
     return new TTxProgress(this, ev);
 }

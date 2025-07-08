@@ -1282,7 +1282,7 @@ public:
     // This set is needed to kill all the running scheme uploaders on SchemeShard death.
     THashSet<TActorId> RunningExportSchemeUploaders;
 
-    // Incremental restore transaction tracking (following export pattern)
+    // Incremental restore transaction tracking
     THashMap<TTxId, ui64> TxIdToIncrementalRestore;
     
     // Context storage for incremental restore transactions
@@ -1290,7 +1290,7 @@ public:
         TPathId DestinationTablePathId;
         TString DestinationTablePath;
         ui64 OriginalOperationId;
-        TPathId BackupCollectionPathId;                // Collection PathId for lookup
+        TPathId BackupCollectionPathId;
     };
     THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
 
@@ -1548,7 +1548,7 @@ public:
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev);
     NTabletFlatExecutor::ITransaction* CreatePipeRetryIncrementalRestore(const TOperationId& operationId, TTabletId tabletId);
     
-    // Transaction lifecycle constructor functions (following export pattern)
+    // Transaction lifecycle constructor functions
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev);
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev);
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TTxId completedTxId);
