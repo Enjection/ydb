@@ -100,6 +100,7 @@ protected:
         Y_ENSURE(txc.DB.GetScheme().GetTableInfo(localTableId));
 
         Y_ENSURE(restoreSrc.HasDstPathId());
+
         THolder<NTable::IScan> scan{CreateScan(restoreSrc, op->GetTxId())};
 
         auto* appData = AppData(ctx);

@@ -58,8 +58,7 @@ public:
         , Columns(table->Columns)
         , KeyColumnTypes(table->KeyColumnTypes)
         , KeyColumnIds(table->KeyColumnIds)
-    {
-    }
+    {}
 
     static TVector<TTag> InitValueTags(TUserTable::TCPtr table) {
         Y_ENSURE(table->Columns.size() >= 2);

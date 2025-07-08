@@ -302,6 +302,104 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             "{ items { uint32_value: 3 } items { uint32_value: 30 } }");
     }
 
+    Y_UNIT_TEST(MultiRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table", SimpleTable());
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES
+            (2, 2),
+            (3, 3);
+        )");
+
+        CreateShardedTable(
+            server,
+            edgeActor,
+            "/Root",
+            "IncrBackupImpl1",
+            SimpleTable()
+                .AllowSystemColumnNames(true)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"__ydb_incrBackupImpl_deleted", "Bool", false, false}}));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/IncrBackupImpl1` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+            (1, 10, NULL),
+            (2, NULL, true),
+            (3, 30, NULL),
+            (5, NULL, true);
+        )");
+
+        CreateShardedTable(
+            server,
+            edgeActor,
+            "/Root",
+            "IncrBackupImpl2",
+            SimpleTable()
+                .AllowSystemColumnNames(true)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"__ydb_incrBackupImpl_deleted", "Bool", false, false}}));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/IncrBackupImpl2` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+            (1, NULL, true),
+            (2, 100, NULL),
+            (1000, 1000, NULL);
+        )");
+
+        CreateShardedTable(
+            server,
+            edgeActor,
+            "/Root",
+            "IncrBackupImpl3",
+            SimpleTable()
+                .AllowSystemColumnNames(true)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"__ydb_incrBackupImpl_deleted", "Bool", false, false}}));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/IncrBackupImpl3` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+            (5, 50000, NULL),
+            (20000, 20000, NULL);
+        )");
+
+
+        WaitTxNotification(server, edgeActor, AsyncAlterRestoreMultipleIncrementalBackups(
+                               server,
+                               "/Root",
+                               {"/Root/IncrBackupImpl1", "/Root/IncrBackupImpl2", "/Root/IncrBackupImpl3"},
+                               "/Root/Table"));
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        UNIT_ASSERT_VALUES_EQUAL(
+            KqpSimpleExec(runtime, R"(
+                SELECT key, value FROM `/Root/Table`
+                )"),
+            "{ items { uint32_value: 2 } items { uint32_value: 100 } }, "
+            "{ items { uint32_value: 3 } items { uint32_value: 30 } }, "
+            "{ items { uint32_value: 5 } items { uint32_value: 50000 } }, "
+            "{ items { uint32_value: 1000 } items { uint32_value: 1000 } }, "
+            "{ items { uint32_value: 20000 } items { uint32_value: 20000 } }");
+    }
+
     Y_UNIT_TEST(BackupRestore) {
         TPortManager portManager;
         TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
