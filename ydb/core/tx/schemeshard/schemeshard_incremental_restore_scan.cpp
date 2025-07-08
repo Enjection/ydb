@@ -305,7 +305,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         context.DestinationTablePathId = tablePathId;
         context.DestinationTablePath = tablePath.PathString();
         context.OriginalOperationId = ui64(operationId.GetTxId());
-        context.TableName = tableName;
         context.BackupCollectionPathId = pathId;
         Self->IncrementalRestoreContexts[newOperationId] = context;
 
@@ -398,7 +397,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TT
                 context.DestinationTablePathId = tablePathId;
                 context.DestinationTablePath = tablePath.PathString();
                 context.OriginalOperationId = ui64(PipeRetry.OperationId.GetTxId());
-                context.TableName = tableName;
                 context.BackupCollectionPathId = backupCollectionPathId;
                 Self->IncrementalRestoreContexts[newOperationId] = context;
 
@@ -448,7 +446,12 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResu
         if (childName.Contains("_incremental")) {
             auto backupEntryPath = Self->PathsById.at(childPathId);
             for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
-                if (tableNameInEntry == context.TableName) {
+                // Use the last segment of the destination table path for comparison
+                TString expectedTableName = context.DestinationTablePath;
+                if (auto pos = expectedTableName.rfind('/'); pos != TString::npos) {
+                    expectedTableName = expectedTableName.substr(pos + 1);
+                }
+                if (tableNameInEntry == expectedTableName) {
                     // Extract timestamp from backup entry name
                     TString timestamp = childName;
                     if (timestamp.EndsWith("_incremental")) {
@@ -504,7 +507,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResu
         << ": txId# " << txId
         << ", operationId# " << operationId
         << ", dstPathId# " << context.DestinationTablePathId
-        << ", tableName# " << context.TableName);
+        << ", dstTablePath# " << context.DestinationTablePath);
     
     return true;
 }
@@ -573,7 +576,7 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnNotifyResult
         const auto& context = Self->IncrementalRestoreContexts.at(operationId);
         LOG_I("TTxProgress: All incremental backups completed for table"
             << ": operationId# " << operationId
-            << ", tableName# " << context.TableName);
+            << ", dstTablePath# " << context.DestinationTablePath);
         
         // Clean up context
         Self->IncrementalRestoreContexts.erase(operationId);

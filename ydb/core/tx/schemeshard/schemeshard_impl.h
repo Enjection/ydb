@@ -1290,7 +1290,6 @@ public:
         TPathId DestinationTablePathId;
         TString DestinationTablePath;
         ui64 OriginalOperationId;
-        TString TableName;                              // Table name for logging
         TPathId BackupCollectionPathId;                // Collection PathId for lookup
     };
     THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
