@@ -3,7 +3,6 @@
 #include "schemeshard_utils.h"
 
 #include <ydb/core/tx/tx_proxy/proxy.h>
-#include <ydb/core/base/tablet_pipe.h>
 #include <ydb/core/tx/tx_allocator_client/client.h>
 
 #include <algorithm>  // for std::sort
@@ -59,11 +58,6 @@ class TTxProgress: public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
 private:
     // Input params
     TEvPrivate::TEvRunIncrementalRestore::TPtr RunIncrementalRestore = nullptr;
-    struct {
-        TOperationId OperationId;
-        TTabletId TabletId;
-        explicit operator bool() const { return OperationId && TabletId; }
-    } PipeRetry;
 
     // Transaction lifecycle support
     TEvTxAllocatorClient::TEvAllocateResult::TPtr AllocateResult = nullptr;
@@ -79,12 +73,6 @@ public:
     explicit TTxProgress(TSelf* self, TEvPrivate::TEvRunIncrementalRestore::TPtr& ev)
         : TTransactionBase(self)
         , RunIncrementalRestore(ev)
-    {
-    }
-
-    explicit TTxProgress(TSelf* self, const TOperationId& operationId, TTabletId tabletId)
-        : TTransactionBase(self)
-        , PipeRetry({operationId, tabletId})
     {
     }
 
@@ -120,8 +108,6 @@ public:
             return OnNotifyResult(txc, ctx);
         } else if (RunIncrementalRestore) {
             return OnRunIncrementalRestore(txc, ctx);
-        } else if (PipeRetry) {
-            return OnPipeRetry(txc, ctx);
         } else {
             Y_ABORT("unreachable");
         }
@@ -148,15 +134,12 @@ public:
     }
 
     bool OnRunIncrementalRestore(TTransactionContext&, const TActorContext& ctx);
-    bool OnPipeRetry(TTransactionContext&, const TActorContext& ctx);
     
     // Transaction lifecycle methods
     bool OnAllocateResult(TTransactionContext& txc, const TActorContext& ctx);
     bool OnModifyResult(TTransactionContext& txc, const TActorContext& ctx);
     bool OnNotifyResult(TTransactionContext& txc, const TActorContext& ctx);
 }; // TTxProgress
-
-// Implementation of OnRunIncrementalRestore and OnPipeRetry
 
 bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrementalRestore(TTransactionContext&, const TActorContext& ctx) {
     const auto& pathId = RunIncrementalRestore->Get()->BackupCollectionPathId;
@@ -274,98 +257,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         << ": operationId# " << operationId
         << ", backupCollectionPathId# " << pathId);
 
-    return true;
-}
-
-bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnPipeRetry(TTransactionContext& txc, const TActorContext& ctx) {
-    Y_UNUSED(txc);
-    LOG_D("Retrying incremental restore for pipe failure"
-        << ": operationId# " << PipeRetry.OperationId
-        << ", tabletId# " << PipeRetry.TabletId);
-
-    // Find the operation and retry the request to this specific DataShard
-    if (!Self->LongIncrementalRestoreOps.contains(PipeRetry.OperationId)) {
-        LOG_W("Cannot retry incremental restore - operation not found"
-            << ": operationId# " << PipeRetry.OperationId);
-        return true;
-    }
-    const auto& op = Self->LongIncrementalRestoreOps.at(PipeRetry.OperationId);
-    TPathId backupCollectionPathId;
-    backupCollectionPathId.OwnerId = op.GetBackupCollectionPathId().GetOwnerId();
-    backupCollectionPathId.LocalPathId = op.GetBackupCollectionPathId().GetLocalId();
-
-    // Find the table and shard for this tablet
-    for (const auto& tablePathString : op.GetTablePathList()) {
-        TPath tablePath = TPath::Resolve(tablePathString, Self);
-        if (!tablePath.IsResolved()) {
-            continue;
-        }
-        TPathId tablePathId = tablePath.Base()->PathId;
-        if (!Self->Tables.contains(tablePathId)) {
-            continue;
-        }
-        // Find the specific shard that matches this tablet
-        for (const auto& shard : Self->Tables.at(tablePathId)->GetPartitions()) {
-            Y_ABORT_UNLESS(Self->ShardInfos.contains(shard.ShardIdx));
-            const auto tabletId = Self->ShardInfos.at(shard.ShardIdx).TabletID;
-            if (tabletId == PipeRetry.TabletId) {
-                // Find the backup table path within the backup collection
-                auto tableName = tablePath.Base()->Name;
-                auto backupCollectionPath = Self->PathsById.at(backupCollectionPathId);
-                TVector<TPathId> backupTablePathIds;
-                for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
-                    if (childName.Contains("_incremental")) {
-                        auto backupEntryPath = Self->PathsById.at(childPathId);
-                        for (auto& [tableNameInEntry, tablePathId] : backupEntryPath->GetChildren()) {
-                            if (tableNameInEntry == tableName) {
-                                backupTablePathIds.push_back(tablePathId);
-                            }
-                        }
-                    }
-                }
-                if (backupTablePathIds.empty()) {
-                    LOG_W("No backup tables found in incremental backup entries during retry"
-                        << ": operationId# " << PipeRetry.OperationId
-                        << ", tableName# " << tableName
-                        << ", backupCollectionPathId# " << backupCollectionPathId);
-                    return true;
-                }
-                // Only the first backup table is used for now (multiple incremental backups per table not yet supported)
-                TPathId selectedBackupTablePathId = backupTablePathIds[0];
-                // Create a NEW unique operation for this incremental restore retry (don't reuse the original operation ID)
-                ui64 newOperationId = ui64(Self->GetCachedTxId(ctx));
-                TTxTransaction newTx;
-                newTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestoreMultipleIncrementalBackups);
-                auto* newMultipleRestore = newTx.MutableRestoreMultipleIncrementalBackups();
-                // Get the actual backup table path from the PathId
-                TPath backupTablePath = TPath::Init(selectedBackupTablePathId, Self);
-                newMultipleRestore->add_srctablepaths(backupTablePath.PathString());
-                selectedBackupTablePathId.ToProto(newMultipleRestore->add_srcpathids());
-                newMultipleRestore->set_dsttablepath(tablePath.PathString());
-                tablePathId.ToProto(newMultipleRestore->mutable_dstpathid());
-
-                // Store simplified context for transaction lifecycle (retry case)
-                TSchemeShard::TIncrementalRestoreContext context;
-                context.DestinationTablePathId = tablePathId;
-                context.DestinationTablePath = tablePath.PathString();
-                context.OriginalOperationId = ui64(PipeRetry.OperationId.GetTxId());
-                context.BackupCollectionPathId = backupCollectionPathId;
-                Self->IncrementalRestoreContexts[newOperationId] = context;
-
-                // Use proper transaction pattern
-                ctx.Send(Self->TxAllocatorClient, new TEvTxAllocatorClient::TEvAllocate(), 0, newOperationId);
-                LOG_I("Requested transaction allocation for incremental restore (retry): "
-                    << ": newOperationId# " << newOperationId
-                    << ", originalOperationId# " << PipeRetry.OperationId
-                    << ", srcPathId# " << selectedBackupTablePathId
-                    << ", dstPathId# " << tablePathId);
-                return true;
-            }
-        }
-    }
-    LOG_W("Cannot retry incremental restore - tablet not found in operation"
-        << ": operationId# " << PipeRetry.OperationId
-        << ", tabletId# " << PipeRetry.TabletId);
     return true;
 }
 
@@ -548,10 +439,6 @@ using namespace NIncrementalRestoreScan;
 
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxProgressIncrementalRestore(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev) {
     return new TTxProgress(this, ev);
-}
-
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreatePipeRetryIncrementalRestore(const TOperationId& operationId, TTabletId tabletId) {
-    return new TTxProgress(this, operationId, tabletId);
 }
 
 // Transaction lifecycle constructor functions

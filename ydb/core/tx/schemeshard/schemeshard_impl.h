@@ -1546,7 +1546,6 @@ public:
 
     // Incremental Restore Scan
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev);
-    NTabletFlatExecutor::ITransaction* CreatePipeRetryIncrementalRestore(const TOperationId& operationId, TTabletId tabletId);
     
     // Transaction lifecycle constructor functions
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev);
