@@ -29,11 +29,7 @@ using namespace NExportScan;
 class TCreateIncrementalRestoreSrcUnit : public TExecutionUnit {
 protected:
     bool IsRelevant(TActiveTransaction* tx) const {
-        bool hasIncrRestoreSrc = tx->GetSchemeTx().HasCreateIncrementalRestoreSrc();
-        LOG_INFO_S(TlsActivationContext->AsActorContext(), NKikimrServices::DATASHARD_BACKUP,
-                   "INCREMENTAL_DEBUG: TCreateIncrementalRestoreSrcUnit::IsRelevant called for txId=" 
-                   << tx->GetTxId() << " hasCreateIncrementalRestoreSrc=" << hasIncrRestoreSrc);
-        return hasIncrRestoreSrc;
+        return tx->GetSchemeTx().HasCreateIncrementalRestoreSrc();
     }
 
     bool IsWaiting(TOperation::TPtr op) const {
@@ -69,11 +65,6 @@ protected:
         TPathId dstTablePathId = TPathId::FromProto(incrBackup.GetDstPathId());
         const ui64 tableId = incrBackup.GetSrcPathId().GetLocalId();
 
-        LOG_INFO_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP,
-                   "INCREMENTAL_DEBUG: CreateScan called for txId=" << txId 
-                   << " srcPathId=" << tablePathId << " dstPathId=" << dstTablePathId 
-                   << " tableId=" << tableId);
-
         return CreateIncrementalRestoreScan(
                 DataShard.SelfId(),
                 [=, tabletID = DataShard.TabletID(), generation = DataShard.Generation(), tabletActor = DataShard.SelfId()](const TActorContext& ctx, TActorId parent) {
@@ -102,11 +93,6 @@ protected:
         Y_ENSURE(tx->GetSchemeTx().HasCreateIncrementalRestoreSrc());
         const auto& restoreSrc = tx->GetSchemeTx().GetCreateIncrementalRestoreSrc();
 
-        LOG_INFO_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP,
-                   "INCREMENTAL_DEBUG: TCreateIncrementalRestoreSrcUnit::Run called for txId=" << op->GetTxId()
-                   << " srcPathId=" << restoreSrc.GetSrcPathId().DebugString()
-                   << " dstPathId=" << restoreSrc.GetDstPathId().DebugString());
-
         const ui64 tableId = restoreSrc.GetSrcPathId().GetLocalId();
         Y_ENSURE(DataShard.GetUserTables().contains(tableId));
 
@@ -114,9 +100,6 @@ protected:
         Y_ENSURE(txc.DB.GetScheme().GetTableInfo(localTableId));
 
         Y_ENSURE(restoreSrc.HasDstPathId());
-
-        LOG_INFO_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP,
-                   "INCREMENTAL_DEBUG: Creating scan for tableId=" << tableId << " localTableId=" << localTableId);
         THolder<NTable::IScan> scan{CreateScan(restoreSrc, op->GetTxId())};
 
         auto* appData = AppData(ctx);
@@ -140,8 +123,6 @@ protected:
                 .SetReadPrio(TScanOptions::EReadPrio::Low)
         ));
 
-        LOG_INFO_S(*TlsActivationContext, NKikimrServices::DATASHARD_BACKUP,
-                   "INCREMENTAL_DEBUG: Scan queued successfully for txId=" << op->GetTxId());
         return true;
     }
 
