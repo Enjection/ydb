@@ -104,17 +104,24 @@ private:
         // Check if any in-progress operations have completed
         THashSet<TOperationId> stillInProgress;
         
+        LOG_I("CheckForCompletedOperations: checking " << state.InProgressOperations.size() << " operations");
+        
         for (const auto& opId : state.InProgressOperations) {
             TTxId txId = opId.GetTxId();
+            LOG_I("CheckForCompletedOperations: checking operation " << opId << " (txId: " << txId << ")");
+            
             if (Self->Operations.contains(txId)) {
                 // Operation is still running
                 stillInProgress.insert(opId);
+                LOG_I("Operation " << opId << " still in progress");
             } else {
                 // Operation completed
                 state.CompletedOperations.insert(opId);
                 LOG_I("Operation " << opId << " completed for incremental restore " << OperationId);
             }
         }
+        
+        LOG_I("CheckForCompletedOperations: " << stillInProgress.size() << " still in progress, " << state.CompletedOperations.size() << " completed");
         
         state.InProgressOperations = std::move(stillInProgress);
     }
