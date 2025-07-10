@@ -660,17 +660,40 @@ private:
     void SendRestoreRequestToShard(const TActorContext& ctx, ui64 operationId, TShardIdx shardIdx, const TSchemeShard::TIncrementalRestoreContext& context) {
         LOG_D("Sending restore request to shard " << shardIdx << " for operation " << operationId);
         
-        // For now, just simulate completion by immediately triggering progress
-        // In a real implementation, this would send a request to the DataShard
-        // and wait for a response
+        // Find the destination table to get shard information
+        auto destinationTable = Self->PathsById.at(context.DestinationTablePathId);
+        if (!destinationTable) {
+            LOG_W("Cannot send restore request - destination table not found: " << context.DestinationTablePathId);
+            return;
+        }
         
-        // TODO: Implement actual DataShard communication
-        // auto ev = MakeHolder<TEvDataShard::TEvIncrementalRestoreRequest>();
-        // ev->Record.SetOperationId(operationId);
-        // Self->SendToTablet(ctx, ui64(shardIdx), ev.Release());
+        // Get the table info
+        auto tableInfo = Self->Tables.at(context.DestinationTablePathId);
+        if (!tableInfo) {
+            LOG_W("Cannot send restore request - table info not found: " << context.DestinationTablePathId);
+            return;
+        }
         
-        // For now, simulate immediate success
-        ctx.Schedule(TDuration::Seconds(1), new TEvPrivate::TEvProgressIncrementalRestore(operationId));
+        // Send restore request to the DataShard
+        auto ev = MakeHolder<TEvDataShard::TEvIncrementalRestoreRequest>();
+        ev->Record.SetOperationId(operationId);
+        ev->Record.SetTableId(context.DestinationTablePathId.LocalPathId);
+        ev->Record.SetBackupCollectionPathId(context.BackupCollectionPathId.LocalPathId);
+        ev->Record.SetShardIdx(ui64(shardIdx));
+        
+        // Add source path information for the current incremental backup
+        for (const auto& [backupPathId, completed] : context.IncrementalBackupStatus) {
+            if (!completed) {
+                ev->Record.SetSourcePathId(backupPathId.LocalPathId);
+                break; // Send one at a time
+            }
+        }
+        
+        Self->SendToTablet(ctx, ui64(shardIdx), ev.Release());
+        
+        LOG_D("Sent restore request to shard " << shardIdx 
+            << " for operation " << operationId 
+            << " table " << context.DestinationTablePathId);
     }
     
     bool HandleApplyingState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
@@ -758,5 +781,85 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
 void TSchemeShard::Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
     Execute(CreateTxProgressIncrementalRestore(ev), ctx);
 }
+
+// Transaction to handle DataShard responses
+class TTxShardResponse : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
+private:
+    TEvDataShard::TEvIncrementalRestoreResponse::TPtr Response;
+
+public:
+    TTxShardResponse() = delete;
+    
+    explicit TTxShardResponse(TSelf* self, TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev)
+        : TTransactionBase(self)
+        , Response(ev)
+    {
+    }
+
+    TTxType GetTxType() const override {
+        return TXTYPE_PROGRESS_INCREMENTAL_RESTORE;
+    }
+
+    bool Execute(TTransactionContext& txc, const TActorContext& ctx) override {
+        auto& record = Response->Get()->Record;
+        ui64 operationId = record.GetOperationId();
+        TShardIdx shardIdx = TShardIdx(record.GetShardIdx());
+        
+        LOG_D("Received DataShard response for operation " << operationId << " from shard " << shardIdx);
+        
+        if (!Self->IncrementalRestoreContexts.contains(operationId)) {
+            LOG_W("Received response for unknown operation: " << operationId);
+            return true;
+        }
+        
+        auto& context = Self->IncrementalRestoreContexts[operationId];
+        NIceDb::TNiceDb db(txc.DB);
+        
+        switch (record.GetStatus()) {
+            case NKikimrIndexBuilder::EBuildStatus::DONE:
+                LOG_D("Shard " << shardIdx << " completed restore for operation " << operationId);
+                context.InProgressShards.erase(shardIdx);
+                context.DoneShards.insert(shardIdx);
+                
+                // Persist shard progress
+                db.Table<Schema::IncrementalRestoreShardProgress>()
+                    .Key(operationId, ui64(shardIdx))
+                    .Update<Schema::IncrementalRestoreShardProgress::Status>((ui32)NKikimrIndexBuilder::EBuildStatus::DONE);
+                
+                // Trigger next progress
+                Self->ProgressIncrementalRestore(operationId);
+                break;
+                
+            case NKikimrIndexBuilder::EBuildStatus::ABORTED:
+                LOG_W("Shard " << shardIdx << " aborted restore for operation " << operationId << " - retrying");
+                // Retry shard
+                context.InProgressShards.erase(shardIdx);
+                context.ToProcessShards.push_back(shardIdx);
+                Self->ProgressIncrementalRestore(operationId);
+                break;
+                
+            case NKikimrIndexBuilder::EBuildStatus::BUILD_ERROR:
+                LOG_E("Shard " << shardIdx << " failed restore for operation " << operationId);
+                // Handle error - mark operation as failed
+                context.State = TSchemeShard::TIncrementalRestoreContext::Failed;
+                db.Table<Schema::IncrementalRestoreState>()
+                    .Key(operationId)
+                    .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+                
+                Self->ProgressIncrementalRestore(operationId);
+                break;
+                
+            default:
+                LOG_W("Received unexpected status " << record.GetStatus() << " for operation " << operationId);
+                break;
+        }
+        
+        return true;
+    }
+    
+    void Complete(const TActorContext& ctx) override {
+        LOG_D("TTxShardResponse Complete");
+    }
+};
 
 } // namespace NKikimr::NSchemeShard
