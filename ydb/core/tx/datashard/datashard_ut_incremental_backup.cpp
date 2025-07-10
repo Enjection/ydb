@@ -600,6 +600,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         ExecSQL(server, edgeActor, R"(RESTORE `MyCollection`;)", false);
 
+        // Add sleep to ensure restore operation completes
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
         if (!WithIncremental) {
             UNIT_ASSERT_VALUES_EQUAL(
                 KqpSimpleExec(runtime, R"(
@@ -770,6 +773,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         ExecSQL(server, edgeActor, R"(RESTORE `MyCollection`;)", false);
 
+        // Add sleep to ensure restore operation completes
+        runtime.SimulateSleep(TDuration::Seconds(5));
+
         if (!WithIncremental) {
             UNIT_ASSERT_VALUES_EQUAL(
                 KqpSimpleExec(runtime, R"(
@@ -919,7 +925,8 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         ExecSQL(server, edgeActor, R"(RESTORE `MyCollection`;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(1));
+        // Add sleep to ensure restore operation completes
+        runtime.SimulateSleep(TDuration::Seconds(5));
 
         auto actual = KqpSimpleExec(runtime, R"(SELECT key, value FROM `/Root/Table` ORDER BY key)");
 
