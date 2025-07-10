@@ -29,19 +29,50 @@
 4. **No proper state machine** - ✅ IMPLEMENTED: Complete state machine with proper transitions
 5. **Missing integration** - ❌ **CRITICAL BUG**: Integration exists but incremental backups are not being triggered!
 
-### 🚨 CRITICAL ISSUE DISCOVERED - ARCHITECTURAL PROBLEM:
+### 🚨 CRITICAL ISSUE DISCOVERED - DATA PROCESSING LAYER MISSING:
 **Test Failure Analysis**: The test expects incremental changes to be applied but shows only full backup data was restored:
 - **Expected**: key=2, value=2000 (incremental update), keys 1&5 deleted
 - **Actual**: All original data (key=1,10; key=2,20; key=3,30; key=4,40; key=5,50)
-- **Root Cause**: Fundamental architectural mismatch - our approach doesn't use existing restore mechanism
+
+### ✅ ARCHITECTURAL PROGRESS MADE:
+- ✅ **Event Chain**: Fixed - `TEvRunIncrementalRestore` is being triggered correctly with backup names
+- ✅ **Operation Creation**: Fixed - `TChangePathStateOp` operations are being created successfully
+- ✅ **Path State Management**: Fixed - Tables are being set to `EPathStateIncomingIncrementalRestore`
+- ✅ **Handler Execution**: Fixed - `CreateIncrementalRestoreOperation` is being called for both incremental backups
+
+### ❌ MISSING COMPONENT IDENTIFIED:
+**Data Processing Layer**: While the operation orchestration works correctly, there's no mechanism that actually:
+1. **Reads Incremental Data**: No code that reads incremental backup data files when path state is `EPathStateIncomingIncrementalRestore`
+2. **Parses Change Stream**: No logic to parse the change stream format from incremental backups
+3. **Applies Changes**: No mechanism to apply the changes (inserts, updates, deletes) to the target table
+
+**Root Cause**: The existing restore mechanism only handles full backups, not incremental backup data processing.
 
 ### 🔧 FIXES APPLIED:
 - ✅ **Event Structure**: Updated `TEvRunIncrementalRestore` to include `OperationId` and `IncrementalBackupNames`
-- ✅ **Event Sender**: Updated `TDoneWithIncrementalRestore` to populate event with actual incremental backup names
+- ✅ **Event Sender**: Updated `TDoneWithIncrementalRestore` to populate event with actual incremental backup names  
 - ✅ **Handler Update**: Updated to use real backup names from event instead of placeholders
+- ✅ **Operation Creation**: Implemented `CreateIncrementalRestoreOperation` to create path state change operations
+
+### 🎯 NEXT STEPS - IMPLEMENT DATA PROCESSING LAYER:
+
+**Option 1: Find and Extend Existing Restore Mechanism (Recommended)**
+1. **Research**: Find where existing full backup restore reads backup data files
+2. **Extend**: Add support for incremental backup data format (change streams)
+3. **Integrate**: Connect the incremental restore operations to this mechanism
+
+**Option 2: Implement Custom Incremental Data Processor**  
+1. **Create**: New mechanism to read incremental backup files when path state is `EPathStateIncomingIncrementalRestore`
+2. **Parse**: Change stream format from incremental backups
+3. **Apply**: Changes to target table via existing DataShard mechanisms
+
+**Immediate Research Needed**:
+- [ ] Find where full backup restore actually reads and applies backup data
+- [ ] Understand the incremental backup file format and change stream structure
+- [ ] Determine if existing restore mechanism can be extended or if we need custom logic
 
 ### 🚨 ARCHITECTURAL PROBLEM IDENTIFIED:
-**Current Implementation Issue**: Our complex state machine tries to coordinate directly with DataShards, but YDB's backup/restore mechanism works differently:
+**Current Implementation Issue**: Our implementation creates the correct operations but there's no data processing backend
 - **Wrong Approach**: Direct DataShard coordination via `TEvIncrementalRestoreRequest`
 - **Correct Approach**: Create restore operations using `TEvModifySchemeTransaction` for each incremental backup
 - **Key Insight**: The existing restore infrastructure already handles DataShard coordination, error recovery, and progress tracking

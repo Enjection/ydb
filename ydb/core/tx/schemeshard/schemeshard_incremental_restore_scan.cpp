@@ -313,15 +313,51 @@ void TSchemeShard::CreateIncrementalRestoreOperation(
         return;
     }
     
-    Y_UNUSED(itBc); // Suppress unused variable warning
+    // Get backup collection info and path
+    const auto& backupCollectionInfo = itBc->second;
+    const auto& bcPath = TPath::Init(backupCollectionPathId, this);
     
-    // For now, just log that we would create the operation
-    // This is a simplified implementation to test the event flow
-    LOG_I("Would create incremental restore operation for backup: " << backupName);
-    
-    // TODO: Implement actual restore operation creation using existing infrastructure
-    // This should trigger the same mechanism as regular backup restore
-    // but for the specific incremental backup
+    // Create path state change operations for each table in the incremental backup
+    for (const auto& item : backupCollectionInfo->Description.GetExplicitEntryList().GetEntries()) {
+        std::pair<TString, TString> paths;
+        TString err;
+        if (!TrySplitPathByDb(item.GetPath(), bcPath.GetDomainPathString(), paths, err)) {
+            LOG_E("Failed to split path: " << err);
+            continue;
+        }
+        auto& relativeItemPath = paths.second;
+
+        // Check if the incremental backup path exists
+        TString incrBackupPathStr = JoinPath({bcPath.PathString(), backupName, relativeItemPath});
+        const TPath& incrBackupPath = TPath::Resolve(incrBackupPathStr, this);
+        
+        // Only create path state change operation if the path exists
+        if (incrBackupPath.IsResolved()) {
+            LOG_I("Creating path state change for: " << incrBackupPathStr);
+            
+            // Create a modify scheme transaction for path state change
+            auto request = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
+            auto& record = request->Record;
+            
+            record.SetTxId(ui64(GetCachedTxId(ctx)));
+            
+            auto& tx = *record.AddTransaction();
+            tx.SetOperationType(NKikimrSchemeOp::ESchemeOpChangePathState);
+            tx.SetInternal(true);
+            tx.SetWorkingDir(bcPath.PathString());
+
+            auto& changePathState = *tx.MutableChangePathState();
+            changePathState.SetPath(JoinPath({backupName, relativeItemPath}));
+            changePathState.SetTargetState(NKikimrSchemeOp::EPathStateAwaitingOutgoingIncrementalRestore);
+
+            LOG_I("Sending path state change for incremental restore: " << changePathState.GetPath());
+            
+            // Send the transaction to ourselves
+            Send(SelfId(), request.Release());
+        } else {
+            LOG_W("Incremental backup path does not exist: " << incrBackupPathStr);
+        }
+    }
 }
 
 // Helper function to create TTxProgressIncrementalRestore
