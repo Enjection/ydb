@@ -1,6 +1,7 @@
 #include "datashard_impl.h"
 #include "datashard_txs.h"
 #include "datashard_locks_db.h"
+#include "datashard_incremental_restore.h"
 #include "memory_state_migration.h"
 #include "probes.h"
 
@@ -4413,6 +4414,17 @@ void TDataShard::Handle(TEvDataShard::TEvCancelRestore::TPtr& ev, const TActorCo
     if (op) {
         ForwardEventToOperation(ev, op, ctx);
     }
+}
+
+void TDataShard::Handle(TEvDataShard::TEvIncrementalRestoreRequest::TPtr& ev, const TActorContext& ctx)
+{
+    LOG_INFO_S(ctx, NKikimrServices::TX_DATASHARD,
+        "Handle TEvIncrementalRestoreRequest at tablet " << TabletID()
+        << " operationId: " << ev->Get()->Record.GetOperationId()
+        << " tableId: " << ev->Get()->Record.GetTableId()
+        << " shardIdx: " << ev->Get()->Record.GetShardIdx());
+
+    Execute(new TTxIncrementalRestore(this, ev), ctx);
 }
 
 void TDataShard::Handle(TEvDataShard::TEvGetS3Upload::TPtr& ev, const TActorContext& ctx)

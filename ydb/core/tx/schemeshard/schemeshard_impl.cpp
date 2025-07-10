@@ -5204,6 +5204,8 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
 
         //namespace NIncrementalRestore {
         HFuncTraced(TEvPrivate::TEvRunIncrementalRestore, Handle);
+        HFuncTraced(TEvPrivate::TEvProgressIncrementalRestore, Handle);
+        HFuncTraced(TEvDataShard::TEvIncrementalRestoreResponse, Handle);
         // } // NIncrementalRestore
 
         // namespace NLongRunningCommon {
@@ -6875,6 +6877,8 @@ void TSchemeShard::Handle(TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev, con
         return Execute(CreateTxProgressExport(ev), ctx);
     } else if (Imports.contains(id)) {
         return Execute(CreateTxProgressImport(ev), ctx);
+    } else if (IncrementalRestoreStates.contains(id)) {
+        return Execute(CreateTxProgressIncrementalRestore(ev), ctx);
     } else if (IndexBuilds.contains(TIndexBuildId(id))) {
         return Execute(CreateTxReply(ev), ctx);
     }
@@ -6899,6 +6903,8 @@ void TSchemeShard::Handle(TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr
         return Execute(CreateTxProgressExport(ev), ctx);
     } else if (TxIdToImport.contains(txId)) {
         return Execute(CreateTxProgressImport(ev), ctx);
+    } else if (TxIdToIncrementalRestore.contains(txId)) {
+        return Execute(CreateTxProgressIncrementalRestore(ev), ctx);
     } else if (TxIdToIndexBuilds.contains(txId)) {
         return Execute(CreateTxReply(ev), ctx);
     } else if (BackgroundCleaningTxToDirPathId.contains(txId)) {
@@ -6951,6 +6957,10 @@ void TSchemeShard::Handle(TEvSchemeShard::TEvNotifyTxCompletionResult::TPtr& ev,
     }
     if (TxIdToImport.contains(txId)) {
         Execute(CreateTxProgressImport(txId), ctx);
+        executed = true;
+    }
+    if (TxIdToIncrementalRestore.contains(txId)) {
+        Execute(CreateTxProgressIncrementalRestore(txId), ctx);
         executed = true;
     }
     if (TxIdToIndexBuilds.contains(txId)) {

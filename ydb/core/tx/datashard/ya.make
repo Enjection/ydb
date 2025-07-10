@@ -45,6 +45,7 @@ SRCS(
     create_volatile_snapshot_unit.cpp
     datashard.cpp
     datashard.h
+    datashard_incremental_restore.cpp
     datashard__cancel_tx_proposal.cpp
     datashard__cleanup_borrowed.cpp
     datashard__cleanup_in_rs.cpp

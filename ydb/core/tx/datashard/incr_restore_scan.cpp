@@ -8,6 +8,7 @@
 #include <ydb/core/tx/datashard/change_record_body_serializer.h>
 #include <ydb/core/tx/datashard/datashard_user_table.h>
 #include <ydb/core/tx/datashard/incr_restore_helpers.h>
+#include <ydb/core/tx/datashard/datashard.h> // Add for TEvIncrementalRestoreResponse
 #include <ydb/library/actors/core/actor.h>
 #include <ydb/library/services/services.pb.h>
 
@@ -46,6 +47,7 @@ public:
             TUserTable::TCPtr table,
             const TPathId& targetPathId,
             ui64 txId,
+            ui64 schemeShardTabletId, // Add SchemeShard TabletID parameter
             NStreamScan::TLimits limits)
         : IActorCallback(static_cast<TReceiveFunc>(&TIncrementalRestoreScan::StateWork), NKikimrServices::TActivity::INCREMENTAL_RESTORE_SCAN_ACTOR)
         , Parent(parent)
@@ -53,6 +55,7 @@ public:
         , TxId(txId)
         , SourcePathId(sourcePathId)
         , TargetPathId(targetPathId)
+        , SchemeShardTabletId(schemeShardTabletId) // Store SchemeShard TabletID
         , ValueTags(InitValueTags(table))
         , Limits(limits)
         , Columns(table->Columns)
@@ -190,11 +193,45 @@ public:
     TAutoPtr<IDestructable> Finish(EStatus status) override {
         LOG_D("Finish " << status);
 
+        bool success = (status == EStatus::Done);
+        
         if (status != EStatus::Done) {
             // TODO: https://github.com/ydb-platform/ydb/issues/18797
+            LOG_W("IncrementalRestoreScan finished with error status: " << status);
         }
 
+        // Send completion notification to DataShard
         Send(Parent, new TEvIncrementalRestoreScan::TEvFinished(TxId));
+
+        // Send completion notification to SchemeShard
+        if (SchemeShardTabletId != 0) {
+            LOG_D("Sending completion notification to SchemeShard " << SchemeShardTabletId 
+                << " for txId " << TxId << " sourcePathId " << SourcePathId);
+            
+            auto response = MakeHolder<TEvDataShard::TEvIncrementalRestoreResponse>(
+                TxId,                                                              // txId
+                SourcePathId.LocalPathId,                                         // tableId
+                0,                                                                // operationId (will be filled by DataShard)
+                0,                                                                // incrementalIdx (will be filled by DataShard)
+                success ? NKikimrTxDataShard::TEvIncrementalRestoreResponse::SUCCESS 
+                        : NKikimrTxDataShard::TEvIncrementalRestoreResponse::ERROR,
+                success ? "" : "Scan completed with error status"                 // errorMessage
+            );
+            
+            // Send via pipe to SchemeShard
+            try {
+                const auto& ctx = TlsActivationContext->AsActorContext();
+                NTabletPipe::TClientConfig clientConfig;
+                auto pipe = NTabletPipe::CreateClient(SelfId(), SchemeShardTabletId, clientConfig);
+                auto pipeActor = ctx.Register(pipe);
+                NTabletPipe::SendData(ctx, pipeActor, response.Release());
+                LOG_D("Successfully sent completion notification to SchemeShard");
+            } catch (const std::exception& e) {
+                LOG_W("Failed to send completion notification to SchemeShard: " << e.what());
+            }
+        } else {
+            LOG_W("SchemeShardTabletId is 0, cannot send completion notification");
+        }
 
         PassAway();
         return nullptr;
@@ -262,6 +299,7 @@ private:
     const ui64 TxId;
     const TPathId SourcePathId;
     const TPathId TargetPathId;
+    const ui64 SchemeShardTabletId; // Add SchemeShard TabletID member variable
     const TVector<TTag> ValueTags;
     const TMaybe<TSerializedCellVec> LastKey;
     const TLimits Limits;
@@ -285,6 +323,7 @@ THolder<NTable::IScan> CreateIncrementalRestoreScan(
         TUserTable::TCPtr table,
         const TPathId& targetPathId,
         ui64 txId,
+        ui64 schemeShardTabletId, // Add SchemeShard TabletID parameter
         NStreamScan::TLimits limits)
 {
     return MakeHolder<TIncrementalRestoreScan>(
@@ -294,6 +333,7 @@ THolder<NTable::IScan> CreateIncrementalRestoreScan(
         table,
         targetPathId,
         txId,
+        schemeShardTabletId, // Pass SchemeShard TabletID to constructor
         limits);
 }
 
