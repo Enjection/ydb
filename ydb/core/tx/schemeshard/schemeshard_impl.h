@@ -1249,6 +1249,7 @@ public:
     void Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev, const TActorContext& ctx);
+    void CreateIncrementalRestoreOperation(const TPathId& backupCollectionPathId, const TOperationId& operationId, const TString& backupName, const TActorContext& ctx);
 
     void Handle(TEvDataShard::TEvProposeTransactionAttachResult::TPtr& ev, const TActorContext& ctx);
 

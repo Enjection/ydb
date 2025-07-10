@@ -3,7 +3,16 @@
 ## 📊 Current Status Evaluation
 
 ### ✅ Completed from Original Plan:
-1. **Proto syntax error** - Fixed in `counters_schemeshard.proto`
+1. **Proto syntax error** - Fixed in `counters_### Step 9: Build and Test
+- [x] **Action**: Compile DataShard module ✅ COMPLETED
+- [x] **Action**: Compile SchemeShard module ✅ COMPLETED
+- [x] **Fix**: Address compilation errors from refacto### Phase 3: Integration & Testing (FINALIZE)
+- [x] ✅ Enhance integration with MultiIncrementalRestore - COMPLETED
+- [x] ✅ Add comprehensive error handling - COMPLETED  
+- [x] ✅ Add recovery and retry logic - COMPLETED
+- [x] ✅ Add comprehensive testing - TESTED
+- [ ] 🚨 **URGENT**: Fix critical integration bug - incremental backups not triggering✅ COMPLETED
+- [x] **Result**: All modules build successfully ✅ COMPLETEDmeshard.proto`
 2. **Event definitions** - Added to `tx_datashard.proto`
 3. **Event classes** - Added to `datashard.h`
 4. **Handler registration** - Added to `datashard_impl.h`
@@ -16,9 +25,33 @@
 ### ❌ Issues Found from Analysis:
 1. **Include path** - ✅ FIXED: Now using `.h` instead of `.cpp` in `datashard.cpp`
 2. **Duplicate implementation** - ✅ FIXED: Header has only declaration, implementation only in `.cpp`
-3. **Missing multi-step logic** - ❌ TODO: Current implementation doesn't handle multiple incremental backups properly
-4. **No proper state machine** - ❌ TODO: Unlike build_index, doesn't continue to next incremental backup
-5. **Missing integration** - ❌ TODO: Not properly connected to `MultiIncrementalRestore` operation
+3. **Missing multi-step logic** - ✅ IMPLEMENTED: Multi-step state machine with sequential processing
+4. **No proper state machine** - ✅ IMPLEMENTED: Complete state machine with proper transitions
+5. **Missing integration** - ❌ **CRITICAL BUG**: Integration exists but incremental backups are not being triggered!
+
+### 🚨 CRITICAL ISSUE DISCOVERED - ARCHITECTURAL PROBLEM:
+**Test Failure Analysis**: The test expects incremental changes to be applied but shows only full backup data was restored:
+- **Expected**: key=2, value=2000 (incremental update), keys 1&5 deleted
+- **Actual**: All original data (key=1,10; key=2,20; key=3,30; key=4,40; key=5,50)
+- **Root Cause**: Fundamental architectural mismatch - our approach doesn't use existing restore mechanism
+
+### 🔧 FIXES APPLIED:
+- ✅ **Event Structure**: Updated `TEvRunIncrementalRestore` to include `OperationId` and `IncrementalBackupNames`
+- ✅ **Event Sender**: Updated `TDoneWithIncrementalRestore` to populate event with actual incremental backup names
+- ✅ **Handler Update**: Updated to use real backup names from event instead of placeholders
+
+### 🚨 ARCHITECTURAL PROBLEM IDENTIFIED:
+**Current Implementation Issue**: Our complex state machine tries to coordinate directly with DataShards, but YDB's backup/restore mechanism works differently:
+- **Wrong Approach**: Direct DataShard coordination via `TEvIncrementalRestoreRequest`
+- **Correct Approach**: Create restore operations using `TEvModifySchemeTransaction` for each incremental backup
+- **Key Insight**: The existing restore infrastructure already handles DataShard coordination, error recovery, and progress tracking
+
+### 🎯 NEW ARCHITECTURAL PLAN:
+**Simple Solution**: Instead of reinventing the wheel, use existing restore mechanism:
+1. **For each incremental backup**: Create a `TModifyScheme` restore operation
+2. **Sequential Processing**: Submit operations in chronological order
+3. **Let YDB Handle**: Use existing restore infrastructure for actual data movement
+4. **Remove Complexity**: Eliminate our custom state machine and DataShard coordination
 
 ## � Build Index Pattern Analysis
 
@@ -158,6 +191,34 @@ struct TIncrementalRestoreContext {
 - [x] **Add**: Create context with all incremental backups upfront ✅ COMPLETED
 - [x] **Add**: Sort incremental backups by timestamp ✅ COMPLETED
 - [x] **Add**: Initialize state machine with first incremental backup ✅ COMPLETED
+- [x] **Result**: Enhanced integration between backup collection and incremental restore ✅ COMPLETED
+
+### 🚨 CRITICAL BUG DISCOVERED: Integration Not Working!
+**Issue**: Tests show incremental backups are not being processed at all
+**Analysis**: The event chain from `TDoneWithIncrementalRestore` to our handler has gaps
+**Priority**: URGENT FIX NEEDED
+
+### NEW Step 11: Complete Architectural Fix 🚨 URGENT - IMPLEMENT SIMPLE SOLUTION
+- [x] **Issue**: `TEvRunIncrementalRestore` event doesn't carry backup information ✅ FIXED
+- [x] **Fix**: Modify event to include `OperationId`, `BackupCollectionPathId`, `IncrementalBackupNames` ✅ FIXED
+- [x] **Update**: `TDoneWithIncrementalRestore` to populate event with incremental backup list ✅ FIXED
+- [x] **Enhance**: Handler to use provided backup list instead of trying to discover it ✅ FIXED
+- [ ] **ARCHITECTURAL FIX**: Replace complex state machine with simple restore operation creation ❌ NEEDED
+- [ ] **Test**: Verify incremental backups are actually processed ❌ PENDING
+
+### NEW Step 12: Implement Simple Restore Mechanism 🎯 IMMEDIATE
+- [ ] **Approach**: For each incremental backup, create a `TModifyScheme` restore operation
+- [ ] **Implementation**: Use `ProposeTransaction` with restore parameters
+- [ ] **Sequential**: Submit operations in chronological order (timestamp-based)
+- [ ] **Cleanup**: Remove complex state machine, DataShard coordination, and custom context tracking
+- [ ] **Result**: Leverage existing restore infrastructure instead of reinventing it
+
+### NEW Step 13: Remove Over-engineered Code 🧹 CLEANUP
+- [ ] **Remove**: `TIncrementalRestoreContext` complex state machine
+- [ ] **Remove**: `TTxProgressIncrementalRestore` state handlers
+- [ ] **Remove**: Direct DataShard request sending logic
+- [ ] **Remove**: Custom progress tracking and shard coordination
+- [ ] **Keep**: Simple event handler that creates restore operations
 
 ### Step 7: Simplify DataShard Handler
 - [x] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.cpp`
@@ -176,9 +237,10 @@ struct TIncrementalRestoreContext {
 - [x] **Fix**: Address compilation errors from refactoring ✅ COMPLETED
 
 ### Step 10: Integration Testing
-- [ ] **Test**: Multi-step incremental restore flow
-- [ ] **Verify**: Sequential processing of incremental backups
-- [ ] **Check**: Proper state transitions and progress tracking
+- [x] **Test**: Multi-step incremental restore flow ✅ TESTED
+- [x] **Verify**: Sequential processing of incremental backups ❌ **FAILED - CRITICAL BUG**
+- [x] **Check**: Proper state transitions and progress tracking ❌ **NOT TRIGGERED**
+- [x] **Result**: TEST FAILURE - Incremental backups not being processed ❌ **URGENT FIX NEEDED**
 
 ## 💭 Plan Analysis and Questions
 
@@ -366,4 +428,132 @@ ANSWERS:
 - [ ] Add comprehensive testing
 
 **🔑 Key Insight**: The foundation is already there! We need to enhance, not rebuild from scratch.
+
+## 🎯 SIMPLE RESTORE MECHANISM IMPLEMENTATION PLAN
+
+### Problem Analysis
+The current implementation is over-engineered and doesn't align with YDB's architecture:
+- **Current**: Complex state machine + direct DataShard coordination
+- **YDB Way**: Use existing restore operations via `TEvModifySchemeTransaction`
+- **Issue**: Trying to reinvent backup/restore infrastructure
+
+### Solution: Use Existing Restore Infrastructure
+
+#### Option 1: Simple Handler (Recommended)
+Replace the complex handler with a simple one that creates restore operations:
+
+```cpp
+void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
+    auto* msg = ev->Get();
+    const auto& backupCollectionPathId = msg->BackupCollectionPathId;
+    const auto& operationId = msg->OperationId;
+    const auto& incrBackupNames = msg->IncrementalBackupNames;
+    
+    LOG_I("Handle(TEvRunIncrementalRestore) creating restore operations for " 
+          << incrBackupNames.size() << " incremental backups");
+    
+    // Sort backups by timestamp (already done in sender, but ensure order)
+    // For each incremental backup, create a restore operation
+    for (const auto& backupName : incrBackupNames) {
+        CreateIncrementalRestoreOperation(backupCollectionPathId, operationId, backupName, ctx);
+    }
+}
+
+void TSchemeShard::CreateIncrementalRestoreOperation(
+    const TPathId& backupCollectionPathId,
+    const TOperationId& operationId, 
+    const TString& backupName,
+    const TActorContext& ctx) {
+    
+    // Create restore operation using existing mechanism
+    auto request = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
+    auto& record = request->Record;
+    
+    // Set operation parameters
+    record.SetTxId(NextPathId()); // Generate unique transaction ID
+    
+    auto* operation = record.AddTransaction();
+    operation->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpRestore);
+    
+    auto* restore = operation->MutableRestore();
+    restore->SetTableName(/* derive from backup collection */);
+    restore->SetS3Settings(/* copy from backup collection */);
+    restore->SetBackupName(backupName);
+    
+    // Submit the operation
+    ProposeTransaction(request.Release(), ctx);
+}
+```
+
+#### Option 2: Leverage Existing `CreateIncrementalBackupPathStateOps`
+Use the existing function but modify it to create restore operations:
+
+```cpp
+void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
+    auto* msg = ev->Get();
+    
+    // Use existing infrastructure to create path state operations
+    // but for restore instead of backup
+    CreateIncrementalRestorePathStateOps(
+        msg->BackupCollectionPathId,
+        msg->OperationId,
+        msg->IncrementalBackupNames,
+        ctx);
+}
+```
+
+#### Option 3: Minimal State Machine (If Sequential Processing Required)
+Keep minimal state tracking but use existing restore operations:
+
+```cpp
+struct TSimpleIncrementalRestoreContext {
+    TVector<TString> IncrementalBackupNames;
+    ui32 CurrentBackupIndex = 0;
+    TOperationId OperationId;
+    TPathId BackupCollectionPathId;
+    
+    bool HasNextBackup() const { return CurrentBackupIndex < IncrementalBackupNames.size(); }
+    TString GetCurrentBackup() const { return IncrementalBackupNames[CurrentBackupIndex]; }
+    void MoveToNext() { ++CurrentBackupIndex; }
+};
+
+void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
+    // Create simple context and start first restore
+    auto& context = SimpleIncrementalRestoreContexts[ev->Get()->OperationId];
+    context.IncrementalBackupNames = ev->Get()->IncrementalBackupNames;
+    context.OperationId = ev->Get()->OperationId;
+    context.BackupCollectionPathId = ev->Get()->BackupCollectionPathId;
+    
+    ProcessNextIncrementalRestore(context, ctx);
+}
+
+void TSchemeShard::ProcessNextIncrementalRestore(TSimpleIncrementalRestoreContext& context, const TActorContext& ctx) {
+    if (!context.HasNextBackup()) {
+        // All done, cleanup
+        SimpleIncrementalRestoreContexts.erase(context.OperationId);
+        return;
+    }
+    
+    // Create restore operation for current backup
+    CreateIncrementalRestoreOperation(
+        context.BackupCollectionPathId,
+        context.OperationId,
+        context.GetCurrentBackup(),
+        ctx);
+    
+    // Move to next (or wait for completion if sequential processing needed)
+    context.MoveToNext();
+}
+```
+
+### Implementation Priority
+1. **Start with Option 1** - Simplest approach, parallel processing
+2. **If sequential processing needed** - Use Option 3 with minimal state
+3. **Option 2** - If existing infrastructure can be leveraged easily
+
+### Benefits of Simple Approach
+1. **Reuses existing code** - No need to reimplement DataShard coordination
+2. **Simpler debugging** - Less custom code, more standard operations
+3. **Better error handling** - Existing restore operations have proven error handling
+4. **Easier maintenance** - Follows established patterns in the codebase
 
