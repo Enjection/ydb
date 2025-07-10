@@ -1702,7 +1702,7 @@ message TEvIncrementalRestoreResponse {
     optional uint64 TableId = 2;
     optional uint64 OperationId = 3;
     optional uint32 IncrementalIdx = 4;
-    optional Status Status = 5;
+    optional Status RestoreStatus = 5;
     optional string ErrorMessage = 6;
     optional uint64 ProcessedRows = 7;
     optional uint64 ProcessedBytes = 8;
