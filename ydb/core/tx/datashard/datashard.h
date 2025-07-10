@@ -1590,25 +1590,25 @@ namespace TEvDataShard {
         TEvIncrementalRestoreResponse() = default;
         
         TEvIncrementalRestoreResponse(ui64 txId, ui64 tableId, ui64 operationId, ui32 incrementalIdx, 
-                                     ui32 status, const TString& errorMessage = "") {
+                                     NKikimrTxDataShard::TEvIncrementalRestoreResponse::Status status, const TString& errorMessage = "") {
             Record.SetTxId(txId);
             Record.SetTableId(tableId);
             Record.SetOperationId(operationId);
             Record.SetIncrementalIdx(incrementalIdx);
-            Record.SetStatus(status);
+            Record.SetRestoreStatus(status);
             if (!errorMessage.empty()) {
                 Record.SetErrorMessage(errorMessage);
             }
         }
         
         TEvIncrementalRestoreResponse(ui64 txId, ui64 tableId, ui64 operationId, ui32 incrementalIdx, 
-                                     ui32 status, ui64 processedRows, ui64 processedBytes,
+                                     NKikimrTxDataShard::TEvIncrementalRestoreResponse::Status status, ui64 processedRows, ui64 processedBytes,
                                      const TString& lastProcessedKey = "", const TString& errorMessage = "") {
             Record.SetTxId(txId);
             Record.SetTableId(tableId);
             Record.SetOperationId(operationId);
             Record.SetIncrementalIdx(incrementalIdx);
-            Record.SetStatus(status);
+            Record.SetRestoreStatus(status);
             Record.SetProcessedRows(processedRows);
             Record.SetProcessedBytes(processedBytes);
             if (!lastProcessedKey.empty()) {

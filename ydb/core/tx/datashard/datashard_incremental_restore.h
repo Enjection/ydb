@@ -1,3 +1,4 @@
+#pragma once
 #include "datashard_impl.h"
 
 namespace NKikimr {

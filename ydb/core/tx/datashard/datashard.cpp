@@ -1,7 +1,7 @@
 #include "datashard_impl.h"
 #include "datashard_txs.h"
 #include "datashard_locks_db.h"
-#include "datashard_incremental_restore.cpp"
+#include "datashard_incremental_restore.h"
 #include "memory_state_migration.h"
 #include "probes.h"
 

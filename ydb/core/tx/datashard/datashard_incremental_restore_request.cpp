@@ -43,13 +43,13 @@ public:
             ProcessIncrementalRestore(txc, ctx, record);
             
             // Success
-            Response->Record.SetStatus(NKikimrTxDataShard::TEvIncrementalRestoreResponse::SUCCESS);
+            Response->Record.SetRestoreStatus(NKikimrTxDataShard::TEvIncrementalRestoreResponse::SUCCESS);
             LOG_INFO_S(ctx, NKikimrServices::TX_DATASHARD, 
                 "Incremental restore request processed successfully: operationId=" << operationId);
                 
         } catch (const std::exception& ex) {
             // Error
-            Response->Record.SetStatus(NKikimrTxDataShard::TEvIncrementalRestoreResponse::ERROR);
+            Response->Record.SetRestoreStatus(NKikimrTxDataShard::TEvIncrementalRestoreResponse::ERROR);
             Response->Record.SetError(TStringBuilder() << "Error processing incremental restore: " << ex.what());
             LOG_ERROR_S(ctx, NKikimrServices::TX_DATASHARD, 
                 "Error processing incremental restore request: operationId=" << operationId 

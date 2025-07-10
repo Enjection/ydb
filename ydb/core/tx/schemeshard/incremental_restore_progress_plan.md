@@ -64,8 +64,8 @@ class TDataShard::TTxIncrementalRestore : public TTransactionBase<TDataShard> {
 - [ ] **Include**: Proper forward declarations
 
 ### Step 5: Update Build System
-- [ ] **File**: `ydb/core/tx/datashard/CMakeLists.txt`
-- [ ] **Action**: Add `datashard_incremental_restore.cpp` to source list
+- [ ] **File**: `ydb/core/tx/datashard/ya.make`
+- [ ] **Action**: Add `datashard_incremental_restore.cpp` to SRCS() section
 - [ ] **Check**: Verify build configuration
 
 ### Step 6: Verify SchemeShard Integration

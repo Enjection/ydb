@@ -1014,6 +1014,9 @@ public:
 
     struct TTxDeleteTabletReply;
     NTabletFlatExecutor::ITransaction* CreateTxDeleteTabletReply(TEvHive::TEvDeleteTabletReply::TPtr& ev);
+    
+    class TTxProgressIncrementalRestore;
+    NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(ui64 operationId);
 
     struct TTxShardStateChanged;
     NTabletFlatExecutor::ITransaction* CreateTxShardStateChanged(TEvDataShard::TEvStateChanged::TPtr& ev);
@@ -1188,7 +1191,6 @@ public:
     void Handle(TEvDataShard::TEvStateChanged::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvPersQueue::TEvUpdateConfigResponse::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvPersQueue::TEvProposeTransactionResult::TPtr& ev, const TActorContext& ctx);
-    void Handle(TEv
     void Handle(TEvSubDomain::TEvConfigureStatus::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvBlockStore::TEvUpdateVolumeConfigResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvFileStore::TEvUpdateConfigResponse::TPtr& ev, const TActorContext& ctx);
@@ -1209,6 +1211,7 @@ public:
     void Handle(TEvSchemeShard::TEvTenantDataErasureResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPrivate::TEvAddNewShardToDataErasure::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvBlobStorage::TEvControllerShredResponse::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvBlobDepot::TEvApplyConfigResult::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvSchemeShard::TEvDataErasureInfoRequest::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvSchemeShard::TEvDataErasureManualStartupRequest::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvSchemeShard::TEvWakeupToRunDataErasureBSC::TPtr& ev, const TActorContext& ctx);
@@ -1590,9 +1593,6 @@ public:
     
     NTabletFlatExecutor::ITransaction* CreateTxIncrementalRestoreResponse(TEvDataShard::TEvProposeTransactionResult::TPtr& ev);
 
-    void Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx);
-    void Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx);
-
     void ResumeCdcStreamScans(const TVector<TPathId>& ids, const TActorContext& ctx);
 
     void PersistCdcStreamScanShardStatus(NIceDb::TNiceDb& db, const TPathId& streamPathId, const TShardIdx& shardIdx,
@@ -1700,3 +1700,6 @@ public:
         virtual void DoComplete(const TActorContext &ctx) = 0;
     };
 };
+
+} // namespace NSchemeShard
+} // namespace NKikimr
