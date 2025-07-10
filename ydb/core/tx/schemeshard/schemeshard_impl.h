@@ -305,9 +305,9 @@ public:
         ui32 CurrentIncrementalIdx = 0;
         bool CurrentIncrementalStarted = false;
         
-        // DataShard completion tracking
-        THashSet<ui64> InProgressShards;
-        THashSet<ui64> DoneShards;
+        // Operation completion tracking for current incremental backup
+        THashSet<TOperationId> InProgressOperations;
+        THashSet<TOperationId> CompletedOperations;
         
         bool AllIncrementsProcessed() const {
             return CurrentIncrementalIdx >= IncrementalBackups.size();
@@ -316,6 +316,10 @@ public:
         bool IsCurrentIncrementalComplete() const {
             return CurrentIncrementalIdx < IncrementalBackups.size() && 
                    IncrementalBackups[CurrentIncrementalIdx].Completed;
+        }
+        
+        bool AreAllCurrentOperationsComplete() const {
+            return InProgressOperations.empty() && !CompletedOperations.empty();
         }
         
         void MarkCurrentIncrementalComplete() {
@@ -329,9 +333,9 @@ public:
                 CurrentIncrementalIdx++;
                 CurrentIncrementalStarted = false;
                 
-                // Reset shard tracking for next incremental
-                InProgressShards.clear();
-                DoneShards.clear();
+                // Reset operation tracking for next incremental
+                InProgressOperations.clear();
+                CompletedOperations.clear();
             }
         }
         
@@ -349,6 +353,19 @@ public:
                       [](const TIncrementalBackup& a, const TIncrementalBackup& b) {
                           return a.Timestamp < b.Timestamp;
                       });
+        }
+        
+        void AddCurrentIncrementalOperation(const TOperationId& opId) {
+            InProgressOperations.insert(opId);
+        }
+        
+        void MarkOperationComplete(const TOperationId& opId) {
+            InProgressOperations.erase(opId);
+            CompletedOperations.insert(opId);
+        }
+        
+        bool AllCurrentIncrementalOperationsComplete() const {
+            return InProgressOperations.empty() && !CompletedOperations.empty();
         }
     };
     
