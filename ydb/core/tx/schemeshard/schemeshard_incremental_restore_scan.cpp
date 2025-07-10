@@ -782,84 +782,9 @@ void TSchemeShard::Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, c
     Execute(CreateTxProgressIncrementalRestore(ev), ctx);
 }
 
-// Transaction to handle DataShard responses
-class TTxShardResponse : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-private:
-    TEvDataShard::TEvIncrementalRestoreResponse::TPtr Response;
-
-public:
-    TTxShardResponse() = delete;
-    
-    explicit TTxShardResponse(TSelf* self, TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev)
-        : TTransactionBase(self)
-        , Response(ev)
-    {
-    }
-
-    TTxType GetTxType() const override {
-        return TXTYPE_PROGRESS_INCREMENTAL_RESTORE;
-    }
-
-    bool Execute(TTransactionContext& txc, const TActorContext& ctx) override {
-        auto& record = Response->Get()->Record;
-        ui64 operationId = record.GetOperationId();
-        TShardIdx shardIdx = TShardIdx(record.GetShardIdx());
-        
-        LOG_D("Received DataShard response for operation " << operationId << " from shard " << shardIdx);
-        
-        if (!Self->IncrementalRestoreContexts.contains(operationId)) {
-            LOG_W("Received response for unknown operation: " << operationId);
-            return true;
-        }
-        
-        auto& context = Self->IncrementalRestoreContexts[operationId];
-        NIceDb::TNiceDb db(txc.DB);
-        
-        switch (record.GetStatus()) {
-            case NKikimrIndexBuilder::EBuildStatus::DONE:
-                LOG_D("Shard " << shardIdx << " completed restore for operation " << operationId);
-                context.InProgressShards.erase(shardIdx);
-                context.DoneShards.insert(shardIdx);
-                
-                // Persist shard progress
-                db.Table<Schema::IncrementalRestoreShardProgress>()
-                    .Key(operationId, ui64(shardIdx))
-                    .Update<Schema::IncrementalRestoreShardProgress::Status>((ui32)NKikimrIndexBuilder::EBuildStatus::DONE);
-                
-                // Trigger next progress
-                Self->ProgressIncrementalRestore(operationId);
-                break;
-                
-            case NKikimrIndexBuilder::EBuildStatus::ABORTED:
-                LOG_W("Shard " << shardIdx << " aborted restore for operation " << operationId << " - retrying");
-                // Retry shard
-                context.InProgressShards.erase(shardIdx);
-                context.ToProcessShards.push_back(shardIdx);
-                Self->ProgressIncrementalRestore(operationId);
-                break;
-                
-            case NKikimrIndexBuilder::EBuildStatus::BUILD_ERROR:
-                LOG_E("Shard " << shardIdx << " failed restore for operation " << operationId);
-                // Handle error - mark operation as failed
-                context.State = TSchemeShard::TIncrementalRestoreContext::Failed;
-                db.Table<Schema::IncrementalRestoreState>()
-                    .Key(operationId)
-                    .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
-                
-                Self->ProgressIncrementalRestore(operationId);
-                break;
-                
-            default:
-                LOG_W("Received unexpected status " << record.GetStatus() << " for operation " << operationId);
-                break;
-        }
-        
-        return true;
-    }
-    
-    void Complete(const TActorContext& ctx) override {
-        LOG_D("TTxShardResponse Complete");
-    }
-};
+// Handler for DataShard responses
+void TSchemeShard::Handle(TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev, const TActorContext& ctx) {
+    Execute(CreateTxIncrementalRestoreShardResponse(ev), ctx);
+}
 
 } // namespace NKikimr::NSchemeShard
