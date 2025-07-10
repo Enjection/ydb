@@ -23,66 +23,86 @@ Based on analysis of the diff and user feedback, we discovered:
 
 ## 🔧 IMPLEMENTATION PLAN:
 
-### Step 1: Fix Operation Type
-Replace `ESchemeOpChangePathState` with `ESchemeOpRestoreMultipleIncrementalBackups`:
+### ✅ Step 1: Fix Operation Type - COMPLETED
+Replaced `ESchemeOpChangePathState` with `ESchemeOpRestoreMultipleIncrementalBackups`:
 
 ```cpp
-void TSchemeShard::CreateIncrementalRestoreOperation(
-    const TPathId& backupCollectionPathId,
-    const TOperationId& operationId, 
-    const TString& backupName,
-    const TActorContext& ctx) {
-    
-    auto request = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
-    auto& record = request->Record;
-    
-    record.SetTxId(ui64(GetCachedTxId(ctx)));
-    
-    auto& tx = *record.AddTransaction();
-    tx.SetOperationType(NKikimrSchemeOp::ESchemeOpRestoreMultipleIncrementalBackups);
-    tx.SetInternal(true);
-    
-    // Process ONLY current incremental backup
-    auto& restore = *tx.MutableRestoreMultipleIncrementalBackups();
-    // Add current backup path for each table
-    
-    Send(SelfId(), request.Release());
-}
+// ✅ IMPLEMENTED in CreateIncrementalRestoreOperation()
+tx.SetOperationType(NKikimrSchemeOp::ESchemeOpRestoreMultipleIncrementalBackups);
+// Process ONLY current incremental backup
+auto& restore = *tx.MutableRestoreMultipleIncrementalBackups();
 ```
 
-### Step 2: Implement Sequential State Tracking
-Track which incremental backup is currently being processed:
+### ✅ Step 2: Sequential State Tracking - COMPLETED
+Implemented `TIncrementalRestoreState` with simple sequential processing:
 
 ```cpp
+// ✅ IMPLEMENTED in schemeshard_impl.h
 struct TIncrementalRestoreState {
-    TOperationId OperationId;
-    TPathId BackupCollectionPathId;
-    TVector<TString> IncrementalBackupNames;
-    ui32 CurrentIndex = 0;
-    TOperationId CurrentRestoreOpId;
-    
-    // Track DataShard progress (following build_index pattern)
-    THashSet<TShardIdx> ShardsInProgress;
-    THashSet<TShardIdx> CompletedShards;
-    THashMap<TShardIdx, TString> ShardErrors;
+    TVector<TIncrementalBackup> IncrementalBackups; // Sorted by timestamp
+    ui32 CurrentIncrementalIdx = 0;
+    bool CurrentIncrementalStarted = false;
+    THashSet<ui64> InProgressShards;
+    THashSet<ui64> DoneShards;
+    // ... completion tracking methods
 };
 ```
 
-### Step 3: Handle DataShard Completion Notifications
-Following build_index pattern, wait for DataShard completion before starting next backup:
+### ✅ Step 3: DataShard Completion Notifications - COMPLETED
+Implemented proper completion tracking:
 
 ```cpp
-void TSchemeShard::Handle(TEvDataShard::TEvIncrementalRestoreResult::TPtr& ev, const TActorContext& ctx) {
+// ✅ IMPLEMENTED in Handle(TEvIncrementalRestoreResponse)
+void TSchemeShard::Handle(TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev, const TActorContext& ctx) {
     // Track shard completion
-    // When all shards complete current backup, start next backup
-    // If any shard fails, handle error appropriately
-}
-
-void TSchemeShard::OnCurrentIncrementalRestoreComplete(const TOperationId& operationId, const TActorContext& ctx) {
-    // Move to next incremental backup
-    // If all backups processed, mark operation complete
+    state.InProgressShards.erase(shardIdx);
+    state.DoneShards.insert(shardIdx);
+    
+    // When all shards complete, trigger next incremental
+    if (state.InProgressShards.empty() && state.CurrentIncrementalStarted) {
+        state.MarkCurrentIncrementalComplete();
+        // Send progress event to move to next incremental
+    }
 }
 ```
+
+### ✅ Step 4: Remove Complex State Machine - COMPLETED
+Simplified `TTxProgressIncrementalRestore` to handle only sequential processing:
+
+```cpp
+// ✅ IMPLEMENTED - removed complex state machine
+// Now only handles: Check completion → Move to next → Process next backup
+```
+
+## 🚀 NEXT STEPS:
+
+### Step 5: Integration Testing
+- **Test the sequential flow**: One incremental backup at a time
+- **Verify DataShard notifications**: Completion tracking works correctly
+- **Check operation completion**: All incremental backups are processed in order
+
+### Step 6: Error Handling & Recovery
+- **Handle failed operations**: Retry logic for failed incremental backups
+- **State persistence**: Ensure state survives SchemeShard restarts
+- **Timeout handling**: Handle cases where DataShards don't respond
+
+### Step 7: Performance Optimization
+- **Parallel shard processing**: Multiple shards can process same incremental in parallel
+- **Better shard detection**: Get actual target shards from table metadata
+- **Progress reporting**: Add better progress tracking and logging
+
+---
+
+## 🔄 STATUS: IMPLEMENTATION COMPLETE, TESTING NEEDED
+
+All architectural changes are complete:
+- ✅ Using correct operation type (`ESchemeOpRestoreMultipleIncrementalBackups`)
+- ✅ Sequential processing with proper state tracking
+- ✅ DataShard completion notifications
+- ✅ Removed complex state machine
+- ✅ Simple, robust architecture following build_index pattern
+
+**Next**: Integration testing and refinement based on test results.
 
 ### Step 4: Add Proto Definitions
 ```proto
