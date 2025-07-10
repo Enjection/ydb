@@ -1686,18 +1686,28 @@ message TEvIncrementalRestoreRequest {
     optional bytes EndKey = 6;
     optional string BackupPath = 7;
     optional uint64 RestoreTimestamp = 8;
+    optional uint64 ShardIdx = 9;
+    optional uint64 BackupCollectionPathId = 10;
+    optional uint64 SourcePathId = 11;
 }
 
 message TEvIncrementalRestoreResponse {
+    enum Status {
+        SUCCESS = 0;
+        RETRY = 1;
+        ERROR = 2;
+    }
+    
     optional uint64 TxId = 1;
     optional uint64 TableId = 2;
     optional uint64 OperationId = 3;
     optional uint32 IncrementalIdx = 4;
-    optional uint32 Status = 5;
+    optional Status Status = 5;
     optional string ErrorMessage = 6;
     optional uint64 ProcessedRows = 7;
     optional uint64 ProcessedBytes = 8;
     optional bytes LastProcessedKey = 9;
+    optional uint64 ShardIdx = 10;
 }
 
 message TEvPrefixKMeansRequest {

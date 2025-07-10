@@ -491,15 +491,15 @@ enum EPercentileCounters {
     COUNTER_SHARDS_WITH_ROW_DELETES = 4 [(CounterOpts) = {
         Name: "ShardsWithRowDeletes",
         Integral: true,
-        Ranges: { Value: 0            Name: "0"          },
-        Ranges: { Value: 100          Name: "100"        },
-        Ranges: { Value: 1000         Name: "1000"       },
-        Ranges: { Value: 10000        Name: "10000"      },
-        Ranges: { Value: 100000       Name: "100000"     },
-        Ranges: { Value: 1000000      Name: "1000000"    },
-        Ranges: { Value: 10000000     Name: "10000000"   },
-        Ranges: { Value: 100000000    Name: "100000000"  },
-        Ranges: { Value: 1000000000   Name: "1000000000" },
+        Ranges: { Value: 0            Name: "0"          }
+        Ranges: { Value: 100          Name: "100"        }
+        Ranges: { Value: 1000         Name: "1000"       }
+        Ranges: { Value: 10000        Name: "10000"      }
+        Ranges: { Value: 100000       Name: "100000"     }
+        Ranges: { Value: 1000000      Name: "1000000"    }
+        Ranges: { Value: 10000000     Name: "10000000"   }
+        Ranges: { Value: 100000000    Name: "100000000"  }
+        Ranges: { Value: 1000000000   Name: "1000000000" }
     }];
 
     COUNTER_STATS_BATCH_LATENCY = 5 [(CounterOpts) = {
@@ -655,4 +655,5 @@ enum ETxTypes {
     TXTYPE_LOGIN_FINALIZE = 100 [(TxTypeOpts) = {Name: "TxLoginFinalize"}];
 
     TXTYPE_PROGRESS_INCREMENTAL_RESTORE = 101 [(TxTypeOpts) = {Name: "TxProgressIncrementalRestore"}];
+    TXTYPE_INCREMENTAL_RESTORE_SHARD_RESPONSE = 102 [(TxTypeOpts) = {Name: "TxIncrementalRestoreShardResponse"}];
 }

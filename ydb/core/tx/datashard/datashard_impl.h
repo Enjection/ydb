@@ -234,6 +234,7 @@ class TDataShard
     class TTxCdcStreamEmitHeartbeats;
     class TTxUpdateFollowerReadEdge;
     class TTxRemoveSchemaSnapshots;
+    class TTxIncrementalRestore;
     class TTxCleanupUncommitted;
     class TTxDataCleanup;
     class TTxCompleteDataCleanup;
@@ -1410,6 +1411,8 @@ class TDataShard
     void Handle(TEvPrivate::TEvRemoveSchemaSnapshots::TPtr& ev, const TActorContext& ctx);
 
     void Handle(TEvIncrementalRestoreScan::TEvFinished::TPtr& ev, const TActorContext& ctx);
+
+    void Handle(TEvDataShard::TEvIncrementalRestoreRequest::TPtr& ev, const TActorContext& ctx);
 
     void Handle(TEvDataShard::TEvForceDataCleanup::TPtr& ev, const TActorContext& ctx);
 
@@ -3255,6 +3258,7 @@ protected:
             HFunc(TEvPrivate::TEvStatisticsScanFinished, Handle);
             HFuncTraced(TEvPrivate::TEvRemoveSchemaSnapshots, Handle);
             HFunc(TEvIncrementalRestoreScan::TEvFinished, Handle);
+            HFunc(TEvDataShard::TEvIncrementalRestoreRequest, Handle);
             HFunc(TEvDataShard::TEvForceDataCleanup, Handle);
             default:
                 if (!HandleDefaultEvents(ev, SelfId())) {
