@@ -19,7 +19,7 @@
 
 namespace NKikimr::NSchemeShard {
 
-// Simplified TTxProgressIncrementalRestore implementation
+// Enhanced TTxProgressIncrementalRestore implementation with state machine
 class TSchemeShard::TTxProgressIncrementalRestore : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
 public:
     TTxProgressIncrementalRestore(TSchemeShard* self, ui64 operationId)
@@ -32,9 +32,38 @@ public:
             << " operationId: " << OperationId
             << " tablet: " << Self->TabletID());
 
-        // Simple progress tracking - just acknowledge the operation
-        // The actual work is done by MultiIncrementalRestore operation
-        LOG_I("Incremental restore progress acknowledged: " << OperationId);
+        // Find the incremental restore context for this operation
+        auto contextIt = Self->IncrementalRestoreContexts.find(OperationId);
+        if (contextIt == Self->IncrementalRestoreContexts.end()) {
+            LOG_W("No incremental restore context found for operation: " << OperationId);
+            return true;
+        }
+
+        auto& context = contextIt->second;
+        
+        // State machine logic
+        switch (context.State) {
+            case TIncrementalRestoreContext::EState::Invalid:
+                LOG_E("Invalid state for operation: " << OperationId);
+                return true;
+            case TIncrementalRestoreContext::EState::Allocating:
+                return HandleAllocatingState(context, ctx);
+            case TIncrementalRestoreContext::EState::Proposing:
+                // For now, move directly to Applying state
+                context.State = TIncrementalRestoreContext::EState::Applying;
+                return HandleApplyingState(context, ctx);
+            case TIncrementalRestoreContext::EState::Applying:
+                return HandleApplyingState(context, ctx);
+            case TIncrementalRestoreContext::EState::Waiting:
+                return HandleWaitingState(context, ctx);
+            case TIncrementalRestoreContext::EState::NextIncremental:
+                return HandleNextIncrementalState(context, ctx);
+            case TIncrementalRestoreContext::EState::Done:
+                return HandleDoneState(context, ctx);
+            case TIncrementalRestoreContext::EState::Failed:
+                LOG_E("Failed state for operation: " << OperationId);
+                return true;
+        }
         
         return true;
     }
@@ -46,9 +75,80 @@ public:
 
 private:
     ui64 OperationId;
+    
+    bool HandleAllocatingState(TIncrementalRestoreContext& context, const TActorContext& ctx) {
+        LOG_I("HandleAllocatingState for operation: " << OperationId);
+        
+        const auto* currentIncremental = context.GetCurrentIncremental();
+        if (!currentIncremental) {
+            LOG_I("No more incremental backups to process, moving to Done state");
+            context.State = TIncrementalRestoreContext::EState::Done;
+            return true;
+        }
+        
+        LOG_I("Starting incremental backup #" << context.CurrentIncrementalIdx + 1 
+            << " path: " << currentIncremental->BackupPath
+            << " timestamp: " << currentIncremental->Timestamp);
+        
+        // Move to applying state
+        context.State = TIncrementalRestoreContext::EState::Applying;
+        return true;
+    }
+    
+    bool HandleApplyingState(TIncrementalRestoreContext& context, const TActorContext& ctx) {
+        LOG_I("HandleApplyingState for operation: " << OperationId);
+        
+        // For now, just move to waiting state
+        // In a full implementation, we would send requests to DataShards here
+        context.State = TIncrementalRestoreContext::EState::Waiting;
+        return true;
+    }
+    
+    bool HandleWaitingState(TIncrementalRestoreContext& context, const TActorContext& ctx) {
+        LOG_I("HandleWaitingState for operation: " << OperationId);
+        
+        // Check if current incremental is complete
+        if (context.IsCurrentIncrementalComplete()) {
+            LOG_I("Current incremental backup completed, moving to next");
+            context.State = TIncrementalRestoreContext::EState::NextIncremental;
+        }
+        
+        return true;
+    }
+    
+    bool HandleNextIncrementalState(TIncrementalRestoreContext& context, const TActorContext& ctx) {
+        LOG_I("HandleNextIncrementalState for operation: " << OperationId);
+        
+        // Mark current incremental as completed and move to next
+        if (context.CurrentIncrementalIdx < context.IncrementalBackups.size()) {
+            context.IncrementalBackups[context.CurrentIncrementalIdx].Completed = true;
+        }
+        
+        context.MoveToNextIncremental();
+        
+        if (context.AllIncrementsProcessed()) {
+            LOG_I("All incremental backups processed, moving to Done state");
+            context.State = TIncrementalRestoreContext::EState::Done;
+        } else {
+            LOG_I("Moving to next incremental backup");
+            context.State = TIncrementalRestoreContext::EState::Allocating;
+        }
+        
+        return true;
+    }
+    
+    bool HandleDoneState(TIncrementalRestoreContext& context, const TActorContext& ctx) {
+        Y_UNUSED(context); // Suppress unused parameter warning
+        LOG_I("HandleDoneState for operation: " << OperationId);
+        
+        // Clean up context
+        Self->IncrementalRestoreContexts.erase(OperationId);
+        
+        return true;
+    }
 };
 
-// Handler for TEvRunIncrementalRestore
+// Enhanced handler for TEvRunIncrementalRestore
 void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
     const auto& backupCollectionPathId = ev->Get()->BackupCollectionPathId;
     
@@ -56,12 +156,21 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
         << " backupCollectionPathId: " << backupCollectionPathId
         << " tablet: " << TabletID());
 
-    // Simple implementation - just acknowledge the run request
-    // The actual work is done by MultiIncrementalRestore operation
-    LOG_I("Incremental restore run acknowledged for path: " << backupCollectionPathId);
+    // Create a new incremental restore context
+    ui64 operationId = backupCollectionPathId.LocalPathId;
+    auto& context = IncrementalRestoreContexts[operationId];
+    
+    // TODO: Load incremental backup list from backup collection metadata
+    // For now, create a dummy incremental backup for testing
+    context.AddIncrementalBackup(backupCollectionPathId, "test_backup_path", 1000);
+    
+    LOG_I("Created incremental restore context with " << context.IncrementalBackups.size() << " backups");
+    
+    // Start the state machine
+    Execute(new TTxProgressIncrementalRestore(this, operationId), ctx);
 }
 
-// Handler for TEvProgressIncrementalRestore  
+// Enhanced handler for TEvProgressIncrementalRestore  
 void TSchemeShard::Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
     ui64 operationId = ev->Get()->OperationId;
     
@@ -73,15 +182,43 @@ void TSchemeShard::Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, c
     Execute(new TTxProgressIncrementalRestore(this, operationId), ctx);
 }
 
-// Handler for DataShard response
+// Enhanced handler for DataShard response
 void TSchemeShard::Handle(TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev, const TActorContext& ctx) {
     const auto& record = ev->Get()->Record;
     
     LOG_I("Handle(TEvIncrementalRestoreResponse)"
         << " operationId: " << record.GetOperationId()
         << " shardIdx: " << record.GetShardIdx()
+        << " incrementalIdx: " << record.GetIncrementalIdx()
         << " status: " << (int)record.GetRestoreStatus()
         << " tablet: " << TabletID());
+
+    // Update context with shard completion
+    auto contextIt = IncrementalRestoreContexts.find(record.GetOperationId());
+    if (contextIt != IncrementalRestoreContexts.end()) {
+        auto& context = contextIt->second;
+        
+        // Track shard completion for current incremental backup
+        if (record.GetIncrementalIdx() == context.CurrentIncrementalIdx) {
+            ui64 shardIdx = record.GetShardIdx();
+            context.InProgressShards.erase(shardIdx);
+            context.DoneShards.insert(shardIdx);
+            
+            LOG_I("Shard " << shardIdx << " completed incremental #" << record.GetIncrementalIdx()
+                << " (" << context.DoneShards.size() << "/" << (context.DoneShards.size() + context.InProgressShards.size()) << " done)");
+            
+            // Check if all shards are done for current incremental
+            if (context.InProgressShards.empty()) {
+                LOG_I("All shards completed for incremental #" << record.GetIncrementalIdx());
+                if (context.CurrentIncrementalIdx < context.IncrementalBackups.size()) {
+                    context.IncrementalBackupStatus[context.IncrementalBackups[context.CurrentIncrementalIdx].BackupPathId] = true;
+                }
+            }
+        } else {
+            LOG_W("Received response for incremental #" << record.GetIncrementalIdx() 
+                << " but currently processing #" << context.CurrentIncrementalIdx);
+        }
+    }
 
     // Send progress update
     auto progressEvent = MakeHolder<TEvPrivate::TEvProgressIncrementalRestore>(record.GetOperationId());

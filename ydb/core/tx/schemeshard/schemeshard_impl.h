@@ -85,6 +85,9 @@ extern const ui64 NEW_TABLE_ALTER_VERSION;
 
 class TDataErasureManager;
 
+// Forward declaration for incremental restore context
+struct TIncrementalRestoreContext;
+
 class TSchemeShard
     : public TActor<TSchemeShard>
     , public NTabletFlatExecutor::TTabletExecutedFlat
@@ -281,6 +284,94 @@ public:
     THashMap<TTxId, TPublicationInfo> Publications;
     THashMap<TOperationId, TTxState> TxInFlight;
     THashMap<TOperationId, NKikimrSchemeOp::TLongIncrementalRestoreOp> LongIncrementalRestoreOps;
+    
+    // Context storage for incremental restore transactions
+    struct TIncrementalRestoreContext {
+        TPathId DestinationTablePathId;
+        TString DestinationTablePath;
+        ui64 OriginalOperationId;
+        TPathId BackupCollectionPathId;
+        
+        // Multi-step incremental processing
+        struct TIncrementalBackup {
+            TPathId BackupPathId;
+            TString BackupPath;
+            ui64 Timestamp;
+            bool Completed = false;
+            
+            TIncrementalBackup(const TPathId& pathId, const TString& path, ui64 timestamp)
+                : BackupPathId(pathId), BackupPath(path), Timestamp(timestamp) {}
+        };
+        
+        // New fields for progress tracking
+        enum EState {
+            Invalid,
+            Allocating,
+            Proposing,
+            Waiting,
+            Applying,
+            Done,
+            Failed,
+            NextIncremental  // Added for multi-step processing
+        };
+        
+        EState State = Invalid;
+        THashSet<ui64> InProgressShards;
+        THashSet<ui64> DoneShards;
+        TVector<ui64> ToProcessShards;
+        
+        // Track individual incremental backup progress
+        THashMap<TPathId, bool> IncrementalBackupStatus; // PathId -> Completed
+        
+        // Multi-step incremental backup tracking
+        TVector<TIncrementalBackup> IncrementalBackups; // Sorted by timestamp
+        ui32 CurrentIncrementalIdx = 0;
+        
+        // Tracking and transaction management
+        TTxId CurrentTxId = InvalidTxId;
+        
+        bool AllIncrementsProcessed() const {
+            for (const auto& [pathId, completed] : IncrementalBackupStatus) {
+                if (!completed) return false;
+            }
+            return !IncrementalBackupStatus.empty() || CurrentIncrementalIdx >= IncrementalBackups.size();
+        }
+        
+        bool IsCurrentIncrementalComplete() const {
+            return CurrentIncrementalIdx < IncrementalBackups.size() && 
+                   IncrementalBackups[CurrentIncrementalIdx].Completed;
+        }
+        
+        void MoveToNextIncremental() {
+            if (CurrentIncrementalIdx < IncrementalBackups.size()) {
+                CurrentIncrementalIdx++;
+                State = Allocating;
+                
+                // Reset shard tracking for next incremental
+                InProgressShards.clear();
+                DoneShards.clear();
+                ToProcessShards.clear();
+            }
+        }
+        
+        const TIncrementalBackup* GetCurrentIncremental() const {
+            if (CurrentIncrementalIdx < IncrementalBackups.size()) {
+                return &IncrementalBackups[CurrentIncrementalIdx];
+            }
+            return nullptr;
+        }
+        
+        void AddIncrementalBackup(const TPathId& pathId, const TString& path, ui64 timestamp) {
+            IncrementalBackups.emplace_back(pathId, path, timestamp);
+            // Sort by timestamp to ensure chronological order
+            std::sort(IncrementalBackups.begin(), IncrementalBackups.end(), 
+                      [](const TIncrementalBackup& a, const TIncrementalBackup& b) {
+                          return a.Timestamp < b.Timestamp;
+                      });
+        }
+    };
+    
+    THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
 
     ui64 NextLocalShardIdx = 0;
     THashMap<TShardIdx, TShardInfo> ShardInfos;
@@ -1292,44 +1383,6 @@ public:
 
     // Incremental restore transaction tracking
     THashMap<TTxId, ui64> TxIdToIncrementalRestore;
-    
-    // Context storage for incremental restore transactions
-    struct TIncrementalRestoreContext {
-        TPathId DestinationTablePathId;
-        TString DestinationTablePath;
-        ui64 OriginalOperationId;
-        TPathId BackupCollectionPathId;
-        
-        // New fields for progress tracking
-        enum EState {
-            Invalid,
-            Allocating,
-            Proposing,
-            Waiting,
-            Applying,
-            Done,
-            Failed
-        };
-        
-        EState State = Invalid;
-        THashSet<TShardIdx> InProgressShards;
-        THashSet<TShardIdx> DoneShards;
-        TVector<TShardIdx> ToProcessShards;
-        
-        // Track individual incremental backup progress
-        THashMap<TPathId, bool> IncrementalBackupStatus; // PathId -> Completed
-        
-        // Tracking and transaction management
-        TTxId CurrentTxId = InvalidTxId;
-        
-        bool AllIncrementsProcessed() const {
-            for (const auto& [pathId, completed] : IncrementalBackupStatus) {
-                if (!completed) return false;
-            }
-            return !IncrementalBackupStatus.empty();
-        }
-    };
-    THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
 
     void FromXxportInfo(NKikimrExport::TExport& exprt, const TExportInfo& exportInfo);
 
