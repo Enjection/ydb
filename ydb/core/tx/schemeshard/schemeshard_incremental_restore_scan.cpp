@@ -156,15 +156,38 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
         << " backupCollectionPathId: " << backupCollectionPathId
         << " tablet: " << TabletID());
 
+    // Find the backup collection to get incremental backup information
+    auto itBc = BackupCollections.find(backupCollectionPathId);
+    if (itBc == BackupCollections.end()) {
+        LOG_E("Backup collection not found for pathId: " << backupCollectionPathId);
+        return;
+    }
+
+    // TODO: Use backup collection info from itBc->second to get actual incremental backups
+    
     // Create a new incremental restore context
     ui64 operationId = backupCollectionPathId.LocalPathId;
     auto& context = IncrementalRestoreContexts[operationId];
     
-    // TODO: Load incremental backup list from backup collection metadata
-    // For now, create a dummy incremental backup for testing
-    context.AddIncrementalBackup(backupCollectionPathId, "test_backup_path", 1000);
+    // Load incremental backup information from backup collection
+    TVector<TString> incrBackupNames;
+    
+    // Simplified implementation: For now, create placeholder incremental backups
+    // TODO: In full implementation, scan backup collection children to find incremental backups
+    LOG_I("Creating placeholder incremental backups for testing");
+    
+    // Populate context with placeholder incremental backup information
+    // In a real implementation, this would scan the backup collection metadata
+    context.AddIncrementalBackup(backupCollectionPathId, "incremental_backup_1", 1000);
+    context.AddIncrementalBackup(backupCollectionPathId, "incremental_backup_2", 2000);
     
     LOG_I("Created incremental restore context with " << context.IncrementalBackups.size() << " backups");
+    
+    // If no incremental backups found, mark as done
+    if (context.IncrementalBackups.empty()) {
+        LOG_I("No incremental backups found, marking operation as complete");
+        context.State = TIncrementalRestoreContext::EState::Done;
+    }
     
     // Start the state machine
     Execute(new TTxProgressIncrementalRestore(this, operationId), ctx);

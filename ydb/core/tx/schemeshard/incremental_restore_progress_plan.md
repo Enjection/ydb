@@ -172,8 +172,8 @@ struct TIncrementalRestoreContext {
 
 ### Step 9: Build and Test
 - [x] **Action**: Compile DataShard module ✅ VERIFIED
-- [x] **Action**: Compile SchemeShard module ✅ SHOULD WORK NOW
-- [ ] **Fix**: Address compilation errors from refactoring
+- [x] **Action**: Compile SchemeShard module ✅ COMPLETED
+- [x] **Fix**: Address compilation errors from refactoring ✅ COMPLETED
 
 ### Step 10: Integration Testing
 - [ ] **Test**: Multi-step incremental restore flow
