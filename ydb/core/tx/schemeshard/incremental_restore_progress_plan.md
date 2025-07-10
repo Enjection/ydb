@@ -153,11 +153,11 @@ struct TIncrementalRestoreContext {
 - [x] **Add**: Error handling and retry logic ✅ COMPLETED
 
 ### Step 6: Integration with MultiIncrementalRestore
-- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard__operation_restore_backup_collection.cpp`
-- [ ] **Action**: Update `MultiIncrementalRestore::RunIncrementalRestore` method
-- [ ] **Add**: Create context with all incremental backups upfront
-- [ ] **Add**: Sort incremental backups by timestamp
-- [ ] **Add**: Initialize state machine with first incremental backup
+- [x] **File**: `ydb/core/tx/schemeshard/schemeshard__operation_restore_backup_collection.cpp`
+- [x] **Action**: Update `MultiIncrementalRestore::RunIncrementalRestore` method ✅ COMPLETED
+- [x] **Add**: Create context with all incremental backups upfront ✅ COMPLETED
+- [x] **Add**: Sort incremental backups by timestamp ✅ COMPLETED
+- [x] **Add**: Initialize state machine with first incremental backup ✅ COMPLETED
 
 ### Step 7: Simplify DataShard Handler
 - [x] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.cpp`
@@ -360,7 +360,7 @@ ANSWERS:
 - [x] ✅ Add per-incremental tracking - COMPLETED
 
 ### Phase 3: Integration & Testing (FINALIZE)
-- [ ] Enhance integration with MultiIncrementalRestore
+- [x] ✅ Enhance integration with MultiIncrementalRestore - COMPLETED
 - [ ] Add comprehensive error handling
 - [ ] Add recovery and retry logic
 - [ ] Add comprehensive testing
