@@ -1,97 +1,134 @@
-# 📋 Incremental Restore Implementation Plan
+# 📋 Incremental Restore Implementation Plan - REVISED
 
-## 🎯 Current Status Analysis
+## 📊 Current Status Evaluation
 
-### ✅ Already Implemented (from changes.diff):
-- ✅ Event definitions in `tx_datashard.proto`
-- ✅ Event classes in `datashard.h`  
-- ✅ Handler registration in `datashard_impl.h`
-- ✅ Basic handler stub in `datashard.cpp`
-- ✅ Transaction type added to `counters_schemeshard.proto`
+### ✅ Completed from Original Plan:
+1. **Proto syntax error** - Fixed in `counters_schemeshard.proto`
+2. **Event definitions** - Added to `tx_datashard.proto`
+3. **Event classes** - Added to `datashard.h`
+4. **Handler registration** - Added to `datashard_impl.h`
+5. **Basic DataShard handler** - Created `datashard_incremental_restore.cpp`
+6. **Header file** - Created `datashard_incremental_restore.h`
+7. **Build system update** - Added to `ya.make`
+8. **SchemeShard handlers** - Added to `schemeshard_impl.cpp`
+9. **Progress tracking** - Basic implementation in `schemeshard_incremental_restore_scan.cpp`
 
-### ❌ Critical Issues Found:
-1. **🚨 Syntax Error**: Commas removed from proto file (lines 494-502)
-2. **🔧 Over-engineering**: Complex DataShard validation logic unnecessary
-3. **🔗 Missing Integration**: No clear connection to existing `MultiIncrementalRestore`
-4. **📁 File Structure**: Incorrect include path in `datashard.cpp`
+### ❌ Issues Found from Analysis:
+1. **Include path** - Still using `.cpp` instead of `.h` in `datashard.cpp`
+2. **Duplicate implementation** - Both `.cpp` and `.h` files have the same class
+3. **Missing multi-step logic** - Current implementation doesn't handle multiple incremental backups properly
+4. **No proper state machine** - Unlike build_index, doesn't continue to next incremental backup
+5. **Missing integration** - Not properly connected to `MultiIncrementalRestore` operation
 
-## 🏗️ Simplified Architecture
+## � Build Index Pattern Analysis
 
-Following the build_index pattern, the implementation should be:
+The build_index pattern shows:
+- **State Machine**: Progress through states (Allocating → Proposing → Waiting → Applying → Done)
+- **Shard Tracking**: Maintains `InProgressShards`, `DoneShards`, `ToProcessShards`
+- **Iterative Processing**: Processes shards in batches, moving to next batch when current is done
+- **Progress Persistence**: Saves state to database for recovery
+
+## 🏗️ Revised Architecture
 
 ```
-User Request → RestoreBackupCollection → MultiIncrementalRestore → Change Senders
+User Request → RestoreBackupCollection → MultiIncrementalRestore
                                               ↓
-                                      Progress Tracking (minimal)
+                                      Multi-Step State Machine
                                               ↓
-                                      DataShard Handlers (simple)
+                                   Process Incremental Backup #1
+                                              ↓
+                                   Process Incremental Backup #2
+                                              ↓
+                                   Process Incremental Backup #N
+                                              ↓
+                                           Done
 ```
 
-### Core Principle: **MultiIncrementalRestore is the Primary Driver**
+### Core Principle: **Sequential Processing of Incremental Backups**
 
-The existing `MultiIncrementalRestore` operation in `schemeshard__operation_restore_backup_collection.cpp` should orchestrate the entire process, with minimal additional complexity.
+Each incremental backup must be processed completely before moving to the next one, maintaining chronological order.
 
-## 📝 Step-by-Step Implementation Plan
+## 📝 Revised Step-by-Step Implementation Plan
 
-### Step 1: Fix Proto Syntax Error 🚨 HIGH PRIORITY
-- [ ] **File**: `ydb/core/protos/counters_schemeshard.proto`
-- [ ] **Lines**: 494-502 (Ranges definitions)
-- [ ] **Action**: Restore commas after each `Ranges:` entry
-- [ ] **Fix**: Change `Ranges: { Value: 0 Name: "0" }` to `Ranges: { Value: 0 Name: "0" },`
-
-### Step 2: Simplify DataShard Handler Implementation
-- [ ] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.cpp`
-- [ ] **Action**: Replace with minimal handler (no complex validation)
-- [ ] **Purpose**: Just acknowledge requests and defer to change senders
-
-```cpp
-// Simplified handler approach
-class TDataShard::TTxIncrementalRestore : public TTransactionBase<TDataShard> {
-    // Simple acknowledgment logic only
-    // Real work happens via change senders
-};
-```
-
-### Step 3: Fix Include Path
+### Step 1: Fix Immediate Issues 🚨 HIGH PRIORITY
 - [ ] **File**: `ydb/core/tx/datashard/datashard.cpp`
 - [ ] **Current**: `#include "datashard_incremental_restore.cpp"`
 - [ ] **Fix**: Change to `#include "datashard_incremental_restore.h"`
-- [ ] **Create**: Header file with class declaration
+- [ ] **Action**: Update include path
 
-### Step 4: Create Proper Header File
-- [ ] **File**: Create `ydb/core/tx/datashard/datashard_incremental_restore.h`
-- [ ] **Content**: Class declaration for `TTxIncrementalRestore`
-- [ ] **Include**: Proper forward declarations
+### Step 2: Remove Duplicate Implementation
+- [ ] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.h`
+- [ ] **Action**: Delete the class implementation from header
+- [ ] **Keep**: Only class declaration in header
+- [ ] **Result**: Implementation stays only in `.cpp` file
 
-### Step 5: Update Build System
-- [ ] **File**: `ydb/core/tx/datashard/ya.make`
-- [ ] **Action**: Add `datashard_incremental_restore.cpp` to SRCS() section
-- [ ] **Check**: Verify build configuration
-
-### Step 6: Verify SchemeShard Integration
-- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_impl.cpp`
-- [ ] **Check**: Ensure handler registration exists
-- [ ] **Verify**: `TTxProgressIncrementalRestore` is properly connected
-
-### Step 7: Connect to MultiIncrementalRestore
-- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard__operation_restore_backup_collection.cpp`
-- [ ] **Verify**: Progress tracking integration
-- [ ] **Check**: `TEvRunIncrementalRestore` flow
-
-### Step 8: Add Response Handler
+### Step 3: Implement Multi-Step State Machine in SchemeShard
 - [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_incremental_restore_scan.cpp`
-- [ ] **Action**: Add `TEvIncrementalRestoreResponse` handler
-- [ ] **Purpose**: Process DataShard responses
+- [ ] **Action**: Update `TIncrementalRestoreContext` structure
+- [ ] **Add**: Support for multiple incremental backups
+- [ ] **Add**: Current incremental index tracking
+- [ ] **Add**: State machine logic similar to build_index
+
+```cpp
+struct TIncrementalRestoreContext {
+    // Multi-step incremental processing
+    struct TIncrementalBackup {
+        TPathId BackupPathId;
+        TString BackupPath;
+        ui64 Timestamp;
+        bool Completed = false;
+    };
+    
+    TVector<TIncrementalBackup> IncrementalBackups; // Sorted by timestamp
+    ui32 CurrentIncrementalIdx = 0;
+    
+    bool IsCurrentIncrementalComplete() const;
+    bool AllIncrementsProcessed() const;
+    void MoveToNextIncremental();
+};
+```
+
+### Step 4: Update Progress Transaction Logic
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_incremental_restore_scan.cpp`
+- [ ] **Action**: Update `TTxProgressIncrementalRestore` class
+- [ ] **Add**: State handling for `Waiting` and `Applying` states
+- [ ] **Add**: Logic to move to next incremental backup when current is complete
+- [ ] **Add**: Method to start next incremental backup processing
+
+### Step 5: Update DataShard Response Handler
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_incremental_restore_scan.cpp`
+- [ ] **Action**: Update response handler to track per-incremental progress
+- [ ] **Add**: Logic to detect when current incremental is complete
+- [ ] **Add**: Automatic progression to next incremental backup
+- [ ] **Add**: Error handling and retry logic
+
+### Step 6: Integration with MultiIncrementalRestore
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard__operation_restore_backup_collection.cpp`
+- [ ] **Action**: Update `MultiIncrementalRestore::RunIncrementalRestore` method
+- [ ] **Add**: Create context with all incremental backups upfront
+- [ ] **Add**: Sort incremental backups by timestamp
+- [ ] **Add**: Initialize state machine with first incremental backup
+
+### Step 7: Simplify DataShard Handler
+- [ ] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.cpp`
+- [ ] **Action**: Remove complex validation logic
+- [ ] **Keep**: Simple acknowledgment logic only
+- [ ] **Purpose**: DataShard just acknowledges, real work via change senders
+
+### Step 8: Remove Over-engineered Code
+- [ ] **File**: `ydb/core/tx/datashard/datashard_incremental_restore_request.cpp`
+- [ ] **Action**: Delete this file (not needed)
+- [ ] **Reason**: Over-engineering, not following build_index pattern
 
 ### Step 9: Build and Test
 - [ ] **Action**: Compile DataShard module
 - [ ] **Action**: Compile SchemeShard module
-- [ ] **Fix**: Address compilation errors
+- [ ] **Fix**: Address compilation errors from refactoring
 
-### Step 10: Basic Unit Tests
-- [ ] **File**: Create `datashard_ut_incremental_restore.cpp`
-- [ ] **Test**: Basic request/response flow
-- [ ] **Verify**: Handler acknowledgment
+### Step 10: Integration Testing
+- [ ] **Test**: Multi-step incremental restore flow
+- [ ] **Verify**: Sequential processing of incremental backups
+- [ ] **Check**: Proper state transitions and progress tracking
 
 ## 🔍 What to Keep vs Remove
 
@@ -128,36 +165,28 @@ class TDataShard::TTxIncrementalRestore : public TTransactionBase<TDataShard> {
 - DataShard just acknowledges, real work via existing mechanisms
 - Minimal complexity in progress tracking
 
-### 3. **Fix Critical Issues First**
-- Proto syntax error blocks compilation
-- File structure issues prevent proper building
-- Focus on making it work, then optimize
+### 3. **Multi-Step Processing**
+- Process incremental backups sequentially, one at a time
+- Maintain chronological order of incremental backups
+- Move to next incremental only when current is complete
 
-## 📊 Implementation Timeline
+## 📊 Implementation Priority
 
-### Phase 1: Fix Critical Issues (1-2 hours)
-- Fix proto syntax error
-- Fix include paths
-- Ensure clean compilation
-
-### Phase 2: Simplify Implementation (2-3 hours)
-- Replace complex DataShard logic
-- Streamline SchemeShard integration
-- Basic testing
-
-### Phase 3: Integration Testing (1-2 hours)
-- End-to-end flow validation
-- Error handling verification
-- Performance check
+1. **HIGH**: Fix include path issue
+2. **HIGH**: Implement proper state machine in SchemeShard
+3. **MEDIUM**: Update DataShard response handling
+4. **MEDIUM**: Integration with MultiIncrementalRestore
+5. **LOW**: Add persistence for recovery
+6. **LOW**: Add proper error handling and retries
 
 ## 🎯 Final Goal
 
-A working, minimal implementation that:
-- Compiles without errors
-- Handles incremental restore requests
-- Integrates with existing `MultiIncrementalRestore`
+A working implementation that:
+- Processes multiple incremental backups sequentially
+- Maintains proper state machine similar to build_index
+- Integrates seamlessly with existing `MultiIncrementalRestore`
 - Follows established YDB patterns
-- Is ready for production use
+- Handles error cases and recovery
 
-**Total estimated time: 4-7 hours of focused development**
+**This approach ensures incremental backups are applied in the correct chronological order, one at a time, which is critical for data consistency.**
 
