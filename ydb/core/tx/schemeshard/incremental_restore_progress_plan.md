@@ -1,243 +1,163 @@
-# Incremental Restore Progress Tracking Implementation
+# 📋 Incremental Restore Implementation Plan
 
-## 🎯 COMPREHENSIVE ARCHITECTURE AND IMPLEMENTATION PLAN
+## 🎯 Current Status Analysis
 
-This document outlines the complete implementation of robust, production-ready progress tracking for incremental restore operations in SchemeShard, with DataShard communication, modeled after the build_index architecture.
+### ✅ Already Implemented (from changes.diff):
+- ✅ Event definitions in `tx_datashard.proto`
+- ✅ Event classes in `datashard.h`  
+- ✅ Handler registration in `datashard_impl.h`
+- ✅ Basic handler stub in `datashard.cpp`
+- ✅ Transaction type added to `counters_schemeshard.proto`
 
-## 📋 IMPLEMENTATION STATUS
+### ❌ Critical Issues Found:
+1. **🚨 Syntax Error**: Commas removed from proto file (lines 494-502)
+2. **🔧 Over-engineering**: Complex DataShard validation logic unnecessary
+3. **🔗 Missing Integration**: No clear connection to existing `MultiIncrementalRestore`
+4. **📁 File Structure**: Incorrect include path in `datashard.cpp`
 
-**✅ SCHEMESHARD IMPLEMENTATION: 100% COMPLETE**
-**✅ DATASHARD EVENTS: 100% COMPLETE**  
-**✅ SCHEMESHARD-DATASHARD INTEGRATION: 100% COMPLETE**
-**✅ DATASHARD HANDLERS: 100% COMPLETE**
+## 🏗️ Simplified Architecture
 
-## 🏗️ SYSTEM ARCHITECTURE
-
-### Core Components Integration
-
-The incremental restore progress tracking system integrates with YDB's existing architecture through two main entry points:
-
-1. **MultiIncrementalRestore Operation** - User-facing operation for initiating incremental restores
-2. **LongIncrementalRestoreOp** - Internal long-running operation for tracking progress
-
-### Two-Phase Architecture
+Following the build_index pattern, the implementation should be:
 
 ```
-User Request → MultiIncrementalRestore → LongIncrementalRestoreOp → Progress Tracking
-     ↓                    ↓                        ↓
-Transaction         Operation Queue         State Machine & DataShard Communication
+User Request → RestoreBackupCollection → MultiIncrementalRestore → Change Senders
+                                              ↓
+                                      Progress Tracking (minimal)
+                                              ↓
+                                      DataShard Handlers (simple)
 ```
 
-#### Phase 1: MultiIncrementalRestore (Entry Point)
-- **Location**: `schemeshard__operation_restore_backup_collection.cpp`
-- **API Name**: `RestoreBackupCollection`
-- **Purpose**: Handles user requests for incremental restore operations
-- **Key Functions**:
-  - `CreateRestoreBackupCollection()` - Main entry point
-  - Request validation and parameter parsing
-  - Creates LongIncrementalRestoreOp for progress tracking (line 450)
-  - Returns operation ID to user
+### Core Principle: **MultiIncrementalRestore is the Primary Driver**
 
-#### Phase 2: LongIncrementalRestoreOp (Progress Engine)
-- **Location**: `schemeshard_incremental_restore_scan.cpp`
-- **Purpose**: Manages the actual incremental restore process with progress tracking
-- **Key Functions**:
-  - State machine implementation
-  - DataShard communication
-  - Progress persistence
-  - Error handling and recovery
+The existing `MultiIncrementalRestore` operation in `schemeshard__operation_restore_backup_collection.cpp` should orchestrate the entire process, with minimal additional complexity.
 
-### Operation Flow
+## 📝 Step-by-Step Implementation Plan
 
-```
-1. User calls RestoreBackupCollection API
-2. RestoreBackupCollection validates request and creates LongIncrementalRestoreOp
-3. LongIncrementalRestoreOp completes setup and sends TEvRunIncrementalRestore
-4. Progress tracking system handles TEvRunIncrementalRestore and starts coordination
-5. Progress tracking coordinates with DataShards for actual restore work
-6. DataShards perform incremental restore and report progress back
-7. Progress updates flow back to SchemeShard and are persisted
-8. Operation completes with success/failure status
+### Step 1: Fix Proto Syntax Error 🚨 HIGH PRIORITY
+- [ ] **File**: `ydb/core/protos/counters_schemeshard.proto`
+- [ ] **Lines**: 494-502 (Ranges definitions)
+- [ ] **Action**: Restore commas after each `Ranges:` entry
+- [ ] **Fix**: Change `Ranges: { Value: 0 Name: "0" }` to `Ranges: { Value: 0 Name: "0" },`
+
+### Step 2: Simplify DataShard Handler Implementation
+- [ ] **File**: `ydb/core/tx/datashard/datashard_incremental_restore.cpp`
+- [ ] **Action**: Replace with minimal handler (no complex validation)
+- [ ] **Purpose**: Just acknowledge requests and defer to change senders
+
+```cpp
+// Simplified handler approach
+class TDataShard::TTxIncrementalRestore : public TTransactionBase<TDataShard> {
+    // Simple acknowledgment logic only
+    // Real work happens via change senders
+};
 ```
 
-## 🔧 IMPLEMENTATION DETAILS
+### Step 3: Fix Include Path
+- [ ] **File**: `ydb/core/tx/datashard/datashard.cpp`
+- [ ] **Current**: `#include "datashard_incremental_restore.cpp"`
+- [ ] **Fix**: Change to `#include "datashard_incremental_restore.h"`
+- [ ] **Create**: Header file with class declaration
 
-### State Machine
-```
-Invalid → Allocating → Proposing → Waiting → Applying → Done/Failed
-            ↑                        ↓
-            └── Error Recovery ──────┘
-```
+### Step 4: Create Proper Header File
+- [ ] **File**: Create `ydb/core/tx/datashard/datashard_incremental_restore.h`
+- [ ] **Content**: Class declaration for `TTxIncrementalRestore`
+- [ ] **Include**: Proper forward declarations
 
-### Database Schema
-```sql
--- Operation-level state tracking
-IncrementalRestoreState(OperationId, State, CurrentIncrementalIdx)
+### Step 5: Update Build System
+- [ ] **File**: `ydb/core/tx/datashard/CMakeLists.txt`
+- [ ] **Action**: Add `datashard_incremental_restore.cpp` to source list
+- [ ] **Check**: Verify build configuration
 
--- Shard-level progress tracking
-IncrementalRestoreShardProgress(OperationId, ShardIdx, Status, LastKey)
-```
+### Step 6: Verify SchemeShard Integration
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_impl.cpp`
+- [ ] **Check**: Ensure handler registration exists
+- [ ] **Verify**: `TTxProgressIncrementalRestore` is properly connected
 
-### Event Communication
-- **SchemeShard ↔ DataShard**: `TEvIncrementalRestoreRequest`/`TEvIncrementalRestoreResponse`
-- **Internal Progress**: `TEvProgressIncrementalRestore`
-- **Transaction Lifecycle**: Integration with existing transaction system
+### Step 7: Connect to MultiIncrementalRestore
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard__operation_restore_backup_collection.cpp`
+- [ ] **Verify**: Progress tracking integration
+- [ ] **Check**: `TEvRunIncrementalRestore` flow
 
-## ✅ COMPLETED IMPLEMENTATION
+### Step 8: Add Response Handler
+- [ ] **File**: `ydb/core/tx/schemeshard/schemeshard_incremental_restore_scan.cpp`
+- [ ] **Action**: Add `TEvIncrementalRestoreResponse` handler
+- [ ] **Purpose**: Process DataShard responses
 
-### 1. Core State Management (100% Complete)
-- **TIncrementalRestoreContext**: Comprehensive state tracking structure
-- **State Persistence**: Full database schema for operation and shard progress
-- **Memory Management**: Proper cleanup and resource management
+### Step 9: Build and Test
+- [ ] **Action**: Compile DataShard module
+- [ ] **Action**: Compile SchemeShard module
+- [ ] **Fix**: Address compilation errors
 
-### 2. Transaction System Integration (100% Complete)
-- **TTxProgress**: Complete state machine with all state handlers
-- **Transaction Lifecycle**: Full integration with OnAllocateResult, OnModifyResult, OnNotifyResult
-- **Event System**: Complete integration with TEvPrivate framework
+### Step 10: Basic Unit Tests
+- [ ] **File**: Create `datashard_ut_incremental_restore.cpp`
+- [ ] **Test**: Basic request/response flow
+- [ ] **Verify**: Handler acknowledgment
 
-### 3. DataShard Communication (100% Complete)
-- **Event Definitions**: Complete protobuf messages and event classes
-- **Handler Integration**: Full SchemeShard-DataShard event handler setup
-- **Communication Infrastructure**: Ready for DataShard implementation
+## 🔍 What to Keep vs Remove
 
-### 4. Error Handling and Recovery (100% Complete)
-- **Comprehensive Error States**: All failure scenarios covered
-- **Recovery Mechanisms**: State transitions and cleanup procedures
-- **Logging**: Complete logging for monitoring and debugging
+### ✅ Keep (Essential Components):
+- Event definitions in `tx_datashard.proto`
+- Event classes in `datashard.h`
+- Handler registration in `datashard_impl.h`
+- Basic progress tracking in SchemeShard
+- Integration with `TEvRunIncrementalRestore`
 
-## 🏆 PRODUCTION-READY FEATURES
+### ❌ Remove (Over-engineering):
+- Complex DataShard validation logic
+- Elaborate state machine in progress tracking
+- `datashard_incremental_restore_request.cpp` (not needed)
+- Complex error handling in DataShard
 
-### ✅ Implemented Features:
-- **State Persistence**: All state transitions persisted to survive tablet restarts
-- **Progress Tracking**: Per-operation and per-shard granular progress monitoring
-- **Transaction Integration**: Full integration with SchemeShard transaction lifecycle
-- **Event-Driven Architecture**: Complete event system for progress updates
-- **DataShard Communication**: Full event definitions and handler integration
-- **Error Handling**: Comprehensive error states and recovery paths
-- **Memory Management**: Proper cleanup and resource management
-- **Logging**: Comprehensive logging for debugging and monitoring
+## 🎯 Success Criteria
 
-### 🚀 Implementation Quality:
-- **Production-Ready Architecture**: Following YDB best practices
-- **Consistent Patterns**: Based on proven build_index implementation
-- **Robust Error Handling**: Comprehensive state transitions and recovery
-- **Full Persistence**: Tablet restart scenario support
-- **End-to-End Communication**: Ready for DataShard integration
+1. **✅ Clean Build**: No compilation errors
+2. **✅ Simple Flow**: DataShard acknowledges requests
+3. **✅ Integration**: Works with existing `MultiIncrementalRestore`
+4. **✅ Minimal Complexity**: Following build_index pattern
+5. **✅ Tests Pass**: Basic unit tests succeed
 
-## 📁 KEY FILES MODIFIED
+## 🚀 Key Implementation Principles
 
-### SchemeShard Files:
-- **schemeshard_schema.h**: Added persistence schema tables
-- **schemeshard_incremental_restore_scan.cpp**: Complete state machine implementation
-- **schemeshard_impl.h**: Handler declarations and transaction constructors
-- **schemeshard_impl.cpp**: Event registration and handler integration
-- **schemeshard_private.h**: Progress event definitions (already existed)
+### 1. **Leverage Existing Infrastructure**
+- Use change senders for actual data movement
+- Minimal state tracking in progress system
+- Let `MultiIncrementalRestore` drive the process
 
-### DataShard Files:
-- **tx_datashard.proto**: Complete protobuf message definitions
-- **datashard.h**: Complete event class definitions and enumeration
+### 2. **Follow build_index Pattern**
+- Simple request/response between SchemeShard and DataShard
+- DataShard just acknowledges, real work via existing mechanisms
+- Minimal complexity in progress tracking
 
-## 🔄 REMAINING WORK
+### 3. **Fix Critical Issues First**
+- Proto syntax error blocks compilation
+- File structure issues prevent proper building
+- Focus on making it work, then optimize
 
-### 1. DataShard Handler Implementation (Priority: High)
-**Status**: ✅ **COMPLETE**
+## 📊 Implementation Timeline
 
-**✅ Implemented Features**:
-- ✅ Handler for `TEvIncrementalRestoreRequest` in DataShard actor (`datashard.cpp:4410`)
-- ✅ Transaction wrapper `TTxIncrementalRestore` for processing restore requests
-- ✅ Progress reporting with `TEvIncrementalRestoreResponse` with status and error handling
-- ✅ Complete error handling and recovery in DataShard
-- ✅ Handler registration in DataShard StateWork function (`datashard_impl.h:3260`)
+### Phase 1: Fix Critical Issues (1-2 hours)
+- Fix proto syntax error
+- Fix include paths
+- Ensure clean compilation
 
-**✅ Integration Points**:
-- ✅ Process restore requests from SchemeShard with full parameter validation
-- ✅ Framework for actual data restoration operations (ready for implementation)
-- ✅ Report progress back to SchemeShard with success/error status
-- ✅ Handle errors and timeout scenarios with detailed error messages
+### Phase 2: Simplify Implementation (2-3 hours)
+- Replace complex DataShard logic
+- Streamline SchemeShard integration
+- Basic testing
 
-### 2. Integration Between Operations (Priority: Medium)
-**Status**: ✅ **COMPLETE** 
+### Phase 3: Integration Testing (1-2 hours)
+- End-to-end flow validation
+- Error handling verification
+- Performance check
 
-**Description**: Integration between MultiIncrementalRestore (RestoreBackupCollection) and LongIncrementalRestoreOp is complete
+## 🎯 Final Goal
 
-**✅ Verified Integration**:
-- ✅ Operation ID propagation: `CreateLongIncrementalRestoreOpControlPlane(NextPartId(opId, result), tx)` correctly propagates operation IDs
-- ✅ Triggering mechanism: `TEvRunIncrementalRestore` is sent by `TDoneWithIncrementalRestore` to trigger progress tracking
-- ✅ Handler registration: `HFuncTraced(TEvPrivate::TEvRunIncrementalRestore, Handle)` is registered in SchemeShard StateWork
-- ✅ End-to-end flow: RestoreBackupCollection → LongIncrementalRestoreOp → TEvRunIncrementalRestore → Progress Tracking
+A working, minimal implementation that:
+- Compiles without errors
+- Handles incremental restore requests
+- Integrates with existing `MultiIncrementalRestore`
+- Follows established YDB patterns
+- Is ready for production use
 
-### 3. End-to-End Testing (Priority: Medium)
-**Status**: ⬜ **REQUIRED FOR VALIDATION**
-
-**Test Scenarios**:
-- User request → MultiIncrementalRestore → LongIncrementalRestoreOp → DataShard → completion
-- Error scenarios and recovery paths
-- Tablet restart scenarios during operation
-- Performance under load
-
-### 4. Future Enhancements (Priority: Low)
-**Status**: ⬜ **FUTURE WORK**
-
-**Proposed Features**:
-- **Progress Reporting APIs**: REST endpoints for external monitoring
-- **Advanced Error Handling**: Configurable retry policies and exponential backoff
-- **Performance Optimization**: Parallel processing and memory usage optimization
-
-## 🎯 VALIDATION CHECKLIST
-
-### ✅ Completed Validation:
-- [x] State machine handles all state transitions correctly
-- [x] Database schema supports all required persistence operations
-- [x] Event system integration is complete and consistent
-- [x] DataShard event definitions are complete and properly integrated
-- [x] Handler declarations and implementations are present
-- [x] Error handling covers all failure scenarios
-- [x] Memory management and cleanup are proper
-- [x] Logging is comprehensive for debugging and monitoring
-
-### ✅ Remaining Validation:
-- [x] Verify MultiIncrementalRestore → LongIncrementalRestoreOp integration
-- [ ] Test DataShard handler implementation  
-- [ ] Validate end-to-end operation flow
-- [ ] Performance testing under load
-- [ ] Error recovery testing
-
-## 🏁 NEXT STEPS
-
-1. **Immediate Priority**: Implement DataShard-side event handlers
-2. **End-to-End Testing**: Complete system testing with real DataShard communication
-3. **Performance Testing**: Optimize for production workloads
-4. **Documentation**: Complete API documentation and operational guides
-
-## 📊 CONCLUSION
-
-**The incremental restore progress tracking system is architecturally complete and production-ready on the SchemeShard side, with full SchemeShard-DataShard integration.** All core components are implemented, tested, and integrated:
-
-- **✅ Complete state machine** with robust error handling
-- **✅ Full persistence layer** for tablet restart scenarios  
-- **✅ Event-driven architecture** with proper integration
-- **✅ DataShard communication infrastructure** ready for use
-- **✅ Complete SchemeShard-DataShard integration** via RestoreBackupCollection → LongIncrementalRestoreOp → TEvRunIncrementalRestore
-- **✅ Production-quality error handling** and logging
-
-**Only the DataShard handler implementation remains for full end-to-end functionality.**
-
----
-
-## 📚 LEGACY PLAN (MINIMIZED)
-
-<details>
-<summary>Click to view the previous detailed implementation plan</summary>
-
-The previous implementation plan outlined a comprehensive approach to adding progress tracking to incremental restore operations. This plan has been successfully implemented with all major components completed:
-
-- State management and persistence ✅
-- Transaction integration ✅  
-- Event system ✅
-- DataShard communication infrastructure ✅
-- Error handling and recovery ✅
-
-The original plan served as the foundation for the current complete implementation documented above.
-
-</details>
+**Total estimated time: 4-7 hours of focused development**
 
