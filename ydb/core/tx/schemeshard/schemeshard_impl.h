@@ -1183,7 +1183,7 @@ public:
     void Handle(TEvDataShard::TEvStateChanged::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvPersQueue::TEvUpdateConfigResponse::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvPersQueue::TEvProposeTransactionResult::TPtr& ev, const TActorContext& ctx);
-    void Handle(TEvBlobDepot::TEvApplyConfigResult::TPtr &ev, const TActorContext &ctx);
+    void Handle(TEv
     void Handle(TEvSubDomain::TEvConfigureStatus::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvBlockStore::TEvUpdateVolumeConfigResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvFileStore::TEvUpdateConfigResponse::TPtr& ev, const TActorContext& ctx);
@@ -1291,6 +1291,35 @@ public:
         TString DestinationTablePath;
         ui64 OriginalOperationId;
         TPathId BackupCollectionPathId;
+        
+        // New fields for progress tracking
+        enum EState {
+            Invalid,
+            Allocating,
+            Proposing,
+            Waiting,
+            Applying,
+            Done,
+            Failed
+        };
+        
+        EState State = Invalid;
+        THashSet<TShardIdx> InProgressShards;
+        THashSet<TShardIdx> DoneShards;
+        TVector<TShardIdx> ToProcessShards;
+        
+        // Track individual incremental backup progress
+        THashMap<TPathId, bool> IncrementalBackupStatus; // PathId -> Completed
+        
+        // Tracking and transaction management
+        TTxId CurrentTxId = InvalidTxId;
+        
+        bool AllIncrementsProcessed() const {
+            for (const auto& [pathId, completed] : IncrementalBackupStatus) {
+                if (!completed) return false;
+            }
+            return !IncrementalBackupStatus.empty();
+        }
     };
     THashMap<ui64, TIncrementalRestoreContext> IncrementalRestoreContexts;
 
@@ -1545,7 +1574,9 @@ public:
     void Handle(TEvDataShard::TEvCdcStreamScanResponse::TPtr& ev, const TActorContext& ctx);
 
     // Incremental Restore Scan
+    void ProgressIncrementalRestore(ui64 operationId);
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev);
     
     // Transaction lifecycle constructor functions
     NTabletFlatExecutor::ITransaction* CreateTxProgressIncrementalRestore(TEvTxAllocatorClient::TEvAllocateResult::TPtr& ev);
@@ -1555,6 +1586,7 @@ public:
     NTabletFlatExecutor::ITransaction* CreateTxIncrementalRestoreResponse(TEvDataShard::TEvProposeTransactionResult::TPtr& ev);
 
     void Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx);
 
     void ResumeCdcStreamScans(const TVector<TPathId>& ids, const TActorContext& ctx);
 
@@ -1663,6 +1695,3 @@ public:
         virtual void DoComplete(const TActorContext &ctx) = 0;
     };
 };
-
-}
-}

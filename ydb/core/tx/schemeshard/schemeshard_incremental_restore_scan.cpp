@@ -58,6 +58,7 @@ class TTxProgress: public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
 private:
     // Input params
     TEvPrivate::TEvRunIncrementalRestore::TPtr RunIncrementalRestore = nullptr;
+    TEvPrivate::TEvProgressIncrementalRestore::TPtr ProgressIncrementalRestore = nullptr;
 
     // Transaction lifecycle support
     TEvTxAllocatorClient::TEvAllocateResult::TPtr AllocateResult = nullptr;
@@ -73,6 +74,12 @@ public:
     explicit TTxProgress(TSelf* self, TEvPrivate::TEvRunIncrementalRestore::TPtr& ev)
         : TTransactionBase(self)
         , RunIncrementalRestore(ev)
+    {
+    }
+
+    explicit TTxProgress(TSelf* self, TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev)
+        : TTransactionBase(self)
+        , ProgressIncrementalRestore(ev)
     {
     }
 
@@ -108,6 +115,8 @@ public:
             return OnNotifyResult(txc, ctx);
         } else if (RunIncrementalRestore) {
             return OnRunIncrementalRestore(txc, ctx);
+        } else if (ProgressIncrementalRestore) {
+            return OnProgressIncrementalRestore(txc, ctx);
         } else {
             Y_ABORT("unreachable");
         }
@@ -134,6 +143,7 @@ public:
     }
 
     bool OnRunIncrementalRestore(TTransactionContext&, const TActorContext& ctx);
+    bool OnProgressIncrementalRestore(TTransactionContext& txc, const TActorContext& ctx);
     
     // Transaction lifecycle methods
     bool OnAllocateResult(TTransactionContext& txc, const TActorContext& ctx);
@@ -141,7 +151,7 @@ public:
     bool OnNotifyResult(TTransactionContext& txc, const TActorContext& ctx);
 }; // TTxProgress
 
-bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrementalRestore(TTransactionContext&, const TActorContext& ctx) {
+bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrementalRestore(TTransactionContext& txc, const TActorContext& ctx) {
     const auto& pathId = RunIncrementalRestore->Get()->BackupCollectionPathId;
 
     LOG_D("Run incremental restore"
@@ -247,7 +257,28 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
         context.DestinationTablePath = tablePath.PathString();
         context.OriginalOperationId = ui64(operationId.GetTxId());
         context.BackupCollectionPathId = pathId;
+        context.State = TSchemeShard::TIncrementalRestoreContext::Allocating;
+        
+        // Collect all incremental backups for this table
+        for (const auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
+            if (childName.Contains("_incremental")) {
+                auto backupEntryPath = Self->PathsById.at(childPathId);
+                for (const auto& [tableNameInEntry, backupTablePathId] : backupEntryPath->GetChildren()) {
+                    if (tableNameInEntry == tableName) {
+                        context.IncrementalBackupStatus[backupTablePathId] = false;
+                    }
+                }
+            }
+        }
+        
         Self->IncrementalRestoreContexts[newOperationId] = context;
+        
+        // Persist initial state
+        NIceDb::TNiceDb db(txc.DB);
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(newOperationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State)
+            .Update<Schema::IncrementalRestoreState::CurrentIncrementalIdx>(0);
 
         // Request transaction allocation
         ctx.Send(Self->TxAllocatorClient, new TEvTxAllocatorClient::TEvAllocate(), 0, newOperationId);
@@ -263,7 +294,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnRunIncrement
 // Transaction lifecycle methods
 
 bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResult(TTransactionContext& txc, const TActorContext& ctx) {
-    Y_UNUSED(txc);
     Y_ABORT_UNLESS(AllocateResult);
 
     const auto txId = TTxId(AllocateResult->Get()->TxIds.front());
@@ -279,10 +309,20 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResu
         return true;
     }
 
-    const auto& context = Self->IncrementalRestoreContexts.at(operationId);
+    auto& context = Self->IncrementalRestoreContexts[operationId];
+    context.CurrentTxId = txId;
+    context.State = TSchemeShard::TIncrementalRestoreContext::Proposing;
+    
+    // Persist state
+    NIceDb::TNiceDb db(txc.DB);
+    db.Table<Schema::IncrementalRestoreState>()
+        .Key(operationId)
+        .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+    
+    // Add to transaction mapping
+    Self->TxIdToIncrementalRestore[txId] = operationId;
     
     // Re-collect and re-create the transaction with all incremental backups
-    // (we need to do this again because we only stored simplified context)
     TVector<std::pair<TString, TPathId>> incrementalBackupEntries;
     auto backupCollectionPath = Self->PathsById.at(context.BackupCollectionPathId);
     for (auto& [childName, childPathId] : backupCollectionPath->GetChildren()) {
@@ -356,8 +396,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnAllocateResu
 }
 
 bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnModifyResult(TTransactionContext& txc, const TActorContext& ctx) {
-    Y_UNUSED(txc);
-    Y_UNUSED(ctx);
     Y_ABORT_UNLESS(ModifyResult);
     const auto& record = ModifyResult->Get()->Record;
 
@@ -375,16 +413,53 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnModifyResult
     
     ui64 operationId = Self->TxIdToIncrementalRestore.at(txId);
     
+    if (!Self->IncrementalRestoreContexts.contains(operationId)) {
+        LOG_E("TTxProgress: OnModifyResult received unknown operationId"
+            << ": operationId# " << operationId);
+        return true;
+    }
+    
+    auto& context = Self->IncrementalRestoreContexts[operationId];
+    NIceDb::TNiceDb db(txc.DB);
+    
     if (record.GetStatus() == NKikimrScheme::StatusAccepted) {
         LOG_I("TTxProgress: Incremental restore transaction accepted"
             << ": txId# " << txId
             << ", operationId# " << operationId);
+        
+        // Move to waiting state
+        context.State = TSchemeShard::TIncrementalRestoreContext::Waiting;
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+        
+        // Initialize shards for processing
+        if (auto tableInfo = Self->Tables.FindPtr(context.DestinationTablePathId)) {
+            for (const auto& [shardIdx, shardInfo] : tableInfo->GetPartitions()) {
+                context.ToProcessShards.push_back(shardIdx);
+            }
+        }
+        
+        // Start processing
+        Self->ProgressIncrementalRestore(operationId);
         
         // Transaction subscription is automatic - when txId is added to TxInFlight
         // and tracked in Operations, completion notifications will be sent automatically
         // No explicit subscription needed since we have TxIdToIncrementalRestore mapping
     } else {
         LOG_W("TTxProgress: Incremental restore transaction rejected"
+            << ": txId# " << txId
+            << ", operationId# " << operationId
+            << ", status# " << record.GetStatus());
+        
+        // Move to failed state
+        context.State = TSchemeShard::TIncrementalRestoreContext::Failed;
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+        
+        Self->ProgressIncrementalRestore(operationId);
+    }
             << ": txId# " << txId
             << ", operationId# " << operationId
             << ", status# " << record.GetStatus());
@@ -398,7 +473,6 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnModifyResult
 }
 
 bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnNotifyResult(TTransactionContext& txc, const TActorContext& ctx) {
-    Y_UNUSED(txc);
     LOG_D("TTxProgress: OnNotifyResult"
         << ": completedTxId# " << CompletedTxId);
 
@@ -414,22 +488,236 @@ bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnNotifyResult
         << ": txId# " << CompletedTxId
         << ", operationId# " << operationId);
 
-    // Check if context exists for logging
+    // Check if context exists and move to applying state
     if (Self->IncrementalRestoreContexts.contains(operationId)) {
-        const auto& context = Self->IncrementalRestoreContexts.at(operationId);
+        auto& context = Self->IncrementalRestoreContexts[operationId];
         LOG_I("TTxProgress: All incremental backups completed for table"
             << ": operationId# " << operationId
             << ", dstTablePath# " << context.DestinationTablePath);
         
-        // Clean up context
-        Self->IncrementalRestoreContexts.erase(operationId);
+        // Move to applying state
+        context.State = TSchemeShard::TIncrementalRestoreContext::Applying;
+        
+        // Persist state
+        NIceDb::TNiceDb db(txc.DB);
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+        
+        // Progress to final state
+        Self->ProgressIncrementalRestore(operationId);
     }
-
-    // Clean up transaction tracking
-    Self->TxIdToIncrementalRestore.erase(CompletedTxId);
 
     return true;
 }
+
+bool NKikimr::NSchemeShard::NIncrementalRestoreScan::TTxProgress::OnProgressIncrementalRestore(TTransactionContext& txc, const TActorContext& ctx) {
+    const ui64 operationId = ProgressIncrementalRestore->Get()->OperationId;
+    
+    if (!Self->IncrementalRestoreContexts.contains(operationId)) {
+        LOG_W("Progress event for unknown operation: " << operationId);
+        return true;
+    }
+    
+    auto& context = Self->IncrementalRestoreContexts[operationId];
+    
+    switch (context.State) {
+        case TSchemeShard::TIncrementalRestoreContext::Invalid:
+            return HandleInvalidState(txc, ctx, operationId, context);
+            
+        case TSchemeShard::TIncrementalRestoreContext::Allocating:
+            return HandleAllocatingState(txc, ctx, operationId, context);
+            
+        case TSchemeShard::TIncrementalRestoreContext::Proposing:
+            return HandleProposingState(txc, ctx, operationId, context);
+            
+        case TSchemeShard::TIncrementalRestoreContext::Waiting:
+            return HandleWaitingState(txc, ctx, operationId, context);
+            
+        case TSchemeShard::TIncrementalRestoreContext::Applying:
+            return HandleApplyingState(txc, ctx, operationId, context);
+            
+        case TSchemeShard::TIncrementalRestoreContext::Done:
+        case TSchemeShard::TIncrementalRestoreContext::Failed:
+            return HandleFinalState(txc, ctx, operationId, context);
+    }
+    
+    return true;
+}
+
+private:
+    // State handler methods
+    bool HandleInvalidState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_W("Handling invalid state for operation: " << operationId);
+        
+        NIceDb::TNiceDb db(txc.DB);
+        context.State = TSchemeShard::TIncrementalRestoreContext::Failed;
+        
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+        
+        Self->ProgressIncrementalRestore(operationId);
+        return true;
+    }
+    
+    bool HandleAllocatingState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Handling allocating state for operation: " << operationId);
+        
+        // This state should only be reached if we're waiting for a TxAllocator response
+        // If we're here, it means we need to wait for the allocator callback
+        // No action needed - wait for OnAllocateResult
+        return true;
+    }
+    
+    bool HandleProposingState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Handling proposing state for operation: " << operationId);
+        
+        // This state should only be reached if we're waiting for a ModifyScheme response
+        // If we're here, it means we need to wait for the modify result callback
+        // No action needed - wait for OnModifyResult
+        return true;
+    }
+    
+    bool HandleWaitingState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Handling waiting state for operation: " << operationId);
+        
+        NIceDb::TNiceDb db(txc.DB);
+        
+        // Check if all shards completed
+        if (context.InProgressShards.empty() && context.ToProcessShards.empty()) {
+            if (context.AllIncrementsProcessed()) {
+                // All done, move to applying state
+                context.State = TSchemeShard::TIncrementalRestoreContext::Applying;
+                db.Table<Schema::IncrementalRestoreState>()
+                    .Key(operationId)
+                    .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+                
+                Self->ProgressIncrementalRestore(operationId);
+                return true;
+            }
+            
+            // Start next incremental backup
+            StartNextIncrementalBackup(txc, ctx, operationId, context);
+        }
+        
+        // Send work to shards
+        const size_t MaxInProgressShards = 10; // Configure appropriate limit
+        while (!context.ToProcessShards.empty() && 
+               context.InProgressShards.size() < MaxInProgressShards) {
+            auto shardIdx = context.ToProcessShards.back();
+            context.ToProcessShards.pop_back();
+            context.InProgressShards.insert(shardIdx);
+            
+            // Persist shard progress
+            db.Table<Schema::IncrementalRestoreShardProgress>()
+                .Key(operationId, ui64(shardIdx))
+                .Update<Schema::IncrementalRestoreShardProgress::Status>((ui32)NKikimrIndexBuilder::EBuildStatus::IN_PROGRESS);
+            
+            SendRestoreRequestToShard(ctx, operationId, shardIdx, context);
+        }
+        
+        return true;
+    }
+    
+    void StartNextIncrementalBackup(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Starting next incremental backup for operation: " << operationId);
+        
+        // Find next unprocessed incremental backup
+        for (auto& [pathId, completed] : context.IncrementalBackupStatus) {
+            if (!completed) {
+                // Mark as being processed
+                completed = true;
+                
+                // Initialize shards for this backup
+                if (auto pathInfo = Self->PathsById.FindPtr(context.DestinationTablePathId)) {
+                    if (auto tableInfo = Self->Tables.FindPtr(context.DestinationTablePathId)) {
+                        context.ToProcessShards.clear();
+                        for (const auto& [shardIdx, shardInfo] : tableInfo->GetPartitions()) {
+                            context.ToProcessShards.push_back(shardIdx);
+                        }
+                        
+                        // Persist state
+                        NIceDb::TNiceDb db(txc.DB);
+                        db.Table<Schema::IncrementalRestoreState>()
+                            .Key(operationId)
+                            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+                        
+                        LOG_D("Initialized " << context.ToProcessShards.size() << " shards for backup " << pathId);
+                        Self->ProgressIncrementalRestore(operationId);
+                        return;
+                    }
+                }
+                break;
+            }
+        }
+        
+        // No more incremental backups to process
+        context.State = TSchemeShard::TIncrementalRestoreContext::Done;
+        Self->ProgressIncrementalRestore(operationId);
+    }
+    
+    void SendRestoreRequestToShard(const TActorContext& ctx, ui64 operationId, TShardIdx shardIdx, const TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Sending restore request to shard " << shardIdx << " for operation " << operationId);
+        
+        // For now, just simulate completion by immediately triggering progress
+        // In a real implementation, this would send a request to the DataShard
+        // and wait for a response
+        
+        // TODO: Implement actual DataShard communication
+        // auto ev = MakeHolder<TEvDataShard::TEvIncrementalRestoreRequest>();
+        // ev->Record.SetOperationId(operationId);
+        // Self->SendToTablet(ctx, ui64(shardIdx), ev.Release());
+        
+        // For now, simulate immediate success
+        ctx.Schedule(TDuration::Seconds(1), new TEvPrivate::TEvProgressIncrementalRestore(operationId));
+    }
+    
+    bool HandleApplyingState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Handling applying state for operation: " << operationId);
+        
+        NIceDb::TNiceDb db(txc.DB);
+        context.State = TSchemeShard::TIncrementalRestoreContext::Done;
+        
+        // Persist final state
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Update<Schema::IncrementalRestoreState::State>((ui32)context.State);
+        
+        Self->ProgressIncrementalRestore(operationId);
+        return true;
+    }
+    
+    bool HandleFinalState(TTransactionContext& txc, const TActorContext& ctx, ui64 operationId, const TSchemeShard::TIncrementalRestoreContext& context) {
+        LOG_D("Handling final state for operation: " << operationId);
+        
+        NIceDb::TNiceDb db(txc.DB);
+        
+        // Clean up persistent state
+        db.Table<Schema::IncrementalRestoreState>()
+            .Key(operationId)
+            .Delete();
+        
+        // Clean up shard progress
+        for (const auto& shardIdx : context.DoneShards) {
+            db.Table<Schema::IncrementalRestoreShardProgress>()
+                .Key(operationId, ui64(shardIdx))
+                .Delete();
+        }
+        
+        // Clean up from memory
+        Self->IncrementalRestoreContexts.erase(operationId);
+        Self->TxIdToIncrementalRestore.erase(context.CurrentTxId);
+        
+        // Notify completion
+        if (context.State == TSchemeShard::TIncrementalRestoreContext::Done) {
+            LOG_I("Incremental restore completed successfully: " << operationId);
+        } else {
+            LOG_E("Incremental restore failed: " << operationId);
+        }
+        
+        return true;
+    }
 
 } // namespace NKikimr::NSchemeShard::NIncrementalRestoreScan
 
@@ -438,6 +726,10 @@ namespace NKikimr::NSchemeShard {
 using namespace NIncrementalRestoreScan;
 
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxProgressIncrementalRestore(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev) {
+    return new TTxProgress(this, ev);
+}
+
+NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxProgressIncrementalRestore(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev) {
     return new TTxProgress(this, ev);
 }
 
@@ -454,7 +746,16 @@ NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxProgressIncrementalRest
     return new TTxProgress(this, completedTxId);
 }
 
+void TSchemeShard::ProgressIncrementalRestore(ui64 operationId) {
+    auto ctx = ActorContext();
+    ctx.Send(SelfId(), new TEvPrivate::TEvProgressIncrementalRestore(operationId));
+}
+
 void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
+    Execute(CreateTxProgressIncrementalRestore(ev), ctx);
+}
+
+void TSchemeShard::Handle(TEvPrivate::TEvProgressIncrementalRestore::TPtr& ev, const TActorContext& ctx) {
     Execute(CreateTxProgressIncrementalRestore(ev), ctx);
 }
 
