@@ -1038,6 +1038,223 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             "{ items { uint32_value: 32 } items { uint32_value: 3200 } }");
     }
 
+    Y_UNIT_TEST_TWIN(ForgedMultiShardIncrementalRestore, WithIncremental) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `ForgedMultiShardCollection`
+              ( TABLE `/Root/Table2Shard`
+              , TABLE `/Root/Table3Shard`
+              , TABLE `/Root/Table4Shard`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = ')" + TString(WithIncremental ? "true" : "false") +  R"('
+              );
+            )", false);
+
+        // Create full backup tables with different sharding
+        // Table with 2 shards
+        CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full", "Table2Shard", 
+            TShardedTableOptions().Shards(2));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full/Table2Shard` (key, value) VALUES
+                (1, 100), (2, 200), (11, 1100), (12, 1200), (21, 2100), (22, 2200)
+              ;
+            )");
+
+        // Table with 3 shards
+        CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full", "Table3Shard", 
+            TShardedTableOptions().Shards(3));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full/Table3Shard` (key, value) VALUES
+                (1, 10), (2, 20), (3, 30), (11, 110), (12, 120), (13, 130), (21, 210), (22, 220), (23, 230)
+              ;
+            )");
+
+        // Table with 4 shards
+        CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full", "Table4Shard", 
+            TShardedTableOptions().Shards(4));
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000001Z_full/Table4Shard` (key, value) VALUES
+                (1, 1), (2, 2), (3, 3), (4, 4), (11, 11), (12, 12), (13, 13), (14, 14), 
+                (21, 21), (22, 22), (23, 23), (24, 24), (31, 31), (32, 32), (33, 33), (34, 34)
+              ;
+            )");
+
+        if (WithIncremental) {
+            auto opts = TShardedTableOptions()
+                .AllowSystemColumnNames(true)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"__ydb_incrBackupImpl_deleted", "Bool", false, false}});
+
+            // Create incremental backup tables with same sharding as full backup
+            // Table2Shard - 2 shards: delete some keys, update others
+            CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental", "Table2Shard", 
+                opts.Shards(2));
+
+            ExecSQL(server, edgeActor, R"(
+                UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental/Table2Shard` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+                  (2, 2000, NULL),    -- update in shard 1
+                  (12, 12000, NULL),  -- update in shard 2
+                  (1, NULL, true),    -- delete from shard 1
+                  (21, NULL, true)    -- delete from shard 2
+                ;
+            )");
+
+            // Table3Shard - 3 shards: more complex changes across all shards
+            CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental", "Table3Shard", 
+                opts.Shards(3));
+
+            ExecSQL(server, edgeActor, R"(
+                UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental/Table3Shard` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+                  (1, 1000, NULL),    -- update in shard 1
+                  (11, 11000, NULL),  -- update in shard 2
+                  (21, 21000, NULL),  -- update in shard 3
+                  (3, NULL, true),    -- delete from shard 1
+                  (13, NULL, true),   -- delete from shard 2
+                  (23, NULL, true)    -- delete from shard 3
+                ;
+            )");
+
+            // Table4Shard - 4 shards: changes in all shards
+            CreateShardedTable(server, edgeActor, "/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental", "Table4Shard", 
+                opts.Shards(4));
+
+            ExecSQL(server, edgeActor, R"(
+                UPSERT INTO `/Root/.backups/collections/ForgedMultiShardCollection/19700101000002Z_incremental/Table4Shard` (key, value, __ydb_incrBackupImpl_deleted) VALUES
+                  (2, 200, NULL),     -- update in shard 1
+                  (12, 1200, NULL),   -- update in shard 2
+                  (22, 2200, NULL),   -- update in shard 3
+                  (32, 3200, NULL),   -- update in shard 4
+                  (1, NULL, true),    -- delete from shard 1
+                  (11, NULL, true),   -- delete from shard 2
+                  (21, NULL, true),   -- delete from shard 3
+                  (31, NULL, true)    -- delete from shard 4
+                ;
+            )");
+        }
+
+        ExecSQL(server, edgeActor, R"(RESTORE `ForgedMultiShardCollection`;)", false);
+
+        // Wait for restore to complete
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        if (!WithIncremental) {
+            // Verify full backup restore for all tables
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table2Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 1 } items { uint32_value: 100 } }, "
+                "{ items { uint32_value: 2 } items { uint32_value: 200 } }, "
+                "{ items { uint32_value: 11 } items { uint32_value: 1100 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 1200 } }, "
+                "{ items { uint32_value: 21 } items { uint32_value: 2100 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 2200 } }");
+
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table3Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 1 } items { uint32_value: 10 } }, "
+                "{ items { uint32_value: 2 } items { uint32_value: 20 } }, "
+                "{ items { uint32_value: 3 } items { uint32_value: 30 } }, "
+                "{ items { uint32_value: 11 } items { uint32_value: 110 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 120 } }, "
+                "{ items { uint32_value: 13 } items { uint32_value: 130 } }, "
+                "{ items { uint32_value: 21 } items { uint32_value: 210 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 220 } }, "
+                "{ items { uint32_value: 23 } items { uint32_value: 230 } }");
+
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table4Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 1 } items { uint32_value: 1 } }, "
+                "{ items { uint32_value: 2 } items { uint32_value: 2 } }, "
+                "{ items { uint32_value: 3 } items { uint32_value: 3 } }, "
+                "{ items { uint32_value: 4 } items { uint32_value: 4 } }, "
+                "{ items { uint32_value: 11 } items { uint32_value: 11 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 12 } }, "
+                "{ items { uint32_value: 13 } items { uint32_value: 13 } }, "
+                "{ items { uint32_value: 14 } items { uint32_value: 14 } }, "
+                "{ items { uint32_value: 21 } items { uint32_value: 21 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 22 } }, "
+                "{ items { uint32_value: 23 } items { uint32_value: 23 } }, "
+                "{ items { uint32_value: 24 } items { uint32_value: 24 } }, "
+                "{ items { uint32_value: 31 } items { uint32_value: 31 } }, "
+                "{ items { uint32_value: 32 } items { uint32_value: 32 } }, "
+                "{ items { uint32_value: 33 } items { uint32_value: 33 } }, "
+                "{ items { uint32_value: 34 } items { uint32_value: 34 } }");
+        } else {
+            // Verify incremental backup restore for all tables
+            // Table2Shard: key 1,21 deleted, key 2,12 updated
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table2Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 2 } items { uint32_value: 2000 } }, "
+                "{ items { uint32_value: 11 } items { uint32_value: 1100 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 12000 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 2200 } }");
+
+            // Table3Shard: key 3,13,23 deleted, key 1,11,21 updated
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table3Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 1 } items { uint32_value: 1000 } }, "
+                "{ items { uint32_value: 2 } items { uint32_value: 20 } }, "
+                "{ items { uint32_value: 11 } items { uint32_value: 11000 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 120 } }, "
+                "{ items { uint32_value: 21 } items { uint32_value: 21000 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 220 } }");
+
+            // Table4Shard: key 1,11,21,31 deleted, key 2,12,22,32 updated
+            UNIT_ASSERT_VALUES_EQUAL(
+                KqpSimpleExec(runtime, R"(
+                    SELECT key, value FROM `/Root/Table4Shard`
+                    ORDER BY key
+                    )"),
+                "{ items { uint32_value: 2 } items { uint32_value: 200 } }, "
+                "{ items { uint32_value: 3 } items { uint32_value: 3 } }, "
+                "{ items { uint32_value: 4 } items { uint32_value: 4 } }, "
+                "{ items { uint32_value: 12 } items { uint32_value: 1200 } }, "
+                "{ items { uint32_value: 13 } items { uint32_value: 13 } }, "
+                "{ items { uint32_value: 14 } items { uint32_value: 14 } }, "
+                "{ items { uint32_value: 22 } items { uint32_value: 2200 } }, "
+                "{ items { uint32_value: 23 } items { uint32_value: 23 } }, "
+                "{ items { uint32_value: 24 } items { uint32_value: 24 } }, "
+                "{ items { uint32_value: 32 } items { uint32_value: 3200 } }, "
+                "{ items { uint32_value: 33 } items { uint32_value: 33 } }, "
+                "{ items { uint32_value: 34 } items { uint32_value: 34 } }");
+        }
+    }
+
 } // Y_UNIT_TEST_SUITE(IncrementalBackup)
 
 } // NKikimr
