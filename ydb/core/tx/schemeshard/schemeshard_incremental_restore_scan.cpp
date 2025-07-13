@@ -135,7 +135,8 @@ private:
         
         LOG_I("Processing incremental backup #" << state.CurrentIncrementalIdx + 1 
             << " path: " << currentIncremental->BackupPath
-            << " timestamp: " << currentIncremental->Timestamp);
+            << " timestamp: " << currentIncremental->Timestamp
+            << " (CurrentIncrementalIdx: " << state.CurrentIncrementalIdx << " of " << state.IncrementalBackups.size() << ")");
         
         LOG_I("[IncrementalRestore] About to call CreateIncrementalRestoreOperation");
         
@@ -150,8 +151,7 @@ private:
         LOG_I("[IncrementalRestore] Finished calling CreateIncrementalRestoreOperation");
         
         // Initialize tracking for this incremental backup
-        state.InProgressOperations.clear();
-        state.CompletedOperations.clear();
+        // Note: Don't clear TableOperations here, as they are needed for DataShard completion tracking
         state.CurrentIncrementalStarted = true;
         
         // Schedule a progress check to detect when operations complete
@@ -201,7 +201,10 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
     for (const auto& backupName : incrementalBackupNames) {
         TPathId dummyPathId; // Will be filled when processing
         state.AddIncrementalBackup(dummyPathId, backupName, 0); // Timestamp will be inferred
+        LOG_I("Handle(TEvRunIncrementalRestore) added incremental backup: '" << backupName << "'");
     }
+    
+    LOG_I("Handle(TEvRunIncrementalRestore) state now has " << state.IncrementalBackups.size() << " incremental backups");
     
     // Store the state
     IncrementalRestoreStates[ui64(operationId.GetTxId())] = std::move(state);
@@ -242,41 +245,82 @@ void TSchemeShard::Handle(TEvDataShard::TEvIncrementalRestoreResponse::TPtr& ev,
         LOG_W("DataShard reported incremental restore error: " << record.GetErrorMessage());
     }
     
-    // Look for active incremental restore operations that might be waiting for this DataShard
-    bool found = false;
-    for (auto& [operationId, state] : IncrementalRestoreStates) {
-        if (state.CurrentIncrementalStarted) {
-            LOG_I("Processing completion for operation " << operationId 
-                << " current incremental " << state.CurrentIncrementalIdx
-                << " status: " << (success ? "SUCCESS" : "ERROR"));
-            
-            // Mark this DataShard as completed
-            // Note: In a more complete implementation, we would track specific shard completion
-            // For now, we'll assume each completion notification means all DataShards for 
-            // this incremental backup are done (which works for single-shard tables)
-            
+    // Extract shard information
+    TTabletId shardId = TTabletId(ev->Sender.NodeId());
+    TShardIdx shardIdx = GetShardIdx(shardId);
+    TTxId txId = TTxId(record.GetTxId());
+    TOperationId operationId(txId, 0);
+    
+    LOG_I("Processing DataShard response from shardId: " << shardId 
+        << " shardIdx: " << shardIdx 
+        << " operationId: " << operationId);
+    
+    // Find the incremental restore state for this operation
+    auto opStateIt = IncrementalRestoreOperationToState.find(operationId);
+    if (opStateIt == IncrementalRestoreOperationToState.end()) {
+        LOG_W("No incremental restore state mapping found for operation: " << operationId);
+        return;
+    }
+    
+    ui64 globalOperationId = opStateIt->second;
+    auto stateIt = IncrementalRestoreStates.find(globalOperationId);
+    if (stateIt == IncrementalRestoreStates.end()) {
+        LOG_W("No incremental restore state found for global operation: " << globalOperationId);
+        return;
+    }
+    
+    auto& state = stateIt->second;
+    
+    // Check if this operation is in progress
+    if (state.InProgressOperations.find(operationId) == state.InProgressOperations.end()) {
+        LOG_W("Operation " << operationId << " not found in InProgressOperations for global operation: " << globalOperationId);
+        return;
+    }
+    
+    // Find the table operation state
+    auto tableOpIt = state.TableOperations.find(operationId);
+    if (tableOpIt == state.TableOperations.end()) {
+        LOG_W("Table operation " << operationId << " not found in TableOperations for global operation: " << globalOperationId);
+        return;
+    }
+    
+    auto& tableOpState = tableOpIt->second;
+    
+    // Track this shard completion
+    if (success) {
+        tableOpState.CompletedShards.insert(shardIdx);
+        LOG_I("Marked shard " << shardIdx << " as completed for operation " << operationId);
+    } else {
+        tableOpState.FailedShards.insert(shardIdx);
+        LOG_W("Marked shard " << shardIdx << " as failed for operation " << operationId);
+    }
+    
+    // Check if all shards for this table operation are complete
+    if (tableOpState.AllShardsComplete()) {
+        LOG_I("All shards completed for table operation " << operationId);
+        
+        // Mark operation as complete
+        state.InProgressOperations.erase(operationId);
+        state.CompletedOperations.insert(operationId);
+        
+        // Clean up the operation mapping
+        IncrementalRestoreOperationToState.erase(operationId);
+        
+        // Check if all table operations for current incremental backup are complete
+        if (state.AreAllCurrentOperationsComplete()) {
+            LOG_I("All table operations for current incremental backup completed, moving to next");
             state.MarkCurrentIncrementalComplete();
             state.MoveToNextIncremental();
             
             if (state.AllIncrementsProcessed()) {
-                LOG_I("All incremental backups completed for operation: " << operationId);
-                IncrementalRestoreStates.erase(operationId);
+                LOG_I("All incremental backups processed, cleaning up");
+                IncrementalRestoreStates.erase(globalOperationId);
             } else {
-                // Start next incremental backup
-                LOG_I("Starting next incremental backup for operation: " << operationId);
-                auto progressEvent = MakeHolder<TEvPrivate::TEvProgressIncrementalRestore>(operationId);
+                // Start processing next incremental backup
+                auto progressEvent = MakeHolder<TEvPrivate::TEvProgressIncrementalRestore>(globalOperationId);
                 Schedule(TDuration::Seconds(1), progressEvent.Release());
             }
-            
-            found = true;
-            // For simplicity, we process only the first matching operation
-            // In a complete implementation, we'd match based on more specific criteria
-            break;
         }
-    }
-    
-    if (!found) {
-        LOG_W("No active incremental restore operation found for DataShard completion notification");
     }
 }
 
@@ -348,6 +392,24 @@ void TSchemeShard::CreateIncrementalRestoreOperation(
             auto stateIt = IncrementalRestoreStates.find(operationId);
             if (stateIt != IncrementalRestoreStates.end()) {
                 stateIt->second.InProgressOperations.insert(tableRestoreOpId);
+                
+                // Initialize table operation state with expected shards
+                auto& tableOpState = stateIt->second.TableOperations[tableRestoreOpId];
+                tableOpState.OperationId = tableRestoreOpId;
+                
+                // Find the table and get its shards
+                TPath itemPath = TPath::Resolve(item.GetPath(), this);
+                if (itemPath.IsResolved() && itemPath.Base()->IsTable()) {
+                    auto tableInfo = Tables.FindPtr(itemPath.Base()->PathId);
+                    if (tableInfo) {
+                        // Get all shards for this table
+                        for (const auto& [shardIdx, partitionIdx] : (*tableInfo)->GetShard2PartitionIdx()) {
+                            tableOpState.ExpectedShards.insert(shardIdx);
+                        }
+                        LOG_I("Table operation " << tableRestoreOpId << " expects " << tableOpState.ExpectedShards.size() << " shards");
+                    }
+                }
+                
                 LOG_I("Tracking operation " << tableRestoreOpId << " for incremental restore " << operationId);
             }
             

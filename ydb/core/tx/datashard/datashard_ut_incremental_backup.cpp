@@ -933,6 +933,111 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         UNIT_ASSERT_VALUES_EQUAL(expected, actual);
     }
 
+    Y_UNIT_TEST(MultiShardIncrementalRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create a table with multiple shards by using 4 shards
+        CreateShardedTable(server, edgeActor, "/Root", "MultiShardTable", 
+            TShardedTableOptions()
+                .Shards(4)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false}
+                }));
+
+        // Insert data across all shards
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/MultiShardTable` (key, value) VALUES
+              (1, 10),   -- shard 1
+              (2, 20),   -- shard 1
+              (11, 110), -- shard 2
+              (12, 120), -- shard 2
+              (21, 210), -- shard 3
+              (22, 220), -- shard 3
+              (31, 310), -- shard 4
+              (32, 320)  -- shard 4
+            ;
+        )");
+
+        // Create backup collection
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MultiShardCollection`
+              ( TABLE `/Root/MultiShardTable`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+            )", false);
+
+        // Create full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiShardCollection`;)", false);
+
+        // Wait for backup to complete
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify data in multiple shards
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/MultiShardTable` (key, value) VALUES
+              (2, 200),   -- shard 1 - update
+              (12, 1200), -- shard 2 - update
+              (22, 2200), -- shard 3 - update
+              (32, 3200); -- shard 4 - update
+        )");
+
+        // Delete data from multiple shards
+        ExecSQL(server, edgeActor, R"(
+            DELETE FROM `/Root/MultiShardTable` WHERE key IN (1, 11, 21, 31);
+        )");
+
+        // Create first incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiShardCollection` INCREMENTAL;)", false);
+
+        // Wait for incremental backup to complete
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Capture expected state
+        auto expected = KqpSimpleExec(runtime, R"(
+            SELECT key, value FROM `/Root/MultiShardTable` ORDER BY key
+        )");
+
+        // Drop table and restore from backups
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/MultiShardTable`;)", false);
+
+        ExecSQL(server, edgeActor, R"(RESTORE `MultiShardCollection`;)", false);
+
+        // Wait for restore to complete
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        auto actual = KqpSimpleExec(runtime, R"(
+            SELECT key, value FROM `/Root/MultiShardTable` ORDER BY key
+        )");
+
+        UNIT_ASSERT_VALUES_EQUAL(expected, actual);
+
+        // Verify that we have the expected final state:
+        // - Keys 1, 11, 21, 31 deleted by incremental backup
+        // - Keys 2, 12, 22, 32 updated to 200, 1200, 2200, 3200 by incremental backup
+        UNIT_ASSERT_VALUES_EQUAL(actual, 
+            "{ items { uint32_value: 2 } items { uint32_value: 200 } }, "
+            "{ items { uint32_value: 12 } items { uint32_value: 1200 } }, "
+            "{ items { uint32_value: 22 } items { uint32_value: 2200 } }, "
+            "{ items { uint32_value: 32 } items { uint32_value: 3200 } }");
+    }
+
 } // Y_UNIT_TEST_SUITE(IncrementalBackup)
 
 } // NKikimr

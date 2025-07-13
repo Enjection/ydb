@@ -301,6 +301,27 @@ public:
                 : BackupPathId(pathId), BackupPath(path), Timestamp(timestamp) {}
         };
         
+        // Table operation state for tracking DataShard completion
+        struct TTableOperationState {
+            TOperationId OperationId;
+            THashSet<TShardIdx> ExpectedShards;
+            THashSet<TShardIdx> CompletedShards;
+            THashSet<TShardIdx> FailedShards;
+            
+            TTableOperationState() = default;
+            
+            explicit TTableOperationState(const TOperationId& opId) : OperationId(opId) {}
+            
+            bool AllShardsComplete() const {
+                return CompletedShards.size() + FailedShards.size() == ExpectedShards.size() && 
+                       !ExpectedShards.empty();
+            }
+            
+            bool HasFailures() const {
+                return !FailedShards.empty();
+            }
+        };
+        
         TVector<TIncrementalBackup> IncrementalBackups; // Sorted by timestamp
         ui32 CurrentIncrementalIdx = 0;
         bool CurrentIncrementalStarted = false;
@@ -308,6 +329,9 @@ public:
         // Operation completion tracking for current incremental backup
         THashSet<TOperationId> InProgressOperations;
         THashSet<TOperationId> CompletedOperations;
+        
+        // Table operation state tracking for DataShard completion
+        THashMap<TOperationId, TTableOperationState> TableOperations;
         
         bool AllIncrementsProcessed() const {
             return CurrentIncrementalIdx >= IncrementalBackups.size();
@@ -336,6 +360,7 @@ public:
                 // Reset operation tracking for next incremental
                 InProgressOperations.clear();
                 CompletedOperations.clear();
+                TableOperations.clear();
             }
         }
         
