@@ -519,6 +519,25 @@ private:
                          << ", ui64(GetTxId()): " << txId);
         auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, txId, ui64(ssId));
 
+        // Validate collection name
+        if (name.empty()) {
+            result->SetError(NKikimrScheme::StatusInvalidParameter, "Collection name cannot be empty");
+            return result;
+        }
+
+        // First resolve working directory to check if it exists
+        TPath workingDirPath = TPath::Resolve(parentPathStr, context.SS);
+        if (!workingDirPath.IsResolved()) {
+            result->SetError(NKikimrScheme::StatusPathDoesNotExist, "Working directory does not exist");
+            return result;
+        }
+
+        // Validate that we're operating within a collections directory
+        if (!parentPathStr.EndsWith(".backups/collections") && !parentPathStr.EndsWith(".backups/collections/")) {
+            result->SetError(NKikimrScheme::StatusSchemeError, "Backup collections can only be dropped from .backups/collections directory");
+            return result;
+        }
+
         TString fullPath = parentPathStr;
         if (!fullPath.EndsWith("/")) {
             fullPath += "/";
