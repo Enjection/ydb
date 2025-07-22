@@ -176,6 +176,20 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
         return;
     }
 
+    // Check if the backup collection is being dropped or already dropped
+    if (PathsById.contains(backupCollectionPathId)) {
+        auto pathElement = PathsById.at(backupCollectionPathId);
+        if (pathElement->Dropped() || 
+            pathElement->PathState == TPathElement::EPathState::EPathStateDrop ||
+            pathElement->PathState == TPathElement::EPathState::EPathStateNotExist) {
+            LOG_E("Backup collection is being dropped or already dropped, skipping incremental restore state creation for pathId: " << backupCollectionPathId);
+            return;
+        }
+    } else {
+        LOG_E("Backup collection path not found in PathsById for pathId: " << backupCollectionPathId);
+        return;
+    }
+
     if (incrementalBackupNames.empty()) {
         LOG_I("No incremental backups provided, nothing to restore");
         return;
