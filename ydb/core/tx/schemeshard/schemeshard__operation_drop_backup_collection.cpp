@@ -576,10 +576,13 @@ private:
                          << ", status: " << (ui32)checks.GetStatus()
                          << ", error: " << checks.GetError());
                 result->SetError(checks.GetStatus(), checks.GetError());
-                if (path.IsResolved() && path.Base()->IsBackupCollection() && path.Base()->PlannedToDrop()) {
+                if (path.IsResolved() && path.Base()->IsBackupCollection() && 
+                    (path.Base()->PlannedToDrop() || path.Base()->Dropped())) {
                     // Already dropping, this is duplicate request
                     result->SetError(NKikimrScheme::StatusMultipleModifications, 
                                    "Backup collection is already being dropped");
+                    result->SetPathDropTxId(ui64(path.Base()->DropTxId));
+                    result->SetPathId(path.Base()->PathId.LocalPathId);
                 }
                 return result;
             }
