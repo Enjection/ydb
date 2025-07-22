@@ -61,7 +61,11 @@ TVector<ISubOperation::TPtr> CreateBackupBackupCollection(TOperationId opId, con
         }
     }
 
-    Y_ABORT_UNLESS(context.SS->BackupCollections.contains(bcPath->PathId));
+    // Check if backup collection still exists in memory (may have been dropped)
+    if (!context.SS->BackupCollections.contains(bcPath->PathId)) {
+        result = {CreateReject(opId, NKikimrScheme::StatusPathDoesNotExist, "Backup collection no longer exists")};
+        return result;
+    }
     const auto& bc = context.SS->BackupCollections[bcPath->PathId];
     bool incrBackupEnabled = bc->Description.HasIncrementalBackupConfig();
     TString streamName = NBackup::ToX509String(TlsActivationContext->AsActorContext().Now()) + "_continuousBackupImpl";

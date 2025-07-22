@@ -377,7 +377,11 @@ TVector<ISubOperation::TPtr> CreateRestoreBackupCollection(TOperationId opId, co
         }
     }
 
-    Y_ABORT_UNLESS(context.SS->BackupCollections.contains(bcPath->PathId));
+    // Check if backup collection still exists in memory (may have been dropped)
+    if (!context.SS->BackupCollections.contains(bcPath->PathId)) {
+        result = {CreateReject(opId, NKikimrScheme::StatusPathDoesNotExist, "Backup collection no longer exists")};
+        return result;
+    }
     const auto& bc = context.SS->BackupCollections[bcPath->PathId];
 
     TString lastFullBackupName;
