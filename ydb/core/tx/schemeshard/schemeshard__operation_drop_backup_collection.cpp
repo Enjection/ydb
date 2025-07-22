@@ -568,8 +568,7 @@ private:
                 .NotDeleted()
                 .IsBackupCollection()
                 .NotUnderDeleting()
-                .NotUnderOperation()
-                .IsCommonSensePath();
+                .NotUnderOperation();
 
             if (!checks) {
                 LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
@@ -578,13 +577,36 @@ private:
                          << ", error: " << checks.GetError());
                 result->SetError(checks.GetStatus(), checks.GetError());
                 if (path.IsResolved() && path.Base()->IsBackupCollection() && path.Base()->PlannedToDrop()) {
-                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                         "TDropBackupCollection setting PathDropTxId"
-                             << ", DropTxId: " << path.Base()->DropTxId
-                             << ", PathId: " << path.Base()->PathId.LocalPathId);
-                    result->SetPathDropTxId(ui64(path.Base()->DropTxId));
-                    result->SetPathId(path.Base()->PathId.LocalPathId);
+                    // Already dropping, this is duplicate request
+                    result->SetError(NKikimrScheme::StatusMultipleModifications, 
+                                   "Backup collection is already being dropped");
                 }
+                return result;
+            }
+        }
+
+        // Check for active backup operations using this collection
+        {
+            THashSet<TPathId> pathSet;
+            pathSet.insert(path->PathId);
+            auto childPaths = context.SS->ListSubTree(path->PathId, context.Ctx);
+            for (const auto& childPathId : childPaths) {
+                pathSet.insert(childPathId);
+            }
+            
+            auto relatedTransactions = context.SS->GetRelatedTransactions(pathSet, context.Ctx);
+            for (auto txId : relatedTransactions) {
+                if (txId == OperationId.GetTxId()) {
+                    continue; // Skip our own transaction
+                }
+                // There's an active transaction involving this backup collection or its children
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     "TDropBackupCollection found active backup operation"
+                         << ", active txId: " << txId
+                         << ", our txId: " << OperationId.GetTxId());
+                result->SetError(NKikimrScheme::StatusPreconditionFailed, 
+                    TStringBuilder() << "Cannot drop backup collection while backup operation is active"
+                    << ", active txId: " << txId);
                 return result;
             }
         }
