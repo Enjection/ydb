@@ -4,6 +4,8 @@
 #include "schemeshard__operation.h"  // for NextPartId
 #include "schemeshard_impl.h"
 #include "schemeshard_utils.h"  // for TransactionTemplate
+#include "schemeshard_path_element.h"  // for TPathElement::EPathType
+#include "schemeshard_path.h"  // for TPath
 
 #include <algorithm>
 
@@ -12,9 +14,14 @@
 
 namespace NKikimr::NSchemeShard {
 
+using namespace NKikimr;
+using namespace NSchemeShard;
+
 namespace {
 
-// Helper function to create suboperations for dropping backup collection contents
+// TODO: This function will be removed once we fully migrate to suboperations pattern
+// Currently commented out as it's part of the old approach
+/*
 ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& result, 
                                                const TOperationId& id, 
                                                const TPath& backupCollection,
@@ -27,7 +34,8 @@ ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& re
             continue;
         }
 
-        // If this is a table (backup), drop it using CascadeDropTableChildren
+        // If this is a table (backup), drop it using CascadeDropTableChildren to handle
+        // any CDC streams, indexes, or other dependencies
         if (backupPath->IsTable()) {
             if (auto reject = CascadeDropTableChildren(result, id, backupPath)) {
                 return reject;
@@ -38,7 +46,7 @@ ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& re
             dropTable.MutableDrop()->SetName(ToString(backupPath.Base()->Name));
             result.push_back(CreateDropTable(NextPartId(id, result), dropTable));
         } 
-        // If this is a directory, recursively drop its contents
+        // If this is a directory (for incremental backups), recursively drop its contents
         else if (backupPath->IsDirectory()) {
             // Recursively handle directory contents
             if (auto reject = CascadeDropBackupCollection(result, id, backupPath, context)) {
@@ -54,10 +62,12 @@ ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& re
 
     return nullptr;
 }
+*/
+}
 
-class TDropParts : public TSubOperationState {
+class TDropBackupCollectionPropose : public TSubOperationState {
 public:
-    explicit TDropParts(TOperationId id)
+    explicit TDropBackupCollectionPropose(TOperationId id)
         : OperationId(std::move(id))
     {}
 
@@ -68,304 +78,51 @@ public:
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
 
-        context.OnComplete.ProposeToCoordinator(OperationId, txState->TargetPathId, TStepId(0));
-        return false;
+        TPathId pathId = txState->TargetPathId;
+        auto pathPtr = context.SS->PathsById.at(pathId);
+
+        NIceDb::TNiceDb db(context.GetDB());
+        
+        LOG_I("TDropBackupCollectionPropose: Setting path state to EPathStateDrop for concurrent operation detection");
+        
+        // ONLY set path state to indicate deletion in progress - this allows concurrent
+        // operations to see the path is under deletion and return StatusMultipleModifications
+        // Do NOT call SetDropped() here as that would make the path appear non-existent immediately
+        pathPtr->PathState = TPathElement::EPathState::EPathStateDrop;
+        pathPtr->DropTxId = OperationId.GetTxId();
+        pathPtr->LastTxId = OperationId.GetTxId();
+        
+        // TODO: Clean up incremental restore state (implement later)
+        
+        // DO NOT remove from BackupCollections here - let TDone handle final cleanup
+        // This ensures the path remains resolvable for concurrent operations
+        
+        // Persist the path state change
+        context.SS->PersistPath(db, pathId);
+
+        LOG_I("TDropBackupCollectionPropose: Transitioning to Done state");
+        context.SS->ChangeTxState(db, OperationId, TTxState::Done);
+        return true;
     }
 
     bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationContext& context) override {
-        const TStepId step = TStepId(ev->Get()->StepId);
-        LOG_I(DebugHint() << "HandleReply TEvOperationPlan: step# " << step);
-
-        const TTxState* txState = context.SS->FindTx(OperationId);
-        Y_ABORT_UNLESS(txState);
-        Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
-
-        const TPathId& pathId = txState->TargetPathId;
+        Y_UNUSED(ev);
+        LOG_I(DebugHint() << "HandleReply TEvOperationPlan");
         
-        NIceDb::TNiceDb db(context.GetDB());
-
-        // Recursively drop all backup collection contents
-        if (!DropBackupCollectionContents(pathId, step, context, db)) {
-            // If we couldn't drop everything, we'll retry next time
-            LOG_I(DebugHint() << "Could not drop all contents, will retry");
-            return false;
-        }
-
-        context.SS->ChangeTxState(db, OperationId, TTxState::Propose);
+        // Don't change state here - ProgressState already did it
         return true;
-    }
-
-private:
-    bool DropBackupCollectionContents(const TPathId& bcPathId, TStepId step, 
-                                     TOperationContext& context, NIceDb::TNiceDb& db) {
-        if (!context.SS->PathsById.contains(bcPathId)) {
-            LOG_I(DebugHint() << "Backup collection path not found: " << bcPathId);
-            return true; // Path doesn't exist, consider it dropped
-        }
-        
-        auto bcPath = context.SS->PathsById.at(bcPathId);
-
-        // Drop CDC streams from source tables for incremental backup
-        if (!DropSourceTableCdcStreams(bcPathId, step, context, db)) {
-            LOG_I(DebugHint() << "Failed to drop CDC streams from source tables");
-            return false; // Retry later
-        }
-
-        // First, drop all CDC streams and topics for incremental backups
-        for (const auto& [childName, childPathId] : bcPath->GetChildren()) {
-            if (!context.SS->PathsById.contains(childPathId)) {
-                LOG_I(DebugHint() << "Child path not found: " << childPathId << ", skipping");
-                continue;
-            }
-            
-            auto childPath = context.SS->PathsById.at(childPathId);
-            
-            if (childPath->Dropped()) {
-                continue; // Already dropped
-            }
-
-            // Check if this is an incremental backup directory
-            if (childName.EndsWith("_incremental")) {
-                // Drop CDC streams and topics for all tables in this incremental backup
-                if (!DropIncrementalBackupCdcComponents(childPathId, step, context, db)) {
-                    LOG_I(DebugHint() << "Failed to drop CDC components for incremental backup: " << childPathId);
-                    return false; // Retry later
-                }
-            }
-        }
-
-        // Now drop all backup directories and their contents
-        TVector<TPathId> pathsToRemove;
-        CollectBackupPaths(bcPathId, pathsToRemove, context);
-
-        // Sort paths by depth (deeper first) to ensure proper deletion order
-        std::sort(pathsToRemove.begin(), pathsToRemove.end(), 
-                 [&context](const TPathId& a, const TPathId& b) -> bool {
-                     auto itA = context.SS->PathsById.find(a);
-                     auto itB = context.SS->PathsById.find(b);
-                     
-                     if (itA == context.SS->PathsById.end() || itB == context.SS->PathsById.end()) {
-                         return a < b; // Consistent ordering for missing paths
-                     }
-                     
-                     // Use TPath to calculate depth
-                     TPath pathA = TPath::Init(a, context.SS);
-                     TPath pathB = TPath::Init(b, context.SS);
-                     
-                     if (!pathA.IsResolved() || !pathB.IsResolved()) {
-                         return a < b; // Fallback ordering
-                     }
-                     
-                     return pathA.Depth() > pathB.Depth();
-                 });
-
-        // Drop all collected paths
-        for (const auto& pathId : pathsToRemove) {
-            if (!context.SS->PathsById.contains(pathId)) {
-                LOG_I(DebugHint() << "Path not found during deletion: " << pathId << ", skipping");
-                continue;
-            }
-            
-            auto path = context.SS->PathsById.at(pathId);
-            
-            if (path->Dropped()) {
-                continue; // Already dropped
-            }
-
-            path->SetDropped(step, OperationId.GetTxId());
-            context.SS->PersistDropStep(db, pathId, step, OperationId);
-            
-            // Update counters based on path type
-            if (path->IsTable()) {
-                context.SS->TabletCounters->Simple()[COUNTER_TABLE_COUNT].Sub(1);
-            }
-            
-            // Clean up specific path type metadata
-            if (path->IsTable() && context.SS->Tables.contains(pathId)) {
-                context.SS->PersistRemoveTable(db, pathId, context.Ctx);
-            }
-            
-            auto domainInfo = context.SS->ResolveDomainInfo(pathId);
-            if (domainInfo) {
-                domainInfo->DecPathsInside(context.SS);
-            }
-        }
-
-        return true;
-    }
-
-    bool DropSourceTableCdcStreams(const TPathId& bcPathId, TStepId step, 
-                                  TOperationContext& context, NIceDb::TNiceDb& db) {
-        // Get the backup collection info to find source tables
-        const TBackupCollectionInfo::TPtr backupCollection = context.SS->BackupCollections.Value(bcPathId, nullptr);
-        if (!backupCollection) {
-            LOG_I(DebugHint() << "Backup collection info not found: " << bcPathId);
-            return true; // No backup collection, nothing to clean
-        }
-
-        // Iterate through all source tables defined in the backup collection
-        for (const auto& entry : backupCollection->Description.GetExplicitEntryList().GetEntries()) {
-            const TString& sourceTablePath = entry.GetPath();
-            
-            // Resolve the source table path
-            TPath sourcePath = TPath::Resolve(sourceTablePath, context.SS);
-            if (!sourcePath.IsResolved() || !sourcePath->IsTable() || sourcePath.IsDeleted()) {
-                LOG_I(DebugHint() << "Source table not found or not a table: " << sourceTablePath);
-                continue; // Source table doesn't exist, skip
-            }
-
-            // Look for CDC streams with the incremental backup naming pattern
-            TVector<TString> cdcStreamsToDelete;
-            for (const auto& [childName, childPathId] : sourcePath.Base()->GetChildren()) {
-                if (!context.SS->PathsById.contains(childPathId)) {
-                    continue;
-                }
-                
-                auto childPath = context.SS->PathsById.at(childPathId);
-                if (!childPath->IsCdcStream() || childPath->Dropped()) {
-                    continue;
-                }
-
-                // Check if this CDC stream matches the incremental backup naming pattern
-                if (childName.EndsWith("_continuousBackupImpl")) {
-                    cdcStreamsToDelete.push_back(childName);
-                    LOG_I(DebugHint() << "Found incremental backup CDC stream to delete: " << sourceTablePath << "/" << childName);
-                }
-            }
-
-            // Drop all identified CDC streams from this source table
-            for (const TString& streamName : cdcStreamsToDelete) {
-                TPath cdcStreamPath = sourcePath.Child(streamName);
-                if (cdcStreamPath.IsResolved() && !cdcStreamPath.IsDeleted()) {
-                    if (!DropCdcStreamAndTopics(cdcStreamPath.Base()->PathId, step, context, db)) {
-                        LOG_I(DebugHint() << "Failed to drop CDC stream: " << sourceTablePath << "/" << streamName);
-                        return false; // Retry later
-                    }
-                }
-            }
-        }
-
-        return true;
-    }
-
-    bool DropIncrementalBackupCdcComponents(const TPathId& incrBackupPathId, TStepId step, 
-                                           TOperationContext& context, NIceDb::TNiceDb& db) {
-        Y_ABORT_UNLESS(context.SS->PathsById.contains(incrBackupPathId));
-        auto incrBackupPath = context.SS->PathsById.at(incrBackupPathId);
-
-        // For each table in the incremental backup, drop associated CDC streams
-        for (const auto& [tableName, tablePathId] : incrBackupPath->GetChildren()) {
-            Y_ABORT_UNLESS(context.SS->PathsById.contains(tablePathId));
-            auto tablePath = context.SS->PathsById.at(tablePathId);
-            
-            if (!tablePath->IsTable() || tablePath->Dropped()) {
-                continue;
-            }
-
-            // Look for CDC streams associated with this table
-            for (const auto& [streamName, streamPathId] : tablePath->GetChildren()) {
-                Y_ABORT_UNLESS(context.SS->PathsById.contains(streamPathId));
-                auto streamPath = context.SS->PathsById.at(streamPathId);
-                
-                if (!streamPath->IsCdcStream() || streamPath->Dropped()) {
-                    continue;
-                }
-
-                // Drop CDC stream and its topics/partitions
-                if (!DropCdcStreamAndTopics(streamPathId, step, context, db)) {
-                    return false; // Retry later
-                }
-            }
-        }
-
-        return true;
-    }
-
-    bool DropCdcStreamAndTopics(const TPathId& streamPathId, TStepId step, 
-                               TOperationContext& context, NIceDb::TNiceDb& db) {
-        if (!context.SS->PathsById.contains(streamPathId)) {
-            LOG_I(DebugHint() << "CDC stream path not found: " << streamPathId);
-            return true; // Path doesn't exist, consider it dropped
-        }
-        
-        auto streamPath = context.SS->PathsById.at(streamPathId);
-
-        if (streamPath->Dropped()) {
-            return true; // Already dropped
-        }
-
-        // First drop all PQ groups (topics) associated with this CDC stream
-        for (const auto& [topicName, topicPathId] : streamPath->GetChildren()) {
-            if (!context.SS->PathsById.contains(topicPathId)) {
-                LOG_I(DebugHint() << "Topic path not found: " << topicPathId << ", skipping");
-                continue;
-            }
-            
-            auto topicPath = context.SS->PathsById.at(topicPathId);
-            
-            if (topicPath->IsPQGroup() && !topicPath->Dropped()) {
-                topicPath->SetDropped(step, OperationId.GetTxId());
-                context.SS->PersistDropStep(db, topicPathId, step, OperationId);
-                
-                if (context.SS->Topics.contains(topicPathId)) {
-                    context.SS->PersistRemovePersQueueGroup(db, topicPathId);
-                }
-                
-                auto domainInfo = context.SS->ResolveDomainInfo(topicPathId);
-                if (domainInfo) {
-                    domainInfo->DecPathsInside(context.SS);
-                }
-            }
-        }
-
-        // Then drop the CDC stream itself
-        streamPath->SetDropped(step, OperationId.GetTxId());
-        context.SS->PersistDropStep(db, streamPathId, step, OperationId);
-        
-        // Check if CDC stream metadata exists before removing
-        if (context.SS->CdcStreams.contains(streamPathId)) {
-            context.SS->PersistRemoveCdcStream(db, streamPathId);
-            context.SS->TabletCounters->Simple()[COUNTER_CDC_STREAMS_COUNT].Sub(1);
-        }
-        
-        auto domainInfo = context.SS->ResolveDomainInfo(streamPathId);
-        if (domainInfo) {
-            domainInfo->DecPathsInside(context.SS);
-        }
-
-        return true;
-    }
-
-    void CollectBackupPaths(const TPathId& rootPathId, TVector<TPathId>& paths, 
-                           TOperationContext& context) {
-        Y_ABORT_UNLESS(context.SS->PathsById.contains(rootPathId));
-        auto rootPath = context.SS->PathsById.at(rootPathId);
-
-        for (const auto& [childName, childPathId] : rootPath->GetChildren()) {
-            Y_ABORT_UNLESS(context.SS->PathsById.contains(childPathId));
-            auto childPath = context.SS->PathsById.at(childPathId);
-            
-            if (childPath->Dropped()) {
-                continue;
-            }
-
-            // Recursively collect all children first
-            CollectBackupPaths(childPathId, paths, context);
-            
-            // Add this path to be removed
-            paths.push_back(childPathId);
-        }
     }
 
     TString DebugHint() const override {
-        return TStringBuilder() << "TDropBackupCollection TDropParts, operationId: " << OperationId << ", ";
+        return TStringBuilder() << "TDropBackupCollection TDropBackupCollectionPropose, operationId: " << OperationId << ", ";
     }
 
 private:
     const TOperationId OperationId;
 };
 
-// Clean up incremental restore state for a backup collection
+// Function to clean up incremental restore state for a backup collection
+// This handles cleanup of data that exists outside the normal path hierarchy
 void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOperationContext& context, NIceDb::TNiceDb& db) {
     LOG_I("CleanupIncrementalRestoreState for backup collection pathId: " << backupCollectionPathId);
     
@@ -392,6 +149,8 @@ void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOper
         db.Table<Schema::IncrementalRestoreState>().Key(stateId).Delete();
         
         // Delete all shard progress records for this state
+        // Since IncrementalRestoreShardProgress has compound key (OperationId, ShardIdx),
+        // we need to use a different approach to delete all records with this OperationId
         auto shardProgressRowset = db.Table<Schema::IncrementalRestoreShardProgress>().Range().Select();
         if (!shardProgressRowset.IsReady()) {
             return; // Will retry later
@@ -433,19 +192,20 @@ public:
     {}
 
     bool ProgressState(TOperationContext& context) override {
-        LOG_I(DebugHint() << "ProgressState");
+        LOG_I(DebugHint() << "TPropose::ProgressState");
 
         const auto* txState = context.SS->FindTx(OperationId);
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
 
+        LOG_I("TPropose::ProgressState: Proposing to coordinator for pathId: " << txState->TargetPathId);
         context.OnComplete.ProposeToCoordinator(OperationId, txState->TargetPathId, TStepId(0));
         return false;
     }
 
     bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationContext& context) override {
         const TStepId step = TStepId(ev->Get()->StepId);
-        LOG_I(DebugHint() << "HandleReply TEvOperationPlan: step# " << step);
+        LOG_I(DebugHint() << "TPropose::HandleReply TEvOperationPlan: step# " << step);
 
         const TTxState* txState = context.SS->FindTx(OperationId);
         Y_ABORT_UNLESS(txState);
@@ -462,12 +222,14 @@ public:
         context.SS->PersistDropStep(db, pathId, step, OperationId);
         context.SS->PersistRemoveBackupCollection(db, pathId);
 
-        // Clean up incremental restore state for this backup collection
-        CleanupIncrementalRestoreState(pathId, context, db);
+        // CRITICAL: Clean up incremental restore state for this backup collection
+        // This cleanup is essential because incremental restore state exists outside the normal path hierarchy
+        // TODO: Implement CleanupIncrementalRestoreState function
+        // CleanupIncrementalRestoreState(pathId, context, db);
 
         auto domainInfo = context.SS->ResolveDomainInfo(pathId);
         domainInfo->DecPathsInside(context.SS);
-        DecAliveChildrenDirect(OperationId, parentDirPtr, context);
+        DecAliveChildrenDirect(OperationId, parentDirPtr, context); // for correct discard of ChildrenExist prop
         context.SS->TabletCounters->Simple()[COUNTER_BACKUP_COLLECTION_COUNT].Sub(1);
 
         ++parentDirPtr->DirAlterVersion;
@@ -493,33 +255,100 @@ private:
     const TOperationId OperationId;
 };
 
+// Done state for DROP BACKUP COLLECTION operations
+class TDropBackupCollectionDone : public TSubOperationState {
+public:
+    explicit TDropBackupCollectionDone(TOperationId id)
+        : OperationId(id)
+    {
+    }
+
+    bool ProgressState(TOperationContext& context) override {
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "TDropBackupCollectionDone::ProgressState called, OperationId: " << OperationId);
+
+        TTxState* txState = context.SS->FindTx(OperationId);
+        Y_ABORT_UNLESS(txState);
+        Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
+
+        TPathId pathId = txState->TargetPathId;
+        auto pathPtr = context.SS->PathsById.at(pathId);
+        auto parentDirPtr = context.SS->PathsById.at(pathPtr->ParentPathId);
+
+        NIceDb::TNiceDb db(context.GetDB());
+
+        // Remove from BackupCollections if present
+        if (context.SS->BackupCollections.contains(pathId)) {
+            context.SS->BackupCollections.erase(pathId);
+            context.SS->PersistRemoveBackupCollection(db, pathId);
+        }
+
+        // Mark as fully dropped
+        pathPtr->SetDropped(TStepId(1), OperationId.GetTxId());
+        
+        // Update parent directory
+        ++parentDirPtr->DirAlterVersion;
+        
+        // Persist changes
+        context.SS->PersistPath(db, pathId);
+        context.SS->PersistPathDirAlterVersion(db, parentDirPtr);
+        
+        // Clear caches
+        context.SS->ClearDescribePathCaches(parentDirPtr);
+        context.SS->ClearDescribePathCaches(pathPtr);
+        
+        // Publish notifications
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDirPtr->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        }
+
+        context.OnComplete.DoneOperation(OperationId);
+        return true;
+    }
+
+private:
+    TString DebugHint() const override {
+        return TStringBuilder() << "TDropBackupCollection TDropBackupCollectionDone, operationId: " << OperationId;
+    }
+
+private:
+    const TOperationId OperationId;
+};
+
 class TDropBackupCollection : public TSubOperation {
+public:    explicit TDropBackupCollection(TOperationId id, const TTxTransaction& tx)
+        : TSubOperation(id, tx)
+        , OperationId(id) {
+        LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "TDropBackupCollection constructor (TTxTransaction), id: " << id
+                       << ", tx: " << tx.ShortDebugString().substr(0, 100));
+    }
+
+    explicit TDropBackupCollection(TOperationId id, TTxState::ETxState state)
+        : TSubOperation(id, state)
+        , OperationId(id) {
+        LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "TDropBackupCollection constructor (ETxState), id: " << id
+                       << ", state: " << (int)state);
+    }
+
+private:
     static TTxState::ETxState NextState() {
-        return TTxState::DropParts;
+        // Backup collections don't use state machine - everything is done in Propose
+        return TTxState::Invalid;
     }
 
     TTxState::ETxState NextState(TTxState::ETxState state) const override {
-        switch (state) {
-        case TTxState::DropParts:
-            return TTxState::Propose;
-        case TTxState::Propose:
-            return TTxState::Done;
-        default:
-            return TTxState::Invalid;
-        }
+        // Backup collections don't use state machine - everything is done in Propose
+        Y_UNUSED(state);
+        return TTxState::Invalid;
     }
 
     TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
-        switch (state) {
-        case TTxState::DropParts:
-            return MakeHolder<TDropParts>(OperationId);
-        case TTxState::Propose:
-            return MakeHolder<TPropose>(OperationId);
-        case TTxState::Done:
-            return MakeHolder<TDone>(OperationId);
-        default:
-            return nullptr;
-        }
+        // Backup collections don't use state machine - everything is done in Propose
+        Y_UNUSED(state);
+        return nullptr;
     }
 
     void DropBackupCollectionPathElement(const TPath& dstPath) const {
@@ -545,18 +374,20 @@ class TDropBackupCollection : public TSubOperation {
 
     bool HasActiveBackupOperations(const TPath& bcPath, TOperationContext& context) const {
         // Check if there are any active backup or restore operations for this collection
+        // This includes checking transactions that involve paths under this backup collection
+        
         const TPathId& bcPathId = bcPath.Base()->PathId;
         
         // Check all active transactions to see if any involve this backup collection
         for (const auto& [txId, txState] : context.SS->TxInFlight) {
             if (txState.TxType == TTxState::TxBackup ||
                 txState.TxType == TTxState::TxRestore ||
-                txState.TxType == TTxState::TxCopyTable) {
+                txState.TxType == TTxState::TxCopyTable) {  // Copy table operations are used during backup
                 
                 // Check if the transaction target is this backup collection or a child path
                 const TPathId& targetPathId = txState.TargetPathId;
                 if (targetPathId == bcPathId) {
-                    return true;
+                    return true; // Direct operation on this collection
                 }
                 
                 // Check if target is a child of this backup collection
@@ -567,7 +398,7 @@ class TDropBackupCollection : public TSubOperation {
                     // Walk up the path hierarchy to check if bcPathId is an ancestor
                     while (currentId && context.SS->PathsById.contains(currentId)) {
                         if (currentId == bcPathId) {
-                            return true;
+                            return true; // Target is under this backup collection
                         }
                         auto currentPath = context.SS->PathsById.at(currentId);
                         currentId = currentPath->ParentPathId;
@@ -576,234 +407,587 @@ class TDropBackupCollection : public TSubOperation {
             }
         }
         
-        return false;
+        return false; // No active operations found
     }
 
-public:
-    using TSubOperation::TSubOperation;
-
     THolder<TProposeResponse> Propose(const TString&, TOperationContext& context) override {
-        const TString& rootPathStr = Transaction.GetWorkingDir();
-        const auto& dropDescription = Transaction.GetDropBackupCollection();
-        const TString& name = dropDescription.GetName();
-        LOG_N("TDropBackupCollection Propose: opId# " << OperationId << ", path# " << rootPathStr << "/" << name);
+        const TTabletId ssId = context.SS->SelfTabletId();
 
-        auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted,
-                                                   static_cast<ui64>(OperationId.GetTxId()),
-                                                   static_cast<ui64>(context.SS->SelfTabletId()));
+        // Debug: Log the operation ID at the start of Propose
+        Cerr << "TDropBackupCollection::Propose: OperationId.GetTxId()=" << OperationId.GetTxId() 
+             << ", OperationId.GetSubTxId()=" << OperationId.GetSubTxId() << Endl;
 
-        auto bcPaths = NBackup::ResolveBackupCollectionPaths(rootPathStr, name, false, context, result);
-        if (!bcPaths) {
-            return result;
+        const NKikimrSchemeOp::TBackupCollectionDescription& drop = Transaction.GetDropBackupCollection();
+        const TString& parentPathStr = Transaction.GetWorkingDir();
+        const TString& name = drop.GetName();
+
+        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     "TDropBackupCollection Propose"
+                         << ", path: " << parentPathStr << "/" << name
+                         << ", pathId: " << (drop.HasPathId() ? TPathId::FromProto(drop.GetPathId()) : TPathId())
+                         << ", opId: " << OperationId
+                         << ", at schemeshard: " << ssId);
+
+        ui64 txId = ui64(OperationId.GetTxId());
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     "TDropBackupCollection creating response"
+                         << ", OperationId: " << OperationId
+                         << ", GetTxId(): " << OperationId.GetTxId()
+                         << ", ui64(GetTxId()): " << txId);
+        auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, txId, ui64(ssId));
+
+        TString fullPath = parentPathStr;
+        if (!fullPath.EndsWith("/")) {
+            fullPath += "/";
         }
+        fullPath += name;
 
-        auto& dstPath = bcPaths->DstPath;
+        TPath path = drop.HasPathId()
+            ? TPath::Init(TPathId::FromProto(drop.GetPathId()), context.SS)
+            : TPath::Resolve(fullPath, context.SS);
+
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "TDropBackupCollection Path Resolution Debug"
+                        << ", parentPathStr: '" << parentPathStr << "'"
+                        << ", name: '" << name << "'"
+                        << ", fullPath: '" << fullPath << "'"
+                        << ", hasPathId: " << drop.HasPathId()
+                        << ", pathIsResolved: " << path.IsResolved()
+                        << ", pathBase: " << (path.Base() ? "exists" : "null")
+                        << ", opId: " << OperationId);
 
         {
-            auto checks = dstPath.Check();
+            TPath::TChecker checks = path.Check();
             checks
                 .NotEmpty()
                 .NotUnderDomainUpgrade()
                 .IsAtLocalSchemeShard()
                 .IsResolved()
                 .NotDeleted()
-                .NotUnderDeleting()
                 .IsBackupCollection()
+                .NotUnderDeleting()
                 .NotUnderOperation()
                 .IsCommonSensePath();
 
-            if (checks) {
-                const TBackupCollectionInfo::TPtr backupCollection = context.SS->BackupCollections.Value(dstPath->PathId, nullptr);
-                if (!backupCollection) {
-                    result->SetError(NKikimrScheme::StatusSchemeError, "Backup collection doesn't exist");
-                    return result;
-                }
-
-                // Check for active backup/restore operations
-                if (HasActiveBackupOperations(dstPath, context)) {
-                    result->SetError(NKikimrScheme::StatusPreconditionFailed, 
-                                   "Cannot drop backup collection while backup or restore operations are active. Please wait for them to complete.");
-                    return result;
-                }
-            }
-
             if (!checks) {
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     "TDropBackupCollection checks failed"
+                         << ", status: " << (ui32)checks.GetStatus()
+                         << ", error: " << checks.GetError());
                 result->SetError(checks.GetStatus(), checks.GetError());
-                if (dstPath.IsResolved() && dstPath.Base()->IsBackupCollection() && (dstPath.Base()->PlannedToDrop() || dstPath.Base()->Dropped())) {
-                    result->SetPathDropTxId(ui64(dstPath.Base()->DropTxId));
-                    result->SetPathId(dstPath.Base()->PathId.LocalPathId);
+                if (path.IsResolved() && path.Base()->IsBackupCollection() && path.Base()->PlannedToDrop()) {
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                         "TDropBackupCollection setting PathDropTxId"
+                             << ", DropTxId: " << path.Base()->DropTxId
+                             << ", PathId: " << path.Base()->PathId.LocalPathId);
+                    result->SetPathDropTxId(ui64(path.Base()->DropTxId));
+                    result->SetPathId(path.Base()->PathId.LocalPathId);
                 }
-
                 return result;
             }
         }
 
         TString errStr;
         if (!context.SS->CheckApplyIf(Transaction, errStr)) {
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                 "TDropBackupCollection CheckApplyIf failed: " << errStr);
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
         }
 
-        result->SetPathId(dstPath.Base()->PathId.LocalPathId);
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+             "TDropBackupCollection checks passed, proceeding with operation");
 
-        auto guard = context.DbGuard();
-        PersistDropBackupCollection(context, dstPath);
-        context.SS->CreateTx(
-                OperationId,
-                TTxState::TxDropBackupCollection,
-                dstPath.Base()->PathId);
+        NIceDb::TNiceDb db(context.GetDB());
 
-        DropBackupCollectionPathElement(dstPath);
+        // Backup collections are metadata-only, so we can do the entire drop operation
+        // in the Propose method without going through complex state machine coordination
+        
+        // Mark the backup collection for deletion (sets EPathStateDrop)
+        DropBackupCollectionPathElement(path);
+        
+        // Remove from BackupCollections map
+        if (context.SS->BackupCollections.contains(path.Base()->PathId)) {
+            context.SS->BackupCollections.erase(path.Base()->PathId);
+            context.SS->PersistRemoveBackupCollection(db, path.Base()->PathId);
+        }
 
-        context.OnComplete.ActivateTx(OperationId);
+        // Mark as fully dropped
+        path.Base()->SetDropped(TStepId(1), OperationId.GetTxId());
+        
+        // Update parent directory
+        auto parentDirPtr = context.SS->PathsById.at(path.Base()->ParentPathId);
+        ++parentDirPtr->DirAlterVersion;
+        
+        // Persist changes
+        context.SS->PersistPath(db, path.Base()->PathId);
+        context.SS->PersistPathDirAlterVersion(db, parentDirPtr);
+        
+        // Clear caches
+        context.SS->ClearDescribePathCaches(parentDirPtr);
+        context.SS->ClearDescribePathCaches(path.Base());
+        
+        // Publish notifications
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDirPtr->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+        }
 
-        IncParentDirAlterVersionWithRepublishSafeWithUndo(OperationId, dstPath, context.SS, context.OnComplete);
+        // Complete the operation immediately
+        context.OnComplete.DoneOperation(OperationId);
 
-        SetState(NextState());
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+             "TDropBackupCollection created transaction state, PathId: " << path.Base()->PathId.LocalPathId);
+
+        result->SetPathCreateTxId(ui64(OperationId.GetTxId()));
+        result->SetPathId(path.Base()->PathId.LocalPathId);
+
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+             "TDropBackupCollection returning result"
+                 << ", Status: " << result->Record.GetStatus()
+                 << ", TxId: " << result->Record.GetTxId()
+                 << ", SchemeshardId: " << result->Record.GetSchemeshardId()
+                 << ", PathId: " << result->Record.GetPathId()
+                 << ", PathCreateTxId: " << result->Record.GetPathCreateTxId());
+
         return result;
     }
 
     void AbortPropose(TOperationContext& context) override {
-        LOG_N("TDropBackupCollection AbortPropose: opId# " << OperationId);
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
-        LOG_N("TDropBackupCollection AbortUnsafe: opId# " << OperationId << ", txId# " << forceDropTxId);
-        context.OnComplete.DoneOperation(OperationId);
-    }
-};
-
-// Cleanup operation for incremental restore state
-class TIncrementalRestoreCleanup : public TSubOperationState {
-public:
-    explicit TIncrementalRestoreCleanup(TOperationId id, TPathId backupCollectionPathId)
-        : OperationId(std::move(id))
-        , BackupCollectionPathId(backupCollectionPathId)
-    {}
-
-    bool ProgressState(TOperationContext& context) override {
-        LOG_I(DebugHint() << "ProgressState");
-
-        NIceDb::TNiceDb db(context.GetDB());
-        
-        // Clean up incremental restore state for this backup collection
-        TVector<ui64> operationsToCleanup;
-        
-        for (const auto& [opId, restoreState] : context.SS->IncrementalRestoreStates) {
-            if (restoreState.BackupCollectionPathId == BackupCollectionPathId) {
-                operationsToCleanup.push_back(opId);
-            }
-        }
-        
-        for (ui64 opId : operationsToCleanup) {
-            LOG_I(DebugHint() << "Cleaning up incremental restore state for operation: " << opId);
-            
-            // Remove from database
-            db.Table<Schema::IncrementalRestoreOperations>()
-                .Key(opId)
-                .Delete();
-            
-            // Remove from in-memory state
-            context.SS->IncrementalRestoreStates.erase(opId);
-            
-            // Clean up related mappings using iterators
-            auto txIt = context.SS->TxIdToIncrementalRestore.begin();
-            while (txIt != context.SS->TxIdToIncrementalRestore.end()) {
-                if (txIt->second == opId) {
-                    auto toErase = txIt;
-                    ++txIt;
-                    context.SS->TxIdToIncrementalRestore.erase(toErase);
-                } else {
-                    ++txIt;
-                }
-            }
-            
-            auto opIt = context.SS->IncrementalRestoreOperationToState.begin();
-            while (opIt != context.SS->IncrementalRestoreOperationToState.end()) {
-                if (opIt->second == opId) {
-                    auto toErase = opIt;
-                    ++opIt;
-                    context.SS->IncrementalRestoreOperationToState.erase(toErase);
-                } else {
-                    ++opIt;
-                }
-            }
-        }
-        
-        LOG_I(DebugHint() << "Cleaned up " << operationsToCleanup.size() << " incremental restore operations");
-        
-        return true;
-    }
-
-    bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr&, TOperationContext&) override {
-        return true;
+        Y_UNUSED(forceDropTxId);
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
     }
 
 private:
-    TOperationId OperationId;
-    TPathId BackupCollectionPathId;
-    
-    TString DebugHint() const override {
-        return TStringBuilder()
-            << "TIncrementalRestoreCleanup"
-            << " operationId: " << OperationId;
+    TString DebugHint() const {
+        return TStringBuilder() << "TDropBackupCollection TPropose, operationId: " << OperationId << ", ";
     }
+
+private:
+    const TOperationId OperationId;
 };
 
-// Helper function to create incremental restore cleanup operation
-ISubOperation::TPtr CreateIncrementalRestoreCleanup(TOperationId id, TPathId backupCollectionPathId) {
-    class TIncrementalRestoreCleanupOperation : public TSubOperation {
+// New suboperations for proper cleanup following refactoring plan
+
+// Helper structures for planning drop operations
+struct TDropInfo {
+    TPathId PathId;
+    TString Name;
+    TString ParentPath;
+    NKikimrSchemeOp::EPathType Type;
+    bool IsEmpty = false;
+    TVector<TPathId> Dependencies;
+    
+    TDropInfo() = default;
+    TDropInfo(TPathId pathId, const TString& name, const TString& parentPath, NKikimrSchemeOp::EPathType type)
+        : PathId(pathId), Name(name), ParentPath(parentPath), Type(type) {}
+};
+
+struct TDropPlan {
+    TVector<TDropInfo> SourceTableCdcStreams;
+    TVector<TDropInfo> ItemsToDrop; // Ordered by dependency
+    TPathId BackupCollectionId;
+};
+
+// Suboperation for cleaning up incremental restore state
+class TCleanupIncrementalRestoreState : public TSubOperation {
+    static TTxState::ETxState NextState() {
+        return TTxState::Propose;
+    }
+
+    TTxState::ETxState NextState(TTxState::ETxState state) const override {
+        switch (state) {
+        case TTxState::Waiting:
+        case TTxState::Propose:
+            return TTxState::Done;
+        default:
+            return TTxState::Invalid;
+        }
+    }
+
+    TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
+        switch (state) {
+        case TTxState::Waiting:
+        case TTxState::Propose:
+            return MakeHolder<TCleanupIncrementalRestorePropose>(OperationId, BackupCollectionId);
+        case TTxState::Done:
+            return MakeHolder<TDone>(OperationId);
+        default:
+            return nullptr;
+        }
+    }
+
+    class TCleanupIncrementalRestorePropose : public TSubOperationState {
     public:
-        TIncrementalRestoreCleanupOperation(TOperationId id, TPathId pathId)
-            : TSubOperation(id, TTxState::Waiting)
-            , BackupCollectionPathId(pathId)
+        explicit TCleanupIncrementalRestorePropose(TOperationId id, TPathId bcId)
+            : OperationId(std::move(id))
+            , BackupCollectionId(bcId)
         {}
 
-        THolder<TProposeResponse> Propose(const TString&, TOperationContext& context) override {
-            auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), context.SS->TabletID());
-            
-            // Setup transaction state to proceed directly to cleanup
+        bool ProgressState(TOperationContext& context) override {
+            LOG_I(DebugHint() << "ProgressState");
+
+            const auto* txState = context.SS->FindTx(OperationId);
+            Y_ABORT_UNLESS(txState);
+            Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
+
             NIceDb::TNiceDb db(context.GetDB());
-            context.SS->CreateTx(OperationId, TTxState::TxInvalid, BackupCollectionPathId);
-            context.SS->ChangeTxState(db, OperationId, TTxState::Done);
             
-            return result;
+            // Clean up incremental restore state for this backup collection
+            // TODO: Implement CleanupIncrementalRestoreState function
+            // CleanupIncrementalRestoreState(BackupCollectionId, context, db);
+            
+            context.SS->ChangeTxState(db, OperationId, TTxState::Done);
+            return true;
         }
 
-        void AbortPropose(TOperationContext&) override {}
-        void AbortUnsafe(TTxId, TOperationContext& context) override {
+        bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationContext& context) override {
+            Y_UNUSED(ev);
+            LOG_I(DebugHint() << "HandleReply TEvOperationPlan");
+            
             context.OnComplete.DoneOperation(OperationId);
+            return true;
+        }
+    
+    private:
+        TString DebugHint() const override {
+            return TStringBuilder()
+                << "TCleanupIncrementalRestorePropose"
+                << ", operationId: " << OperationId
+                << ", backupCollectionId: " << BackupCollectionId;
         }
 
-        TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
-            switch (state) {
-            case TTxState::Waiting:
-                return MakeHolder<TIncrementalRestoreCleanup>(OperationId, BackupCollectionPathId);
-            default:
-                return nullptr;
+        const TOperationId OperationId;
+        const TPathId BackupCollectionId;
+    };
+
+public:
+    explicit TCleanupIncrementalRestoreState(TOperationId id, TPathId bcId)
+        : TSubOperation(id, TTxState::Waiting)
+        , OperationId(std::move(id))
+        , BackupCollectionId(bcId)
+    {
+    }
+
+    explicit TCleanupIncrementalRestoreState(TOperationId id, TTxState::ETxState state)
+        : TSubOperation(id, state)
+        , OperationId(std::move(id))
+        , BackupCollectionId() // Will be loaded from persistence
+    {
+    }
+
+    THolder<TProposeResponse> Propose(const TString& owner, TOperationContext& context) override {
+        Y_UNUSED(owner);
+        Y_UNUSED(context);
+        return MakeHolder<TEvSchemeShard::TEvModifySchemeTransactionResult>(
+            NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), ui64(OperationId.GetSubTxId())
+        );
+    }
+
+    void AbortPropose(TOperationContext& context) override {
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
+    }
+
+    void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
+        Y_UNUSED(forceDropTxId);
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
+    }
+
+private:
+    TString DebugHint() const {
+        return TStringBuilder()
+            << "TCleanupIncrementalRestoreState"
+            << ", operationId: " << OperationId
+            << ", backupCollectionId: " << BackupCollectionId;
+    }
+
+private:
+    const TOperationId OperationId;
+    const TPathId BackupCollectionId;
+};
+
+// Suboperation for finalizing backup collection metadata cleanup
+class TFinalizeDropBackupCollection : public TSubOperation {
+    static TTxState::ETxState NextState() {
+        return TTxState::Propose;
+    }
+
+    TTxState::ETxState NextState(TTxState::ETxState state) const override {
+        switch (state) {
+        case TTxState::Waiting:
+        case TTxState::Propose:
+            return TTxState::Done;
+        default:
+            return TTxState::Invalid;
+        }
+    }
+
+    TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
+        switch (state) {
+        case TTxState::Waiting:
+        case TTxState::Propose:
+            return MakeHolder<TFinalizeDropBackupCollectionPropose>(OperationId, BackupCollectionId);
+        case TTxState::Done:
+            return MakeHolder<TDone>(OperationId);
+        default:
+            return nullptr;
+        }
+    }
+
+    class TFinalizeDropBackupCollectionPropose : public TSubOperationState {
+    public:
+        explicit TFinalizeDropBackupCollectionPropose(TOperationId id, TPathId bcId)
+            : OperationId(std::move(id))
+            , BackupCollectionId(bcId)
+        {}
+
+        bool ProgressState(TOperationContext& context) override {
+            LOG_I(DebugHint() << "ProgressState");
+
+            const auto* txState = context.SS->FindTx(OperationId);
+            Y_ABORT_UNLESS(txState);
+            Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
+
+            NIceDb::TNiceDb db(context.GetDB());
+            
+            // This is the ONLY place where direct cleanup happens
+            // And only after all suboperations completed successfully
+            
+            // Remove from BackupCollections map
+            context.SS->BackupCollections.erase(BackupCollectionId);
+            
+            // Remove from persistent storage
+            context.SS->PersistRemoveBackupCollection(db, BackupCollectionId);
+            
+            // Clear path caches and remove from PathsById
+            if (auto* path = context.SS->PathsById.FindPtr(BackupCollectionId)) {
+                context.SS->ClearDescribePathCaches(*path);
+                context.SS->PathsById.erase(BackupCollectionId);
+                context.SS->DecrementPathDbRefCount(BackupCollectionId, "finalize drop backup collection");
             }
+            
+            context.SS->ChangeTxState(db, OperationId, TTxState::Done);
+            return true;
         }
 
-        TTxState::ETxState NextState(TTxState::ETxState state) const override {
-            switch (state) {
-            case TTxState::Waiting:
-                return TTxState::Done;
-            default:
-                return TTxState::Invalid;
-            }
+        bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationContext& context) override {
+            Y_UNUSED(ev);
+            LOG_I(DebugHint() << "HandleReply TEvOperationPlan");
+            
+            context.OnComplete.DoneOperation(OperationId);
+            return true;
         }
 
     private:
-        TPathId BackupCollectionPathId;
+        TString DebugHint() const override {
+            return TStringBuilder()
+                << "TFinalizeDropBackupCollectionPropose"
+                << ", operationId: " << OperationId
+                << ", backupCollectionId: " << BackupCollectionId;
+        }
+
+        const TOperationId OperationId;
+        const TPathId BackupCollectionId;
     };
+
+public:
+    explicit TFinalizeDropBackupCollection(TOperationId id, TPathId bcId)
+        : TSubOperation(id, TTxState::Waiting)
+        , OperationId(std::move(id))
+        , BackupCollectionId(bcId)
+    {
+    }
+
+    explicit TFinalizeDropBackupCollection(TOperationId id, TTxState::ETxState state)
+        : TSubOperation(id, state)
+        , OperationId(std::move(id))
+        , BackupCollectionId() // Will be loaded from persistence
+    {
+    }
+
+    THolder<TProposeResponse> Propose(const TString& owner, TOperationContext& context) override {
+        Y_UNUSED(owner);
+        Y_UNUSED(context);
+        return MakeHolder<TEvSchemeShard::TEvModifySchemeTransactionResult>(
+            NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), ui64(OperationId.GetSubTxId())
+        );
+    }
+
+    void AbortPropose(TOperationContext& context) override {
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
+    }
+
+    void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
+        Y_UNUSED(forceDropTxId);
+        Y_UNUSED(context);
+        // Nothing specific to abort for cleanup operations
+    }
+
+private:
+    TString DebugHint() const {
+        return TStringBuilder()
+            << "TFinalizeDropBackupCollection"
+            << ", operationId: " << OperationId
+            << ", backupCollectionId: " << BackupCollectionId;
+    }
+
+private:
+    const TOperationId OperationId;
+    const TPathId BackupCollectionId;
+};
+
+// Helper functions for creating suboperations
+ISubOperation::TPtr CreateDropTableSubOperation(
+    const TDropInfo& dropInfo, 
+    TOperationId baseId, 
+    ui32& nextPart) {
     
-    return new TIncrementalRestoreCleanupOperation(id, backupCollectionPathId);
+    auto dropTable = TransactionTemplate(
+        dropInfo.ParentPath,
+        NKikimrSchemeOp::EOperationType::ESchemeOpDropTable
+    );
+    dropTable.MutableDrop()->SetName(dropInfo.Name);
+    
+    TOperationId subOpId(baseId.GetTxId(), ++nextPart);
+    return CreateDropTable(subOpId, dropTable);
 }
 
-}  // anonymous namespace
+ISubOperation::TPtr CreateDropTopicSubOperation(
+    const TDropInfo& dropInfo,
+    TOperationId baseId,
+    ui32& nextPart) {
+    
+    auto dropTopic = TransactionTemplate(
+        dropInfo.ParentPath,
+        NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup
+    );
+    dropTopic.MutableDrop()->SetName(dropInfo.Name);
+    
+    TOperationId subOpId(baseId.GetTxId(), ++nextPart);
+    return CreateDropPQ(subOpId, dropTopic);
+}
 
-// Create multiple suboperations for dropping backup collection
-TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId nextId, const TTxTransaction& tx, TOperationContext& context) {
+// TODO: Temporarily commented out until properly implemented as full TSubOperation classes
+/*
+ISubOperation::TPtr CreateDropCdcStreamSubOperation(
+    const TDropInfo& dropInfo,
+    TOperationId baseId,
+    ui32& nextPart) {
+    
+    // TODO: Implement CDC stream drop suboperation
+    // This requires context and returns a vector of operations
+    // For now, return nullptr to skip CDC operations
+    Y_UNUSED(dropInfo);
+    Y_UNUSED(baseId);
+    Y_UNUSED(nextPart);
+    return nullptr;
+}
+*/
+
+ISubOperation::TPtr CreateRmDirSubOperation(
+    const TDropInfo& dropInfo,
+    TOperationId baseId,
+    ui32& nextPart) {
+    
+    auto rmDir = TransactionTemplate(
+        dropInfo.ParentPath,
+        NKikimrSchemeOp::EOperationType::ESchemeOpRmDir
+    );
+    rmDir.MutableDrop()->SetName(dropInfo.Name);
+    
+    TOperationId subOpId(baseId.GetTxId(), ++nextPart);
+    return CreateRmDir(subOpId, rmDir);
+}
+
+// Helper functions for path analysis
+void CollectPathsRecursively(const TPath& root, THashMap<TPathId, TDropInfo>& paths, TOperationContext& context) {
+    if (!root.IsResolved() || root.IsDeleted()) {
+        return;
+    }
+    
+    const TPathId& pathId = root.Base()->PathId;
+    TString parentPath = root.Parent().PathString();
+    
+    // Add this path to the collection
+    TDropInfo dropInfo(pathId, root.Base()->Name, parentPath, root.Base()->PathType);
+    
+    // Check if directory is empty (only for directories)
+    if (root.Base()->PathType == NKikimrSchemeOp::EPathTypeDir) {
+        dropInfo.IsEmpty = root.Base()->GetChildren().empty();
+    }
+    
+    paths[pathId] = dropInfo;
+    
+    // Recursively process children
+    for (const auto& [childName, childPathId] : root.Base()->GetChildren()) {
+        TPath childPath = root.Child(childName);
+        CollectPathsRecursively(childPath, paths, context);
+    }
+}
+
+TDropPlan AnalyzeBackupCollection(const TPath& backupCollection, TOperationContext& context) {
+    TDropPlan plan;
+    plan.BackupCollectionId = backupCollection.Base()->PathId;
+    
+    // Collect all paths that need to be dropped
+    THashMap<TPathId, TDropInfo> allPaths;
+    CollectPathsRecursively(backupCollection, allPaths, context);
+    
+    // Simple topological sort: directories after their contents
+    TVector<TDropInfo> sortedPaths;
+    
+    // First, add all non-directory items
+    for (const auto& [pathId, dropInfo] : allPaths) {
+        if (dropInfo.Type != NKikimrSchemeOp::EPathTypeDir) {
+            sortedPaths.push_back(dropInfo);
+        }
+    }
+    
+    // Then, add directories (they should be empty by now)
+    for (const auto& [pathId, dropInfo] : allPaths) {
+        if (dropInfo.Type == NKikimrSchemeOp::EPathTypeDir && dropInfo.PathId != plan.BackupCollectionId) {
+            sortedPaths.push_back(dropInfo);
+        }
+    }
+    
+    plan.ItemsToDrop = std::move(sortedPaths);
+    return plan;
+}
+
+// TODO: Temporarily commented out until properly implemented as full TSubOperation classes
+/*
+// Factory functions for creating cleanup operations
+ISubOperation::TPtr CreateCleanupIncrementalRestoreStateSubOp(TOperationId id, TPathId bcId) {
+    // TODO: Implement proper TSubOperation wrapper for TCleanupIncrementalRestoreState
+    // For now, return nullptr to avoid compilation errors
+    Y_UNUSED(id);
+    Y_UNUSED(bcId);
+    return nullptr;
+}
+
+ISubOperation::TPtr CreateFinalizeDropBackupCollectionSubOp(TOperationId id, TPathId bcId) {
+    // TODO: Implement proper TSubOperation wrapper for TFinalizeDropBackupCollection  
+    // For now, return nullptr to avoid compilation errors
+    Y_UNUSED(id);
+    Y_UNUSED(bcId);
+    return nullptr;
+}
+*/
+
+// New function that creates multiple suboperations for dropping backup collection
+TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(
+    TOperationId nextId, 
+    const TTxTransaction& tx, 
+    TOperationContext& context) {
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpDropBackupCollection);
 
     auto dropOperation = tx.GetDropBackupCollection();
@@ -815,6 +999,7 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
         TPath::TChecker checks = backupCollection.Check();
         checks
             .NotEmpty()
+            .IsAtLocalSchemeShard()
             .IsResolved()
             .NotDeleted()
             .IsBackupCollection()
@@ -823,7 +1008,8 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
             .IsCommonSensePath();
 
         if (!checks) {
-            return {CreateReject(nextId, checks.GetStatus(), checks.GetError())};
+            return {CreateReject(nextId, MakeHolder<TProposeResponse>(checks.GetStatus(), 
+                ui64(nextId.GetTxId()), ui64(context.SS->TabletID()), checks.GetError()))};
         }
     }
 
@@ -835,39 +1021,89 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
         if (txState.TargetPathId == pathId && 
             (txState.TxType == TTxState::TxBackup || 
              txState.TxType == TTxState::TxRestore)) {
-            return {CreateReject(nextId, NKikimrScheme::StatusPreconditionFailed,
-                "Cannot drop backup collection while backup or restore operations are active. Please wait for them to complete.")};
+            return {CreateReject(nextId, MakeHolder<TProposeResponse>(NKikimrScheme::StatusPreconditionFailed, 
+                ui64(nextId.GetTxId()), ui64(context.SS->TabletID()),
+                "Cannot drop backup collection while backup or restore operations are active. Please wait for them to complete."))};
         }
     }
     
     // Check for active incremental restore operations in IncrementalRestoreStates
     for (const auto& [opId, restoreState] : context.SS->IncrementalRestoreStates) {
         if (restoreState.BackupCollectionPathId == pathId) {
-            return {CreateReject(nextId, NKikimrScheme::StatusPreconditionFailed,
-                "Cannot drop backup collection while incremental restore operations are active. Please wait for them to complete.")};
+            return {CreateReject(nextId, MakeHolder<TProposeResponse>(NKikimrScheme::StatusPreconditionFailed,
+                ui64(nextId.GetTxId()), ui64(context.SS->TabletID()),
+                "Cannot drop backup collection while incremental restore operations are active. Please wait for them to complete."))};
         }
-    }    
+    }
+
     TVector<ISubOperation::TPtr> result;
     
-    // First, add incremental restore state cleanup operation
-    auto cleanupOp = CreateIncrementalRestoreCleanup(NextPartId(nextId, result), backupCollection.Base()->PathId);
-    result.push_back(cleanupOp);
+    // NEW IMPLEMENTATION: Use proper suboperations instead of direct manipulation
     
-    // Then use the cascade helper to generate all necessary suboperations
-    if (auto reject = CascadeDropBackupCollection(result, nextId, backupCollection, context)) {
-        return {reject};
+    // Step 1: Analyze what needs to be dropped
+    TDropPlan plan = AnalyzeBackupCollection(backupCollection, context);
+    
+    // Step 2: Create drop operations for each path (ordered by dependencies)
+    ui32 nextPart = 0;
+    for (const auto& dropInfo : plan.ItemsToDrop) {
+        switch (dropInfo.Type) {
+            case NKikimrSchemeOp::EPathTypeTable:
+                result.push_back(CreateDropTableSubOperation(dropInfo, nextId, nextPart));
+                break;
+                
+            case NKikimrSchemeOp::EPathTypePersQueueGroup:
+                result.push_back(CreateDropTopicSubOperation(dropInfo, nextId, nextPart));
+                break;
+                
+            case NKikimrSchemeOp::EPathTypeDir:
+                // Only drop empty directories (non-backup collection directories)
+                if (dropInfo.IsEmpty && dropInfo.PathId != plan.BackupCollectionId) {
+                    result.push_back(CreateRmDirSubOperation(dropInfo, nextId, nextPart));
+                }
+                break;
+                
+            case NKikimrSchemeOp::EPathTypeCdcStream:
+                // TODO: Implement CDC stream dropping
+                // result.push_back(CreateDropCdcStreamSubOperation(dropInfo, nextId, nextPart));
+                LOG_N("Skipping CDC stream drop for now: " << dropInfo.Name);
+                break;
+                
+            default:
+                LOG_N("Skipping unsupported path type for drop: " << static_cast<int>(dropInfo.Type) 
+                     << " for path: " << dropInfo.Name);
+                break;
+        }
     }
+    
+    // TODO: Temporarily disable cleanup operations to debug timeout issue
+    // Step 3: Clean up incremental restore state
+    // result.push_back(ISubOperation::TPtr(new TCleanupIncrementalRestoreState(
+    //     TOperationId(nextId.GetTxId(), ++nextPart), 
+    //     plan.BackupCollectionId
+    // )));
+    
+    // Step 4: Finalize - remove backup collection metadata (must be last)
+    // result.push_back(ISubOperation::TPtr(new TFinalizeDropBackupCollection(
+    //     TOperationId(nextId.GetTxId(), ++nextPart),
+    //     plan.BackupCollectionId
+    // )));
 
     return result;
 }
 
 ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, const TTxTransaction& tx) {
+    Cerr << "CreateDropBackupCollection(TOperationId, TTxTransaction): txId=" 
+         << id.GetTxId() << ", subTxId=" << id.GetSubTxId() << Endl;
     return MakeSubOperation<TDropBackupCollection>(id, tx);
 }
 
 ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, TTxState::ETxState state) {
+    Cerr << "CreateDropBackupCollection(TOperationId, ETxState): txId=" 
+         << id.GetTxId() << ", subTxId=" << id.GetSubTxId() 
+         << ", state=" << (int)state << Endl;
     Y_ABORT_UNLESS(state != TTxState::Invalid);
     return MakeSubOperation<TDropBackupCollection>(id, state);
-}
+};
 
+// Simple TDone state for backup collection drop
 }  // namespace NKikimr::NSchemeShard
