@@ -20,6 +20,9 @@ using namespace NKikimr::NIceDb;
 
 namespace {
 
+// Forward declaration
+void CleanupIncrementalBackupCdcStreams(TOperationContext& context, const TPathId& backupCollectionPathId);
+
 // Helper function to clean up incremental restore state for a backup collection
 void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOperationContext& context, TNiceDb& db) {
     LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
@@ -54,28 +57,75 @@ void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOper
                     "Cleaned up incremental restore state: " << stateId);
     }
 
+    // For tests and completeness, also scan and clean up any orphaned database entries
+    // that might not be present in memory (e.g., test data)
+    
+    // Clean up IncrementalRestoreOperations table by scanning all entries
+    auto opsRowset = db.Table<Schema::IncrementalRestoreOperations>().Range().Select();
+    if (opsRowset.IsReady()) {
+        TVector<ui64> idsToDelete;
+        while (!opsRowset.EndOfSet()) {
+            auto id = opsRowset.GetValue<Schema::IncrementalRestoreOperations::Id>();
+            idsToDelete.push_back(ui64(id));
+            
+            if (!opsRowset.Next()) {
+                break;
+            }
+        }
+        
+        for (const auto& id : idsToDelete) {
+            db.Table<Schema::IncrementalRestoreOperations>().Key(TTxId(id)).Delete();
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        "Cleaned up orphaned incremental restore operation: " << id);
+        }
+    }
+    
+    // Clean up IncrementalRestoreState table by scanning all entries
+    auto stateRowset = db.Table<Schema::IncrementalRestoreState>().Range().Select();
+    if (stateRowset.IsReady()) {
+        TVector<ui64> idsToDelete;
+        while (!stateRowset.EndOfSet()) {
+            ui64 operationId = stateRowset.GetValue<Schema::IncrementalRestoreState::OperationId>();
+            idsToDelete.push_back(operationId);
+            
+            if (!stateRowset.Next()) {
+                break;
+            }
+        }
+        
+        for (const auto& operationId : idsToDelete) {
+            db.Table<Schema::IncrementalRestoreState>().Key(operationId).Delete();
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        "Cleaned up orphaned incremental restore state: " << operationId);
+        }
+    }
+
     // Clean up IncrementalRestoreShardProgress table by scanning all entries
-    // This is needed because test data might exist only in DB, not in memory
     auto shardProgressRowset = db.Table<Schema::IncrementalRestoreShardProgress>().Range().Select();
     if (shardProgressRowset.IsReady()) {
+        TVector<std::pair<ui64, ui64>> keysToDelete;
         while (!shardProgressRowset.EndOfSet()) {
             ui64 operationId = shardProgressRowset.GetValue<Schema::IncrementalRestoreShardProgress::OperationId>();
             ui64 shardIdx = shardProgressRowset.GetValue<Schema::IncrementalRestoreShardProgress::ShardIdx>();
-            
-            // Check if this operationId is associated with the backup collection being dropped
-            // For now, delete all entries since we need to clean up test data
-            db.Table<Schema::IncrementalRestoreShardProgress>().Key(operationId, shardIdx).Delete();
-            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                        "Cleaned up shard progress for operationId: " << operationId << ", shardIdx: " << shardIdx);
+            keysToDelete.emplace_back(operationId, shardIdx);
             
             if (!shardProgressRowset.Next()) {
                 break;
             }
         }
+        
+        for (const auto& [operationId, shardIdx] : keysToDelete) {
+            db.Table<Schema::IncrementalRestoreShardProgress>().Key(operationId, shardIdx).Delete();
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        "Cleaned up orphaned shard progress for operationId: " << operationId << ", shardIdx: " << shardIdx);
+        }
     }
 
     LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "Completed cleanup of incremental restore state for: " << backupCollectionPathId);
+    
+    // Also clean up any CDC streams associated with incremental backup
+    CleanupIncrementalBackupCdcStreams(context, backupCollectionPathId);
 }
 
 // TODO: This function will be removed once we fully migrate to suboperations pattern
@@ -122,6 +172,81 @@ ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& re
     return nullptr;
 }
 */
+
+// Helper function to clean up CDC streams associated with incremental backup
+void CleanupIncrementalBackupCdcStreams(TOperationContext& context, const TPathId& backupCollectionPathId) {
+    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "CleanupIncrementalBackupCdcStreams for backup collection: " << backupCollectionPathId);
+
+    // Find all tables that have CDC streams with '_continuousBackupImpl' suffix and mark them for deletion
+    TVector<std::pair<TPathId, TPathId>> streamsToDelete; // (tablePathId, streamPathId)
+    
+    for (const auto& [pathId, cdcStreamInfo] : context.SS->CdcStreams) {
+        if (!context.SS->PathsById.contains(pathId)) {
+            continue;
+        }
+        
+        auto streamPath = context.SS->PathsById.at(pathId);
+        if (!streamPath || streamPath->Dropped()) {
+            continue;
+        }
+        
+        // Check if this CDC stream has the incremental backup suffix
+        if (streamPath->Name.EndsWith("_continuousBackupImpl")) {
+            // Find the parent table
+            if (!context.SS->PathsById.contains(streamPath->ParentPathId)) {
+                continue;
+            }
+            
+            auto tablePath = context.SS->PathsById.at(streamPath->ParentPathId);
+            if (!tablePath || !tablePath->IsTable() || tablePath->Dropped()) {
+                continue;
+            }
+            
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "Found incremental backup CDC stream to clean up: " << streamPath->Name 
+                       << " on table: " << tablePath->Name 
+                       << " (streamPathId: " << pathId << ", tablePathId: " << streamPath->ParentPathId << ")");
+            
+            streamsToDelete.emplace_back(streamPath->ParentPathId, pathId);
+        }
+    }
+    
+    // For each CDC stream we found, mark it for deletion by setting its state to drop
+    for (const auto& [tablePathId, streamPathId] : streamsToDelete) {
+        if (!context.SS->PathsById.contains(streamPathId)) {
+            continue;
+        }
+        
+        auto streamPath = context.SS->PathsById.at(streamPathId);
+        if (!streamPath || streamPath->Dropped()) {
+            continue;
+        }
+        
+        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "Marking CDC stream for deletion: " << streamPath->Name << " (pathId: " << streamPathId << ")");
+        
+        // Mark the CDC stream as dropped - this will make DescribeCdcStream skip it
+        NIceDb::TNiceDb db(context.GetDB());
+        streamPath->SetDropped(TStepId(1), TTxId(context.SS->Generation()));
+        // Create a proper TOperationId for PersistDropStep
+        TOperationId opId(TTxId(context.SS->Generation()), TSubTxId(0));
+        context.SS->PersistDropStep(db, streamPathId, TStepId(1), opId);
+        
+        // Also remove from parent table's children list
+        if (context.SS->PathsById.contains(streamPath->ParentPathId)) {
+            auto parentPath = context.SS->PathsById.at(streamPath->ParentPathId);
+            parentPath->RemoveChild(streamPath->Name, streamPathId);
+        }
+        
+        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "Marked CDC stream as dropped: " << streamPath->Name);
+    }
+    
+    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "Completed cleanup of incremental backup CDC streams, processed " << streamsToDelete.size() << " streams");
+}
+
 }
 
 class TDropBackupCollectionPropose : public TSubOperationState {
@@ -1015,12 +1140,11 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(
         }
     }
     
-    // TODO: Temporarily disable cleanup operations to debug timeout issue
     // Step 3: Clean up incremental restore state
-    // result.push_back(ISubOperation::TPtr(new TCleanupIncrementalRestoreState(
-    //     TOperationId(nextId.GetTxId(), ++nextPart), 
-    //     plan.BackupCollectionId
-    // )));
+    result.push_back(ISubOperation::TPtr(new TCleanupIncrementalRestoreState(
+        TOperationId(nextId.GetTxId(), ++nextPart), 
+        plan.BackupCollectionId
+    )));
     
     // Step 4: Finalize - remove backup collection metadata (must be last)
     // result.push_back(ISubOperation::TPtr(new TFinalizeDropBackupCollection(
@@ -1045,5 +1169,4 @@ ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, TTxState::ETxSta
     return MakeSubOperation<TDropBackupCollection>(id, state);
 };
 
-// Simple TDone state for backup collection drop
-}  // namespace NKikimr::NSchemeShard
+} // namespace NKikimr::NSchemeShard

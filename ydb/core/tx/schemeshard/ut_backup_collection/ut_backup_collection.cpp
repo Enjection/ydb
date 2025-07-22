@@ -1109,7 +1109,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('Id (Uint64 '0)))
+                    (let key '('('Id (Uint64 '0))))
                     (let select '('Id))
                     (let row (SelectRow 'IncrementalRestoreOperations key select))
                     (return (AsList
@@ -1135,7 +1135,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('OperationId (Uint64 '0)))
+                    (let key '('('OperationId (Uint64 '0))))
                     (let select '('OperationId))
                     (let row (SelectRow 'IncrementalRestoreState key select))
                     (return (AsList
@@ -1161,7 +1161,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('OperationId (Uint64 '0) 'ShardIdx (Uint64 '0)))
+                    (let key '('('OperationId (Uint64 '0)) '('ShardIdx (Uint64 '0))))
                     (let select '('OperationId))
                     (let row (SelectRow 'IncrementalRestoreShardProgress key select))
                     (return (AsList
@@ -1241,15 +1241,44 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         env.TestWaitNotification(runtime, txId);
 
         // Simulate incremental restore state by creating relevant database entries
-        // NOTE: This test documents that the current implementation doesn't clean up
-        // incremental restore state. In a real scenario, this state would be created
-        // by incremental restore operations and persist in SchemeShard's database.
+        // In a real scenario, this state would be created by incremental restore operations
+        // and persist in SchemeShard's database. For testing, we manually insert test data.
         
-        // For now, we just test that basic drop works, but document the missing cleanup
-        // BUG: The implementation doesn't check for or clean up:
-        // - IncrementalRestoreOperations table entries
-        // - IncrementalRestoreState table entries  
-        // - IncrementalRestoreShardProgress table entries
+        // Insert test data into incremental restore tables to validate cleanup
+        ui64 schemeshardTabletId = TTestTxConfig::SchemeShard;
+        
+        // Insert test data into IncrementalRestoreOperations
+        auto insertOpsResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
+            (
+                (let key '('('Id (Uint64 '12345))))
+                (let row '('('Operation (String '"test_operation"))))
+                (return (AsList
+                    (UpdateRow 'IncrementalRestoreOperations key row)
+                ))
+            )
+        )");
+        
+        // Insert test data into IncrementalRestoreState
+        auto insertStateResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
+            (
+                (let key '('('OperationId (Uint64 '12345))))
+                (let row '('('State (Uint32 '1)) '('CurrentIncrementalIdx (Uint32 '0))))
+                (return (AsList
+                    (UpdateRow 'IncrementalRestoreState key row)
+                ))
+            )
+        )");
+        
+        // Insert test data into IncrementalRestoreShardProgress
+        auto insertProgressResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
+            (
+                (let key '('('OperationId (Uint64 '12345)) '('ShardIdx (Uint64 '1))))
+                (let row '('('Status (Uint32 '0)) '('LastKey (String '""))))
+                (return (AsList
+                    (UpdateRow 'IncrementalRestoreShardProgress key row)
+                ))
+            )
+        )");
 
         // Drop the backup collection
         TestDropBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections", 
@@ -1270,7 +1299,6 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
 
         // CRITICAL: Verify incremental restore LocalDB tables are cleaned up using MiniKQL queries
         // This is the main validation for storage-level cleanup of incremental restore state
-        ui64 schemeshardTabletId = TTestTxConfig::SchemeShard;
         
         // Verify all incremental restore tables are clean
         bool allIncrementalRestoreTablesClean = true;
@@ -1279,8 +1307,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('Id (Uint64 '0)))
-                    (let select '('Id))
+                    (let key '('('Id (Uint64 '12345))))
+                    (let select '('Id 'Operation))
                     (let row (SelectRow 'IncrementalRestoreOperations key select))
                     (return (AsList
                         (SetResult 'Result row)
@@ -1302,8 +1330,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('OperationId (Uint64 '0)))
-                    (let select '('OperationId 'State))
+                    (let key '('('OperationId (Uint64 '12345))))
+                    (let select '('OperationId 'State 'CurrentIncrementalIdx))
                     (let row (SelectRow 'IncrementalRestoreState key select))
                     (return (AsList
                         (SetResult 'Result row)
@@ -1325,8 +1353,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         try {
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('OperationId (Uint64 '0) 'ShardIdx (Uint64 '0)))
-                    (let select '('OperationId 'ShardIdx))
+                    (let key '('('OperationId (Uint64 '12345)) '('ShardIdx (Uint64 '1))))
+                    (let select '('OperationId 'ShardIdx 'Status 'LastKey))
                     (let row (SelectRow 'IncrementalRestoreShardProgress key select))
                     (return (AsList
                         (SetResult 'Result row)
