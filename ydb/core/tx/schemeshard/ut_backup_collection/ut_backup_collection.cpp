@@ -1081,7 +1081,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             // We'll try to find a specific entry - none should exist after cleanup
             auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
                 (
-                    (let key '('OwnerPathId (Uint64 '0)))
+                    (let key '('('OwnerPathId (Uint64 '0)) '('LocalPathId (Uint64 '0))))
                     (let select '('OwnerPathId 'LocalPathId))
                     (let row (SelectRow 'BackupCollection key select))
                     (return (AsList
