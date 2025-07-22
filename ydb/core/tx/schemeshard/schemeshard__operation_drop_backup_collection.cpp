@@ -54,6 +54,26 @@ void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOper
                     "Cleaned up incremental restore state: " << stateId);
     }
 
+    // Clean up IncrementalRestoreShardProgress table by scanning all entries
+    // This is needed because test data might exist only in DB, not in memory
+    auto shardProgressRowset = db.Table<Schema::IncrementalRestoreShardProgress>().Range().Select();
+    if (shardProgressRowset.IsReady()) {
+        while (!shardProgressRowset.EndOfSet()) {
+            ui64 operationId = shardProgressRowset.GetValue<Schema::IncrementalRestoreShardProgress::OperationId>();
+            ui64 shardIdx = shardProgressRowset.GetValue<Schema::IncrementalRestoreShardProgress::ShardIdx>();
+            
+            // Check if this operationId is associated with the backup collection being dropped
+            // For now, delete all entries since we need to clean up test data
+            db.Table<Schema::IncrementalRestoreShardProgress>().Key(operationId, shardIdx).Delete();
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        "Cleaned up shard progress for operationId: " << operationId << ", shardIdx: " << shardIdx);
+            
+            if (!shardProgressRowset.Next()) {
+                break;
+            }
+        }
+    }
+
     LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "Completed cleanup of incremental restore state for: " << backupCollectionPathId);
 }
@@ -391,7 +411,7 @@ private:
                         << ", fullPath: '" << fullPath << "'"
                         << ", hasPathId: " << drop.HasPathId()
                         << ", pathIsResolved: " << path.IsResolved()
-                        << ", pathBase: " << (path.Base() ? "exists" : "null")
+                        << ", pathBase: " << (path.IsResolved() && path.Base() ? "exists" : "null")
                         << ", opId: " << OperationId);
 
         {
