@@ -452,18 +452,12 @@ public:
         Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpDropBackupCollection);
 
         const auto& drop = tx.GetDropBackupCollection();
-        const TString& parentPathStr = tx.GetWorkingDir();
         const TString& name = drop.GetName();
         
-        TString fullPath = parentPathStr;
-        if (!fullPath.EndsWith("/")) {
-            fullPath += "/";
-        }
-        fullPath += name;
-
+        // Use the same path resolution pattern as other backup collection operations
         TPath backupCollectionPath = drop.HasPathId()
             ? TPath::Init(TPathId::FromProto(drop.GetPathId()), context.SS)
-            : TPath::Resolve(fullPath, context.SS);
+            : TPath::Resolve(JoinPath({tx.GetWorkingDir(), name}), context.SS);
 
         // Validate path exists and is a backup collection
         {
@@ -479,9 +473,52 @@ public:
                 .IsCommonSensePath();
 
             if (!checks) {
-                auto result = MakeHolder<TProposeResponse>(checks.GetStatus(), ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
-                result->SetError(checks.GetStatus(), checks.GetError());
+                auto result = MakeHolder<TProposeResponse>(checks.GetStatus(), ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));            result->SetError(checks.GetStatus(), checks.GetError());
+            if (backupCollectionPath.IsResolved()) {
+                result->SetPathDropTxId(ui64(backupCollectionPath.Base()->DropTxId));
+                result->SetPathId(backupCollectionPath.Base()->PathId.LocalPathId);
+            }
+            return result;
+            }
+        }
+
+        // Check for active operations on the backup collection
+        TPathElement::TPtr pathElement = backupCollectionPath.Base();
+        if (pathElement->PlannedToDrop() || pathElement->Dropped()) {
+            auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusMultipleModifications, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+            result->SetError(NKikimrScheme::StatusMultipleModifications, "Backup collection is already being dropped");
+            result->SetPathDropTxId(ui64(pathElement->DropTxId));
+            result->SetPathId(pathElement->PathId.LocalPathId);
+            return result;
+        }
+
+        // Check for active backup operations
+        if (pathElement->HasActiveChanges()) {
+            auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusPreconditionFailed, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+            result->SetError(NKikimrScheme::StatusPreconditionFailed, "Cannot drop backup collection during active backup operations");
+            return result;
+        }
+        
+        // Check for active operations that target paths within this backup collection
+        TString backupCollectionPrefix = backupCollectionPath.PathString() + "/";
+        for (const auto& [txId, txState] : context.SS->TxInFlight) {
+            if (txState.TargetPathId == pathElement->PathId) {
+                auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusPreconditionFailed, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+                result->SetError(NKikimrScheme::StatusPreconditionFailed, "Cannot drop backup collection during active backup operations");
                 return result;
+            }
+            
+            // Check if any transaction targets paths within this backup collection
+            if (context.SS->PathsById.contains(txState.TargetPathId)) {
+                auto targetPath = context.SS->PathsById.at(txState.TargetPathId);
+                if (targetPath) {
+                    TPath targetTPath = TPath::Init(txState.TargetPathId, context.SS);
+                    if (targetTPath.PathString().StartsWith(backupCollectionPrefix)) {
+                        auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusPreconditionFailed, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+                        result->SetError(NKikimrScheme::StatusPreconditionFailed, "Cannot drop backup collection during active backup operations");
+                        return result;
+                    }
+                }
             }
         }
 
