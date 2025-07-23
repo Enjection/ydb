@@ -687,7 +687,7 @@ bool CreateRestoreMultipleIncrementalBackups(TOperationId opId, const TTxTransac
 ISubOperation::TPtr CreateNewBackupCollection(TOperationId id, const TTxTransaction& tx);
 ISubOperation::TPtr CreateNewBackupCollection(TOperationId id, TTxState::ETxState state);
 // Drop
-ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, const TTxTransaction& tx);
+TVector<ISubOperation::TPtr> CreateDropBackupCollection(TOperationId id, const TTxTransaction& tx, TOperationContext& context);
 ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, TTxState::ETxState state);
 // Restore
 TVector<ISubOperation::TPtr> CreateRestoreBackupCollection(TOperationId opId, const TTxTransaction& tx, TOperationContext& context);

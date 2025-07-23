@@ -38,6 +38,12 @@ std::optional<NBackup::TBackupCollectionPaths> ResolveBackupCollectionPaths(
 
     const TString& backupCollectionsDir = JoinPath({rootPath.GetDomainPathString(), ".backups/collections"});
 
+    // Validate the collection name
+    if (name.empty()) {
+        result->SetError(NKikimrScheme::EStatus::StatusInvalidParameter, "Backup collection name cannot be empty");
+        return std::nullopt;
+    }
+
     TPathSplitUnix absPathSplit(name);
 
     if (absPathSplit.size() > 1 && !absPathSplit.IsAbsolute) {
@@ -104,7 +110,10 @@ std::optional<THashMap<TString, THashSet<TString>>> GetBackupRequiredPaths(
         }
     }
 
-    Y_ABORT_UNLESS(context.SS->BackupCollections.contains(bcPath->PathId));
+    // Check if backup collection still exists in memory (may have been dropped)
+    if (!context.SS->BackupCollections.contains(bcPath->PathId)) {
+        return {};
+    }
     const auto& bc = context.SS->BackupCollections[bcPath->PathId];
 
     auto& collectionPaths = paths[targetPath];
@@ -153,7 +162,10 @@ std::optional<THashMap<TString, THashSet<TString>>> GetRestoreRequiredPaths(
         }
     }
 
-    Y_ABORT_UNLESS(context.SS->BackupCollections.contains(bcPath->PathId));
+    // Check if backup collection still exists in memory (may have been dropped)
+    if (!context.SS->BackupCollections.contains(bcPath->PathId)) {
+        return {};
+    }
     const auto& bc = context.SS->BackupCollections[bcPath->PathId];
 
     auto& collectionPaths = paths[tx.GetWorkingDir()];
