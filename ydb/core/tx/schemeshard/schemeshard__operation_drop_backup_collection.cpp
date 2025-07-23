@@ -454,6 +454,30 @@ public:
         const auto& drop = tx.GetDropBackupCollection();
         const TString& name = drop.GetName();
         
+        // Validate name parameter first
+        if (!drop.HasPathId() && name.empty()) {
+            auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusInvalidParameter, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+            result->SetError(NKikimrScheme::StatusInvalidParameter, "Empty backup collection name");
+            return result;
+        }
+        
+        // If using name-based resolution, validate the working directory first
+        if (!drop.HasPathId()) {
+            TPath workingDirPath = TPath::Resolve(tx.GetWorkingDir(), context.SS);
+            if (!workingDirPath.IsResolved()) {
+                auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusPathDoesNotExist, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+                result->SetError(NKikimrScheme::StatusPathDoesNotExist, "Working directory path does not exist");
+                return result;
+            }
+            
+            // Validate that the working directory is appropriate for backup collections
+            if (!tx.GetWorkingDir().EndsWith("collections")) {
+                auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusSchemeError, ui64(OperationId.GetTxId()), ui64(context.SS->SelfTabletId()));
+                result->SetError(NKikimrScheme::StatusSchemeError, "DROP BACKUP COLLECTION must be performed from a collections directory");
+                return result;
+            }
+        }
+        
         // Use the same path resolution pattern as other backup collection operations
         TPath backupCollectionPath = drop.HasPathId()
             ? TPath::Init(TPathId::FromProto(drop.GetPathId()), context.SS)
