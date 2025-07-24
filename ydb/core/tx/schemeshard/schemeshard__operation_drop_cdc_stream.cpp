@@ -129,9 +129,32 @@ public:
                 .IsAtLocalSchemeShard()
                 .IsResolved()
                 .NotDeleted()
-                .IsCdcStream()
-                .NotUnderDeleting()
-                .NotUnderOperation();
+                .IsCdcStream();
+
+            // Allow processing streams that are being deleted/operated on by the same transaction
+            // (coordinated multi-stream drop within same transaction)
+            bool isSameTransaction = false;
+            
+            if (streamPath.Base()->PathState == TPathElement::EPathState::EPathStateDrop) {
+                // Check if the stream is being dropped by the same transaction
+                isSameTransaction = (streamPath.Base()->DropTxId == OperationId.GetTxId());
+                if (!isSameTransaction) {
+                    checks.NotUnderDeleting();
+                }
+            }
+            
+            // Check if stream is under operation by same transaction
+            // Allow if it's any suboperation of the same transaction
+            if (streamPath.Base()->LastTxId != InvalidTxId) {
+                if (streamPath.Base()->LastTxId != OperationId.GetTxId()) {
+                    checks.NotUnderOperation();
+                }
+            } else {
+                // No LastTxId set, check normal operation state
+                if (!isSameTransaction) {
+                    checks.NotUnderOperation();
+                }
+            }
 
             if (!checks) {
                 result->SetError(checks.GetStatus(), checks.GetError());
@@ -582,6 +605,7 @@ void DoDropStream(
     }
 
     // 4. Stream implementation drops (one per stream)
+    // Note: These handle SchemeShard metadata cleanup after table operation completes
     for (const auto& streamPath : streamPaths) {
         LOG_I("DropPlan: Creating stream impl drop for: " << streamPath.PathString());
 
@@ -593,8 +617,10 @@ void DoDropStream(
         }
 
         result.push_back(CreateDropCdcStreamImpl(NextPartId(opId, result), outTx));
+    }
 
-        // 5. PQ group drops for each stream's children
+    // 5. PQ group drops for each stream's children
+    for (const auto& streamPath : streamPaths) {
         for (const auto& [name, pathId] : streamPath.Base()->GetChildren()) {
             Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
             auto implPath = context.SS->PathsById.at(pathId);

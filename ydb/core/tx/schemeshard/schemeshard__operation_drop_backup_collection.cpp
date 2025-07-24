@@ -22,13 +22,20 @@ struct TDropPlan {
         TString TablePath;
     };
     
-    TVector<TCdcStreamInfo> CdcStreams;
+    // Group CDC streams by table for efficient multi-stream drops
+    struct TTableCdcStreams {
+        TPathId TablePathId;
+        TString TablePath;
+        TVector<TString> StreamNames;
+    };
+    
+    THashMap<TPathId, TTableCdcStreams> CdcStreamsByTable;  // Grouped by table
     TVector<TPath> BackupTables;
     TVector<TPath> BackupTopics;
     TPathId BackupCollectionId;
     
     bool HasExternalObjects() const {
-        return !CdcStreams.empty() || !BackupTables.empty() || !BackupTopics.empty();
+        return !CdcStreamsByTable.empty() || !BackupTables.empty() || !BackupTopics.empty();
     }
 };
 
@@ -40,7 +47,7 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
     LOG_I("DropPlan: Starting collection for backup collection: " << bcPath.PathString());
     
     // 1. Find CDC streams on source tables (these are OUTSIDE the backup collection)
-    // For now, we'll find CDC streams with incremental backup suffix across all tables
+    // Group them by table for efficient multi-stream drops
     for (const auto& [pathId, cdcStreamInfo] : context.SS->CdcStreams) {
         if (!context.SS->PathsById.contains(pathId)) {
             continue;
@@ -64,11 +71,14 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
             TString tablePathStr = TPath::Init(streamPath->ParentPathId, context.SS).PathString();
             LOG_I("DropPlan: Found CDC stream '" << streamPath->Name << "' on table: " << tablePathStr);
             
-            plan->CdcStreams.push_back({
-                streamPath->ParentPathId,
-                streamPath->Name,
-                tablePathStr
-            });
+            // Group streams by table for atomic multi-stream drops
+            auto& tableEntry = plan->CdcStreamsByTable[streamPath->ParentPathId];
+            if (tableEntry.StreamNames.empty()) {
+                // First stream for this table - initialize the entry
+                tableEntry.TablePathId = streamPath->ParentPathId;
+                tableEntry.TablePath = tablePathStr;
+            }
+            tableEntry.StreamNames.push_back(streamPath->Name);
         }
     }
     
@@ -94,22 +104,34 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
         }
     }
     
-    LOG_I("DropPlan: Collection complete - CDC streams: " << plan->CdcStreams.size() 
-          << ", backup tables: " << plan->BackupTables.size() 
-          << ", backup topics: " << plan->BackupTopics.size());
+    // Log summary with grouped information
+    ui32 totalCdcStreams = 0;
+    for (const auto& [tableId, tableStreams] : plan->CdcStreamsByTable) {
+        totalCdcStreams += tableStreams.StreamNames.size();
+        LOG_I("DropPlan: Table " << tableStreams.TablePath << " has " << tableStreams.StreamNames.size() << " CDC streams to drop");
+    }
+    
+    LOG_I("DropPlan: Collection complete - " << plan->CdcStreamsByTable.size() << " tables with " 
+          << totalCdcStreams << " CDC streams total, " 
+          << plan->BackupTables.size() << " backup tables, " 
+          << plan->BackupTopics.size() << " backup topics");
     
     return plan;
 }
 
-TTxTransaction CreateCdcDropTransaction(const TDropPlan::TCdcStreamInfo& cdcInfo, TOperationContext& context) {
+TTxTransaction CreateCdcDropTransaction(const TDropPlan::TTableCdcStreams& tableStreams, TOperationContext& context) {
     TTxTransaction cdcDropTx;
-    TPath tablePath = TPath::Init(cdcInfo.TablePathId, context.SS);
+    TPath tablePath = TPath::Init(tableStreams.TablePathId, context.SS);
     cdcDropTx.SetWorkingDir(tablePath.Parent().PathString());
     cdcDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropCdcStream);
     
     auto* cdcDrop = cdcDropTx.MutableDropCdcStream();
     cdcDrop->SetTableName(tablePath.LeafName());
-    cdcDrop->AddStreamName(cdcInfo.StreamName);  // Changed to AddStreamName for repeated field
+    
+    // Add all streams for this table using the new repeated field functionality
+    for (const auto& streamName : tableStreams.StreamNames) {
+        cdcDrop->AddStreamName(streamName);
+    }
     
     return cdcDropTx;
 }
@@ -125,16 +147,16 @@ TTxTransaction CreateTableDropTransaction(const TPath& tablePath) {
     return tableDropTx;
 }
 
-TTxTransaction CreateTopicDropTransaction(const TPath& topicPath) {
-    TTxTransaction topicDropTx;
-    topicDropTx.SetWorkingDir(topicPath.Parent().PathString());
-    topicDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropPersQueueGroup);
+// TTxTransaction CreateTopicDropTransaction(const TPath& topicPath) {
+//     TTxTransaction topicDropTx;
+//     topicDropTx.SetWorkingDir(topicPath.Parent().PathString());
+//     topicDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropPersQueueGroup);
     
-    auto* drop = topicDropTx.MutableDrop();
-    drop->SetName(topicPath.LeafName());
+//     auto* drop = topicDropTx.MutableDrop();
+//     drop->SetName(topicPath.LeafName());
     
-    return topicDropTx;
-}
+//     return topicDropTx;
+// }
 
 // Clean up incremental restore state for a backup collection
 void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOperationContext& context, NIceDb::TNiceDb& db) {
@@ -585,11 +607,19 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
 
     auto dropPlan = CollectExternalObjects(context, dstPath);
     if (dropPlan->HasExternalObjects()) {
-        // Create suboperations for CDC streams
-        for (const auto& cdcStreamInfo : dropPlan->CdcStreams) {
-            LOG_I("DropPlan: Creating CDC stream drop operation for '" << cdcStreamInfo.StreamName 
-                  << "' on table: " << cdcStreamInfo.TablePath);
-            TTxTransaction cdcDropTx = CreateCdcDropTransaction(cdcStreamInfo, context);
+        // Create suboperations for CDC streams - grouped by table for atomic multi-stream drops
+        for (const auto& [tableId, tableStreams] : dropPlan->CdcStreamsByTable) {
+            TStringBuilder streamList;
+            for (size_t i = 0; i < tableStreams.StreamNames.size(); ++i) {
+                if (i > 0) streamList << ", ";
+                streamList << tableStreams.StreamNames[i];
+            }
+            
+            LOG_I("DropPlan: Creating multi-stream CDC drop operation for table '" << tableStreams.TablePath 
+                  << "' with " << tableStreams.StreamNames.size() << " streams: [" 
+                  << streamList << "]");
+            
+            TTxTransaction cdcDropTx = CreateCdcDropTransaction(tableStreams, context);
             if (!CreateDropCdcStream(nextId, cdcDropTx, context, result)) {
                 return result;
             }
@@ -604,14 +634,14 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
             }
         }
 
-        // Create suboperations for backup topics
-        for (const auto& topicPath : dropPlan->BackupTopics) {
-            LOG_I("DropPlan: Creating topic drop operation for: " << topicPath.PathString());
-            TTxTransaction topicDropTx = CreateTopicDropTransaction(topicPath);
-            if (!CreateDropPQ(nextId, topicDropTx, context, result)) {
-                return result;
-            }
-        }
+        // // Create suboperations for backup topics
+        // for (const auto& topicPath : dropPlan->BackupTopics) {
+        //     LOG_I("DropPlan: Creating topic drop operation for: " << topicPath.PathString());
+        //     TTxTransaction topicDropTx = CreateTopicDropTransaction(topicPath);
+        //     if (!CreateDropPQ(nextId, topicDropTx, context, result)) {
+        //         return result;
+        //     }
+        // }
     }
     
     return result;
