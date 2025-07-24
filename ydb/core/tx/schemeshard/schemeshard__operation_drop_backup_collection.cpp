@@ -124,316 +124,6 @@ TTxTransaction CreateTopicDropTransaction(const TPath& topicPath) {
     return topicDropTx;
 }
 
-class TDropParts : public TSubOperationState {
-public:
-    explicit TDropParts(TOperationId id)
-        : OperationId(std::move(id))
-    {}
-
-    bool ProgressState(TOperationContext& context) override {
-        LOG_I(DebugHint() << "ProgressState");
-
-        const auto* txState = context.SS->FindTx(OperationId);
-        Y_ABORT_UNLESS(txState);
-        Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
-
-        context.OnComplete.ProposeToCoordinator(OperationId, txState->TargetPathId, TStepId(0));
-        return false;
-    }
-
-    bool HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationContext& context) override {
-        const TStepId step = TStepId(ev->Get()->StepId);
-        LOG_I(DebugHint() << "HandleReply TEvOperationPlan: step# " << step);
-
-        const TTxState* txState = context.SS->FindTx(OperationId);
-        Y_ABORT_UNLESS(txState);
-        Y_ABORT_UNLESS(txState->TxType == TTxState::TxDropBackupCollection);
-
-        const TPathId& pathId = txState->TargetPathId;
-        
-        NIceDb::TNiceDb db(context.GetDB());
-
-        // Recursively drop all backup collection contents
-        if (!DropBackupCollectionContents(pathId, step, context, db)) {
-            // If we couldn't drop everything, we'll retry next time
-            LOG_I(DebugHint() << "Could not drop all contents, will retry");
-            return false;
-        }
-
-        context.SS->ChangeTxState(db, OperationId, TTxState::Propose);
-        return true;
-    }
-
-private:
-    bool DropBackupCollectionContents(const TPathId& bcPathId, TStepId step, 
-                                     TOperationContext& context, NIceDb::TNiceDb& db) {
-        if (!context.SS->PathsById.contains(bcPathId)) {
-            LOG_I(DebugHint() << "Backup collection path not found: " << bcPathId);
-            return true; // Path doesn't exist, consider it dropped
-        }
-        
-        auto bcPath = context.SS->PathsById.at(bcPathId);
-
-        // Drop CDC streams from source tables for incremental backup
-        if (!DropSourceTableCdcStreams(bcPathId, step, context, db)) {
-            LOG_I(DebugHint() << "Failed to drop CDC streams from source tables");
-            return false; // Retry later
-        }
-
-        // First, drop all CDC streams and topics for incremental backups
-        for (const auto& [childName, childPathId] : bcPath->GetChildren()) {
-            if (!context.SS->PathsById.contains(childPathId)) {
-                LOG_I(DebugHint() << "Child path not found: " << childPathId << ", skipping");
-                continue;
-            }
-            
-            auto childPath = context.SS->PathsById.at(childPathId);
-            
-            if (childPath->Dropped()) {
-                continue; // Already dropped
-            }
-
-            // Check if this is an incremental backup directory
-            if (childName.EndsWith("_incremental")) {
-                // Drop CDC streams and topics for all tables in this incremental backup
-                if (!DropIncrementalBackupCdcComponents(childPathId, step, context, db)) {
-                    LOG_I(DebugHint() << "Failed to drop CDC components for incremental backup: " << childPathId);
-                    return false; // Retry later
-                }
-            }
-        }
-
-        // Now drop all backup directories and their contents
-        TVector<TPathId> pathsToRemove;
-        CollectBackupPaths(bcPathId, pathsToRemove, context);
-
-        // Sort paths by depth (deeper first) to ensure proper deletion order
-        std::sort(pathsToRemove.begin(), pathsToRemove.end(), 
-                 [&context](const TPathId& a, const TPathId& b) -> bool {
-                     auto itA = context.SS->PathsById.find(a);
-                     auto itB = context.SS->PathsById.find(b);
-                     
-                     if (itA == context.SS->PathsById.end() || itB == context.SS->PathsById.end()) {
-                         return a < b; // Consistent ordering for missing paths
-                     }
-                     
-                     // Use TPath to calculate depth
-                     TPath pathA = TPath::Init(a, context.SS);
-                     TPath pathB = TPath::Init(b, context.SS);
-                     
-                     if (!pathA.IsResolved() || !pathB.IsResolved()) {
-                         return a < b; // Fallback ordering
-                     }
-                     
-                     return pathA.Depth() > pathB.Depth();
-                 });
-
-        // Drop all collected paths
-        for (const auto& pathId : pathsToRemove) {
-            if (!context.SS->PathsById.contains(pathId)) {
-                LOG_I(DebugHint() << "Path not found during deletion: " << pathId << ", skipping");
-                continue;
-            }
-            
-            auto path = context.SS->PathsById.at(pathId);
-            
-            if (path->Dropped()) {
-                continue; // Already dropped
-            }
-
-            path->SetDropped(step, OperationId.GetTxId());
-            context.SS->PersistDropStep(db, pathId, step, OperationId);
-            
-            // Update counters based on path type
-            if (path->IsTable()) {
-                context.SS->TabletCounters->Simple()[COUNTER_TABLE_COUNT].Sub(1);
-            }
-            
-            // Clean up specific path type metadata
-            if (path->IsTable() && context.SS->Tables.contains(pathId)) {
-                context.SS->PersistRemoveTable(db, pathId, context.Ctx);
-            }
-            
-            auto domainInfo = context.SS->ResolveDomainInfo(pathId);
-            if (domainInfo) {
-                domainInfo->DecPathsInside(context.SS);
-            }
-        }
-
-        return true;
-    }
-
-    bool DropSourceTableCdcStreams(const TPathId& bcPathId, TStepId step, 
-                                  TOperationContext& context, NIceDb::TNiceDb& db) {
-        // Get the backup collection info to find source tables
-        const TBackupCollectionInfo::TPtr backupCollection = context.SS->BackupCollections.Value(bcPathId, nullptr);
-        if (!backupCollection) {
-            LOG_I(DebugHint() << "Backup collection info not found: " << bcPathId);
-            return true; // No backup collection, nothing to clean
-        }
-
-        // Iterate through all source tables defined in the backup collection
-        for (const auto& entry : backupCollection->Description.GetExplicitEntryList().GetEntries()) {
-            const TString& sourceTablePath = entry.GetPath();
-            
-            // Resolve the source table path
-            TPath sourcePath = TPath::Resolve(sourceTablePath, context.SS);
-            if (!sourcePath.IsResolved() || !sourcePath->IsTable() || sourcePath.IsDeleted()) {
-                LOG_I(DebugHint() << "Source table not found or not a table: " << sourceTablePath);
-                continue; // Source table doesn't exist, skip
-            }
-
-            // Look for CDC streams with the incremental backup naming pattern
-            TVector<TString> cdcStreamsToDelete;
-            for (const auto& [childName, childPathId] : sourcePath.Base()->GetChildren()) {
-                if (!context.SS->PathsById.contains(childPathId)) {
-                    continue;
-                }
-                
-                auto childPath = context.SS->PathsById.at(childPathId);
-                if (!childPath->IsCdcStream() || childPath->Dropped()) {
-                    continue;
-                }
-
-                // Check if this CDC stream matches the incremental backup naming pattern
-                if (childName.EndsWith("_continuousBackupImpl")) {
-                    cdcStreamsToDelete.push_back(childName);
-                    LOG_I(DebugHint() << "Found incremental backup CDC stream to delete: " << sourceTablePath << "/" << childName);
-                }
-            }
-
-            // Drop all identified CDC streams from this source table
-            for (const TString& streamName : cdcStreamsToDelete) {
-                TPath cdcStreamPath = sourcePath.Child(streamName);
-                if (cdcStreamPath.IsResolved() && !cdcStreamPath.IsDeleted()) {
-                    if (!DropCdcStreamAndTopics(cdcStreamPath.Base()->PathId, step, context, db)) {
-                        LOG_I(DebugHint() << "Failed to drop CDC stream: " << sourceTablePath << "/" << streamName);
-                        return false; // Retry later
-                    }
-                }
-            }
-        }
-
-        return true;
-    }
-
-    bool DropIncrementalBackupCdcComponents(const TPathId& incrBackupPathId, TStepId step, 
-                                           TOperationContext& context, NIceDb::TNiceDb& db) {
-        Y_ABORT_UNLESS(context.SS->PathsById.contains(incrBackupPathId));
-        auto incrBackupPath = context.SS->PathsById.at(incrBackupPathId);
-
-        // For each table in the incremental backup, drop associated CDC streams
-        for (const auto& [tableName, tablePathId] : incrBackupPath->GetChildren()) {
-            Y_ABORT_UNLESS(context.SS->PathsById.contains(tablePathId));
-            auto tablePath = context.SS->PathsById.at(tablePathId);
-            
-            if (!tablePath->IsTable() || tablePath->Dropped()) {
-                continue;
-            }
-
-            // Look for CDC streams associated with this table
-            for (const auto& [streamName, streamPathId] : tablePath->GetChildren()) {
-                Y_ABORT_UNLESS(context.SS->PathsById.contains(streamPathId));
-                auto streamPath = context.SS->PathsById.at(streamPathId);
-                
-                if (!streamPath->IsCdcStream() || streamPath->Dropped()) {
-                    continue;
-                }
-
-                // Drop CDC stream and its topics/partitions
-                if (!DropCdcStreamAndTopics(streamPathId, step, context, db)) {
-                    return false; // Retry later
-                }
-            }
-        }
-
-        return true;
-    }
-
-    bool DropCdcStreamAndTopics(const TPathId& streamPathId, TStepId step, 
-                               TOperationContext& context, NIceDb::TNiceDb& db) {
-        if (!context.SS->PathsById.contains(streamPathId)) {
-            LOG_I(DebugHint() << "CDC stream path not found: " << streamPathId);
-            return true; // Path doesn't exist, consider it dropped
-        }
-        
-        auto streamPath = context.SS->PathsById.at(streamPathId);
-
-        if (streamPath->Dropped()) {
-            return true; // Already dropped
-        }
-
-        // First drop all PQ groups (topics) associated with this CDC stream
-        for (const auto& [topicName, topicPathId] : streamPath->GetChildren()) {
-            if (!context.SS->PathsById.contains(topicPathId)) {
-                LOG_I(DebugHint() << "Topic path not found: " << topicPathId << ", skipping");
-                continue;
-            }
-            
-            auto topicPath = context.SS->PathsById.at(topicPathId);
-            
-            if (topicPath->IsPQGroup() && !topicPath->Dropped()) {
-                topicPath->SetDropped(step, OperationId.GetTxId());
-                context.SS->PersistDropStep(db, topicPathId, step, OperationId);
-                
-                if (context.SS->Topics.contains(topicPathId)) {
-                    context.SS->PersistRemovePersQueueGroup(db, topicPathId);
-                }
-                
-                auto domainInfo = context.SS->ResolveDomainInfo(topicPathId);
-                if (domainInfo) {
-                    domainInfo->DecPathsInside(context.SS);
-                }
-            }
-        }
-
-        // Then drop the CDC stream itself
-        streamPath->SetDropped(step, OperationId.GetTxId());
-        context.SS->PersistDropStep(db, streamPathId, step, OperationId);
-        
-        // Check if CDC stream metadata exists before removing
-        if (context.SS->CdcStreams.contains(streamPathId)) {
-            context.SS->PersistRemoveCdcStream(db, streamPathId);
-            context.SS->TabletCounters->Simple()[COUNTER_CDC_STREAMS_COUNT].Sub(1);
-        }
-        
-        auto domainInfo = context.SS->ResolveDomainInfo(streamPathId);
-        if (domainInfo) {
-            domainInfo->DecPathsInside(context.SS);
-        }
-
-        return true;
-    }
-
-    void CollectBackupPaths(const TPathId& rootPathId, TVector<TPathId>& paths, 
-                           TOperationContext& context) {
-        Y_ABORT_UNLESS(context.SS->PathsById.contains(rootPathId));
-        auto rootPath = context.SS->PathsById.at(rootPathId);
-
-        for (const auto& [childName, childPathId] : rootPath->GetChildren()) {
-            Y_ABORT_UNLESS(context.SS->PathsById.contains(childPathId));
-            auto childPath = context.SS->PathsById.at(childPathId);
-            
-            if (childPath->Dropped()) {
-                continue;
-            }
-
-            // Recursively collect all children first
-            CollectBackupPaths(childPathId, paths, context);
-            
-            // Add this path to be removed
-            paths.push_back(childPathId);
-        }
-    }
-
-    TString DebugHint() const override {
-        return TStringBuilder() << "TDropBackupCollection TDropParts, operationId: " << OperationId << ", ";
-    }
-
-private:
-    const TOperationId OperationId;
-};
-
 // Clean up incremental restore state for a backup collection
 void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOperationContext& context, NIceDb::TNiceDb& db) {
     LOG_I("CleanupIncrementalRestoreState for backup collection pathId: " << backupCollectionPathId);
@@ -564,13 +254,11 @@ private:
 
 class TDropBackupCollection : public TSubOperation {
     static TTxState::ETxState NextState() {
-        return TTxState::DropParts;
+        return TTxState::Propose;
     }
 
     TTxState::ETxState NextState(TTxState::ETxState state) const override {
         switch (state) {
-        case TTxState::DropParts:
-            return TTxState::Propose;
         case TTxState::Propose:
             return TTxState::Done;
         default:
@@ -580,8 +268,6 @@ class TDropBackupCollection : public TSubOperation {
 
     TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
         switch (state) {
-        case TTxState::DropParts:
-            return MakeHolder<TDropParts>(OperationId);
         case TTxState::Propose:
             return MakeHolder<TPropose>(OperationId);
         case TTxState::Done:
@@ -819,56 +505,6 @@ private:
     }
 };
 
-// Helper function to create incremental restore cleanup operation
-ISubOperation::TPtr CreateIncrementalRestoreCleanup(TOperationId id, TPathId backupCollectionPathId) {
-    class TIncrementalRestoreCleanupOperation : public TSubOperation {
-    public:
-        TIncrementalRestoreCleanupOperation(TOperationId id, TPathId pathId)
-            : TSubOperation(id, TTxState::Waiting)
-            , BackupCollectionPathId(pathId)
-        {}
-
-        THolder<TProposeResponse> Propose(const TString&, TOperationContext& context) override {
-            auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), context.SS->TabletID());
-            
-            // Setup transaction state to proceed directly to cleanup
-            NIceDb::TNiceDb db(context.GetDB());
-            context.SS->CreateTx(OperationId, TTxState::TxInvalid, BackupCollectionPathId);
-            context.SS->ChangeTxState(db, OperationId, TTxState::Done);
-            
-            return result;
-        }
-
-        void AbortPropose(TOperationContext&) override {}
-        void AbortUnsafe(TTxId, TOperationContext& context) override {
-            context.OnComplete.DoneOperation(OperationId);
-        }
-
-        TSubOperationState::TPtr SelectStateFunc(TTxState::ETxState state) override {
-            switch (state) {
-            case TTxState::Waiting:
-                return MakeHolder<TIncrementalRestoreCleanup>(OperationId, BackupCollectionPathId);
-            default:
-                return nullptr;
-            }
-        }
-
-        TTxState::ETxState NextState(TTxState::ETxState state) const override {
-            switch (state) {
-            case TTxState::Waiting:
-                return TTxState::Done;
-            default:
-                return TTxState::Invalid;
-            }
-        }
-
-    private:
-        TPathId BackupCollectionPathId;
-    };
-    
-    return new TIncrementalRestoreCleanupOperation(id, backupCollectionPathId);
-}
-
 }  // anonymous namespace
 
 // Create multiple suboperations for dropping backup collection
@@ -878,10 +514,22 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
     auto dropOperation = tx.GetDropBackupCollection();
     const TString parentPathStr = tx.GetWorkingDir();
     
-    TPath backupCollection = TPath::Resolve(parentPathStr + "/" + dropOperation.GetName(), context.SS);
+    // Check for empty backup collection name
+    if (dropOperation.GetName().empty()) {
+        return {CreateReject(nextId, NKikimrScheme::StatusInvalidParameter, "Backup collection name cannot be empty")};
+    }
+    
+    // Use the same validation logic as ResolveBackupCollectionPaths to be consistent
+    auto proposeResult = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, static_cast<ui64>(nextId.GetTxId()), static_cast<ui64>(context.SS->SelfTabletId()));
+    auto bcPaths = NBackup::ResolveBackupCollectionPaths(parentPathStr, dropOperation.GetName(), false, context, proposeResult);
+    if (!bcPaths) {
+        return {CreateReject(nextId, proposeResult->Record.GetStatus(), proposeResult->Record.GetReason())};
+    }
+
+    auto& dstPath = bcPaths->DstPath;
 
     {
-        TPath::TChecker checks = backupCollection.Check();
+        TPath::TChecker checks = dstPath.Check();
         checks
             .NotEmpty()
             .IsResolved()
@@ -897,7 +545,7 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
     }
 
     // Check for active backup/restore operations
-    const TPathId& pathId = backupCollection.Base()->PathId;
+    const TPathId& pathId = dstPath.Base()->PathId;
     
     // Check if any backup or restore operations are active for this collection
     for (const auto& [txId, txState] : context.SS->TxInFlight) {
@@ -920,10 +568,10 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
     TVector<ISubOperation::TPtr> result;
 
     // First, add incremental restore state cleanup operation
-    auto cleanupOp = CreateIncrementalRestoreCleanup(NextPartId(nextId, result), backupCollection.Base()->PathId);
+    auto cleanupOp = MakeSubOperation<TDropBackupCollection>(nextId, tx);
     result.push_back(cleanupOp);
 
-    auto dropPlan = CollectExternalObjects(context, backupCollection);
+    auto dropPlan = CollectExternalObjects(context, dstPath);
     if (dropPlan->HasExternalObjects()) {
         // Create suboperations for CDC streams
         for (const auto& cdcStreamInfo : dropPlan->CdcStreams) {
