@@ -37,6 +37,8 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
     auto plan = MakeHolder<TDropPlan>();
     plan->BackupCollectionId = bcPath.Base()->PathId;
     
+    LOG_I("DropPlan: Starting collection for backup collection: " << bcPath.PathString());
+    
     // 1. Find CDC streams on source tables (these are OUTSIDE the backup collection)
     // For now, we'll find CDC streams with incremental backup suffix across all tables
     for (const auto& [pathId, cdcStreamInfo] : context.SS->CdcStreams) {
@@ -59,10 +61,13 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
                 continue;
             }
             
+            TString tablePathStr = TPath::Init(streamPath->ParentPathId, context.SS).PathString();
+            LOG_I("DropPlan: Found CDC stream '" << streamPath->Name << "' on table: " << tablePathStr);
+            
             plan->CdcStreams.push_back({
                 streamPath->ParentPathId,
                 streamPath->Name,
-                TPath::Init(streamPath->ParentPathId, context.SS).PathString()
+                tablePathStr
             });
         }
     }
@@ -77,14 +82,21 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
             TPath childPath = current.Child(childName);
             
             if (childPath.Base()->IsTable()) {
+                LOG_I("DropPlan: Found backup table to drop: " << childPath.PathString());
                 plan->BackupTables.push_back(childPath);
             } else if (childPath.Base()->IsPQGroup()) {
+                LOG_I("DropPlan: Found backup topic to drop: " << childPath.PathString());
                 plan->BackupTopics.push_back(childPath);
             } else if (childPath.Base()->IsDirectory()) {
+                LOG_I("DropPlan: Traversing directory: " << childPath.PathString());
                 toVisit.push_back(childPath);
             }
         }
     }
+    
+    LOG_I("DropPlan: Collection complete - CDC streams: " << plan->CdcStreams.size() 
+          << ", backup tables: " << plan->BackupTables.size() 
+          << ", backup topics: " << plan->BackupTopics.size());
     
     return plan;
 }
@@ -97,7 +109,7 @@ TTxTransaction CreateCdcDropTransaction(const TDropPlan::TCdcStreamInfo& cdcInfo
     
     auto* cdcDrop = cdcDropTx.MutableDropCdcStream();
     cdcDrop->SetTableName(tablePath.LeafName());
-    cdcDrop->SetStreamName(cdcInfo.StreamName);
+    cdcDrop->AddStreamName(cdcInfo.StreamName);  // Changed to AddStreamName for repeated field
     
     return cdcDropTx;
 }
@@ -575,6 +587,8 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
     if (dropPlan->HasExternalObjects()) {
         // Create suboperations for CDC streams
         for (const auto& cdcStreamInfo : dropPlan->CdcStreams) {
+            LOG_I("DropPlan: Creating CDC stream drop operation for '" << cdcStreamInfo.StreamName 
+                  << "' on table: " << cdcStreamInfo.TablePath);
             TTxTransaction cdcDropTx = CreateCdcDropTransaction(cdcStreamInfo, context);
             if (!CreateDropCdcStream(nextId, cdcDropTx, context, result)) {
                 return result;
@@ -583,6 +597,7 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
 
         // Create suboperations for backup tables
         for (const auto& tablePath : dropPlan->BackupTables) {
+            LOG_I("DropPlan: Creating table drop operation for: " << tablePath.PathString());
             TTxTransaction tableDropTx = CreateTableDropTransaction(tablePath);
             if (!CreateDropTable(nextId, tableDropTx, context, result)) {
                 return result;
@@ -591,6 +606,7 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
 
         // Create suboperations for backup topics
         for (const auto& topicPath : dropPlan->BackupTopics) {
+            LOG_I("DropPlan: Creating topic drop operation for: " << topicPath.PathString());
             TTxTransaction topicDropTx = CreateTopicDropTransaction(topicPath);
             if (!CreateDropPQ(nextId, topicDropTx, context, result)) {
                 return result;
