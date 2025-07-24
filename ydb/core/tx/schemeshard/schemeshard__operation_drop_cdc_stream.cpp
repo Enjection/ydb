@@ -596,7 +596,7 @@ ISubOperation::TPtr CreateDropCdcStreamAtTable(TOperationId id, TTxState::ETxSta
     return MakeSubOperation<TDropCdcStreamAtTable>(id, state, dropSnapshot);
 }
 
-TVector<ISubOperation::TPtr> CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperationContext& context) {
+bool CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperationContext& context, TVector<ISubOperation::TPtr>& result) {
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpDropCdcStream);
 
     LOG_D("CreateDropCdcStream"
@@ -611,14 +611,16 @@ TVector<ISubOperation::TPtr> CreateDropCdcStream(TOperationId opId, const TTxTra
 
     const auto checksResult = DoDropStreamPathChecks(opId, workingDirPath, tableName, streamName);
     if (std::holds_alternative<ISubOperation::TPtr>(checksResult)) {
-        return {std::get<ISubOperation::TPtr>(checksResult)};
+        result = {std::get<ISubOperation::TPtr>(checksResult)};
+        return false;
     }
 
     const auto [tablePath, streamPath] = std::get<TStreamPaths>(checksResult);
 
     TString errStr;
     if (!context.SS->CheckApplyIf(tx, errStr)) {
-        return {CreateReject(opId, NKikimrScheme::StatusPreconditionFailed, errStr)};
+        result = {CreateReject(opId, NKikimrScheme::StatusPreconditionFailed, errStr)};
+        return false;
     }
 
     Y_ABORT_UNLESS(context.SS->CdcStreams.contains(streamPath.Base()->PathId));
@@ -628,12 +630,19 @@ TVector<ISubOperation::TPtr> CreateDropCdcStream(TOperationId opId, const TTxTra
         ? streamPath.Base()->CreateTxId
         : InvalidTxId;
     if (const auto reject = DoDropStreamChecks(opId, tablePath, lockTxId, context); reject) {
-        return {reject};
+        result = {reject};
+        return false;
     }
 
+    DoDropStream(result, op, opId, workingDirPath, tablePath, streamPath, lockTxId, context);
+
+    return true;
+}
+
+TVector<ISubOperation::TPtr> CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperationContext& context) {
     TVector<ISubOperation::TPtr> result;
 
-    DoDropStream(result, op, opId, workingDirPath, tablePath, streamPath, lockTxId, context);
+    CreateDropCdcStream(opId, tx, context, result);
 
     return result;
 }

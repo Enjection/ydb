@@ -14,45 +14,114 @@ namespace NKikimr::NSchemeShard {
 
 namespace {
 
-// Helper function to create suboperations for dropping backup collection contents
-ISubOperation::TPtr CascadeDropBackupCollection(TVector<ISubOperation::TPtr>& result, 
-                                               const TOperationId& id, 
-                                               const TPath& backupCollection,
-                                               TOperationContext& context) {
-    // For each backup directory in the collection
-    for (const auto& [backupName, backupPathId] : backupCollection.Base()->GetChildren()) {
-        TPath backupPath = backupCollection.Child(backupName);
-        
-        if (!backupPath.IsResolved() || backupPath.IsDeleted()) {
+// Helper structures for the new hybrid suboperations approach
+struct TDropPlan {
+    struct TCdcStreamInfo {
+        TPathId TablePathId;
+        TString StreamName;
+        TString TablePath;
+    };
+    
+    TVector<TCdcStreamInfo> CdcStreams;
+    TVector<TPath> BackupTables;
+    TVector<TPath> BackupTopics;
+    TPathId BackupCollectionId;
+    
+    bool HasExternalObjects() const {
+        return !CdcStreams.empty() || !BackupTables.empty() || !BackupTopics.empty();
+    }
+};
+
+// Collect all external objects that need suboperations for dropping
+THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPath& bcPath) {
+    auto plan = MakeHolder<TDropPlan>();
+    plan->BackupCollectionId = bcPath.Base()->PathId;
+    
+    // 1. Find CDC streams on source tables (these are OUTSIDE the backup collection)
+    // For now, we'll find CDC streams with incremental backup suffix across all tables
+    for (const auto& [pathId, cdcStreamInfo] : context.SS->CdcStreams) {
+        if (!context.SS->PathsById.contains(pathId)) {
             continue;
         }
-
-        // If this is a table (backup), drop it using CascadeDropTableChildren
-        if (backupPath->IsTable()) {
-            if (auto reject = CascadeDropTableChildren(result, id, backupPath)) {
-                return reject;
+        
+        auto streamPath = context.SS->PathsById.at(pathId);
+        if (!streamPath || streamPath->Dropped()) {
+            continue;
+        }
+        
+        if (streamPath->Name.EndsWith("_continuousBackupImpl")) {
+            if (!context.SS->PathsById.contains(streamPath->ParentPathId)) {
+                continue;
             }
             
-            // Then drop the table itself
-            auto dropTable = TransactionTemplate(backupCollection.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpDropTable);
-            dropTable.MutableDrop()->SetName(ToString(backupPath.Base()->Name));
-            result.push_back(CreateDropTable(NextPartId(id, result), dropTable));
-        } 
-        // If this is a directory, recursively drop its contents
-        else if (backupPath->IsDirectory()) {
-            // Recursively handle directory contents
-            if (auto reject = CascadeDropBackupCollection(result, id, backupPath, context)) {
-                return reject;
+            auto tablePath = context.SS->PathsById.at(streamPath->ParentPathId);
+            if (!tablePath || !tablePath->IsTable() || tablePath->Dropped()) {
+                continue;
             }
             
-            // Then drop the directory itself
-            auto dropDir = TransactionTemplate(backupCollection.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpRmDir);
-            dropDir.MutableDrop()->SetName(ToString(backupPath.Base()->Name));
-            result.push_back(CreateRmDir(NextPartId(id, result), dropDir));
+            plan->CdcStreams.push_back({
+                streamPath->ParentPathId,
+                streamPath->Name,
+                TPath::Init(streamPath->ParentPathId, context.SS).PathString()
+            });
         }
     }
+    
+    // 2. Find backup tables and topics UNDER the collection path recursively
+    TVector<TPath> toVisit = {bcPath};
+    while (!toVisit.empty()) {
+        TPath current = toVisit.back();
+        toVisit.pop_back();
+        
+        for (const auto& [childName, childPathId] : current.Base()->GetChildren()) {
+            TPath childPath = current.Child(childName);
+            
+            if (childPath.Base()->IsTable()) {
+                plan->BackupTables.push_back(childPath);
+            } else if (childPath.Base()->IsPQGroup()) {
+                plan->BackupTopics.push_back(childPath);
+            } else if (childPath.Base()->IsDirectory()) {
+                toVisit.push_back(childPath);
+            }
+        }
+    }
+    
+    return plan;
+}
 
-    return nullptr;
+TTxTransaction CreateCdcDropTransaction(const TDropPlan::TCdcStreamInfo& cdcInfo, TOperationContext& context) {
+    TTxTransaction cdcDropTx;
+    TPath tablePath = TPath::Init(cdcInfo.TablePathId, context.SS);
+    cdcDropTx.SetWorkingDir(tablePath.Parent().PathString());
+    cdcDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropCdcStream);
+    
+    auto* cdcDrop = cdcDropTx.MutableDropCdcStream();
+    cdcDrop->SetTableName(tablePath.LeafName());
+    cdcDrop->SetStreamName(cdcInfo.StreamName);
+    
+    return cdcDropTx;
+}
+
+TTxTransaction CreateTableDropTransaction(const TPath& tablePath) {
+    TTxTransaction tableDropTx;
+    tableDropTx.SetWorkingDir(tablePath.Parent().PathString());
+    tableDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropTable);
+    
+    auto* drop = tableDropTx.MutableDrop();
+    drop->SetName(tablePath.LeafName());
+    
+    return tableDropTx;
+}
+
+TTxTransaction CreateTopicDropTransaction(const TPath& topicPath) {
+    TTxTransaction topicDropTx;
+    topicDropTx.SetWorkingDir(topicPath.Parent().PathString());
+    topicDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropPersQueueGroup);
+    
+    auto* drop = topicDropTx.MutableDrop();
+    drop->SetName(topicPath.LeafName());
+    
+    return topicDropTx;
 }
 
 class TDropParts : public TSubOperationState {
@@ -846,23 +915,42 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
             return {CreateReject(nextId, NKikimrScheme::StatusPreconditionFailed,
                 "Cannot drop backup collection while incremental restore operations are active. Please wait for them to complete.")};
         }
-    }    
+    }
+
     TVector<ISubOperation::TPtr> result;
-    
+
     // First, add incremental restore state cleanup operation
     auto cleanupOp = CreateIncrementalRestoreCleanup(NextPartId(nextId, result), backupCollection.Base()->PathId);
     result.push_back(cleanupOp);
-    
-    // Then use the cascade helper to generate all necessary suboperations
-    if (auto reject = CascadeDropBackupCollection(result, nextId, backupCollection, context)) {
-        return {reject};
+
+    auto dropPlan = CollectExternalObjects(context, backupCollection);
+    if (dropPlan->HasExternalObjects()) {
+        // Create suboperations for CDC streams
+        for (const auto& cdcStreamInfo : dropPlan->CdcStreams) {
+            TTxTransaction cdcDropTx = CreateCdcDropTransaction(cdcStreamInfo, context);
+            if (!CreateDropCdcStream(nextId, cdcDropTx, context, result)) {
+                return result;
+            }
+        }
+
+        // Create suboperations for backup tables
+        for (const auto& tablePath : dropPlan->BackupTables) {
+            TTxTransaction tableDropTx = CreateTableDropTransaction(tablePath);
+            if (!CreateDropTable(nextId, tableDropTx, context, result)) {
+                return result;
+            }
+        }
+
+        // Create suboperations for backup topics
+        for (const auto& topicPath : dropPlan->BackupTopics) {
+            TTxTransaction topicDropTx = CreateTopicDropTransaction(topicPath);
+            if (!CreateDropPQ(nextId, topicDropTx, context, result)) {
+                return result;
+            }
+        }
     }
-
+    
     return result;
-}
-
-ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, const TTxTransaction& tx) {
-    return MakeSubOperation<TDropBackupCollection>(id, tx);
 }
 
 ISubOperation::TPtr CreateDropBackupCollection(TOperationId id, TTxState::ETxState state) {
