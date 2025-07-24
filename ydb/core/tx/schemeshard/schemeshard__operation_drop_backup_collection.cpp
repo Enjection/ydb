@@ -414,6 +414,29 @@ public:
                                    "Cannot drop backup collection while backup or restore operations are active. Please wait for them to complete.");
                     return result;
                 }
+                
+                // Check for concurrent operations on the same path
+                // This catches the race condition where another drop operation is in progress
+                // but hasn't yet marked the path as "under deleting"
+                LOG_I("DropPlan: Checking for concurrent operations on path: " << dstPath.PathString() 
+                     << ", pathId: " << dstPath.Base()->PathId << ", currentTxId: " << OperationId.GetTxId());
+                
+                for (const auto& [txId, txState] : context.SS->TxInFlight) {
+                    LOG_I("DropPlan: Found TxInFlight - txId: " << txId.GetTxId() 
+                         << ", targetPathId: " << txState.TargetPathId 
+                         << ", txType: " << (int)txState.TxType);
+                         
+                    if (txState.TargetPathId == dstPath.Base()->PathId && 
+                        txId.GetTxId() != OperationId.GetTxId()) {
+                        LOG_I("DropPlan: Detected concurrent operation - failing with StatusMultipleModifications");
+                        result->SetError(NKikimrScheme::StatusMultipleModifications, 
+                                       TStringBuilder() << "Check failed: path: '" << dstPath.PathString() 
+                                       << "', error: another operation is already in progress for this backup collection");
+                        result->SetPathDropTxId(ui64(txId.GetTxId()));
+                        result->SetPathId(dstPath.Base()->PathId.LocalPathId);
+                        return result;
+                    }
+                }
             }
 
             if (!checks) {
@@ -574,7 +597,18 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
             .IsCommonSensePath();
 
         if (!checks) {
-            return {CreateReject(nextId, checks.GetStatus(), checks.GetError())};
+            // Handle the special case where the path is being deleted
+            if (dstPath.IsResolved() && dstPath.Base()->IsBackupCollection() && 
+                (dstPath.Base()->PlannedToDrop() || dstPath.Base()->Dropped())) {
+                
+                auto errorResult = MakeHolder<TProposeResponse>(checks.GetStatus(), static_cast<ui64>(nextId.GetTxId()), static_cast<ui64>(context.SS->SelfTabletId()));
+                errorResult->SetError(checks.GetStatus(), checks.GetError());
+                errorResult->SetPathDropTxId(ui64(dstPath.Base()->DropTxId));
+                errorResult->SetPathId(dstPath.Base()->PathId.LocalPathId);
+                return {CreateReject(nextId, std::move(errorResult))};
+            } else {
+                return {CreateReject(nextId, checks.GetStatus(), checks.GetError())};
+            }
         }
     }
 
