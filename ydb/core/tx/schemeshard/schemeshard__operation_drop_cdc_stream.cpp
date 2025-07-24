@@ -247,9 +247,8 @@ protected:
         
         Y_VERIFY_S(!streamPathIds.empty(), "No CDC streams planned for drop");
         
-        // Add all stream IDs to repeated field
         for (const auto& streamId : streamPathIds) {
-            streamId.ToProto(notice.AddStreamPathId());  // Using repeated field
+            streamId.ToProto(notice.AddStreamPathId());
         }
     }
 
@@ -331,7 +330,7 @@ public:
     {
         // Extract all stream names from transaction
         const auto& op = tx.GetDropCdcStream();
-        for (const auto& name : op.GetStreamName()) {  // repeated field
+        for (const auto& name : op.GetStreamName()) {
             StreamNames.push_back(name);
         }
     }
@@ -351,12 +350,6 @@ public:
             << ": opId# " << OperationId
             << ", table# " << workingDir << "/" << tableName 
             << ", streams# " << StreamNames.size());
-
-        // Add DropPlan logging for each stream
-        for (const auto& streamName : StreamNames) {
-            LOG_I("DropPlan: Configuring table operation for CDC stream: " << streamName 
-                  << " on table: " << workingDir << "/" << tableName);
-        }
 
         auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), context.SS->TabletID());
 
@@ -569,10 +562,6 @@ void DoDropStream(
         const TTxId lockTxId,
         TOperationContext& context)
 {
-    LOG_I("DropPlan: Creating suboperations for " << streamPaths.size() 
-          << " CDC streams on table: " << tablePath.PathString());
-
-    // 1. Single table-level operation (handles all streams atomically)
     {
         auto outTx = TransactionTemplate(workingDirPath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpDropCdcStreamAtTable);
         outTx.MutableDropCdcStream()->CopyFrom(op);  // Preserves all stream names
@@ -584,7 +573,6 @@ void DoDropStream(
         result.push_back(CreateDropCdcStreamAtTable(NextPartId(opId, result), outTx, lockTxId != InvalidTxId));
     }
 
-    // 2. Lock cleanup (single operation for all streams)
     if (lockTxId != InvalidTxId) {
         auto outTx = TransactionTemplate(workingDirPath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpDropLock);
         outTx.SetFailOnExist(true);
@@ -595,7 +583,6 @@ void DoDropStream(
         result.push_back(DropLock(NextPartId(opId, result), outTx));
     }
 
-    // 3. Index state update (if needed)
     if (workingDirPath.IsTableIndex()) {
         auto outTx = TransactionTemplate(workingDirPath.Parent().PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpAlterTableIndex);
         outTx.MutableAlterTableIndex()->SetName(workingDirPath.LeafName());
@@ -604,11 +591,7 @@ void DoDropStream(
         result.push_back(CreateAlterTableIndex(NextPartId(opId, result), outTx));
     }
 
-    // 4. Stream implementation drops (one per stream)
-    // Note: These handle SchemeShard metadata cleanup after table operation completes
     for (const auto& streamPath : streamPaths) {
-        LOG_I("DropPlan: Creating stream impl drop for: " << streamPath.PathString());
-
         auto outTx = TransactionTemplate(tablePath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpDropCdcStreamImpl);
         outTx.MutableDrop()->SetName(streamPath.Base()->Name);
 
@@ -619,7 +602,6 @@ void DoDropStream(
         result.push_back(CreateDropCdcStreamImpl(NextPartId(opId, result), outTx));
     }
 
-    // 5. PQ group drops for each stream's children
     for (const auto& streamPath : streamPaths) {
         for (const auto& [name, pathId] : streamPath.Base()->GetChildren()) {
             Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
@@ -631,8 +613,6 @@ void DoDropStream(
 
             auto streamImpl = context.SS->PathsById.at(pathId);
             Y_ABORT_UNLESS(streamImpl->IsPQGroup());
-
-            LOG_I("DropPlan: Creating PQ group drop for: " << streamPath.PathString() << "/" << name);
 
             auto outTx = TransactionTemplate(streamPath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup);
             outTx.MutableDrop()->SetName(name);
@@ -668,9 +648,8 @@ bool CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperation
     const auto& op = tx.GetDropCdcStream();
     const auto& tableName = op.GetTableName();
     
-    // Get stream names - works for both single and multiple
     TVector<TString> streamNames;
-    for (const auto& name : op.GetStreamName()) {  // repeated field iteration
+    for (const auto& name : op.GetStreamName()) {
         streamNames.push_back(name);
     }
     
@@ -680,18 +659,11 @@ bool CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperation
         << ", streams# " << streamNames.size()
         << ", tx# " << tx.ShortDebugString());
 
-    // Add DropPlan logging
-    for (const auto& streamName : streamNames) {
-        LOG_I("DropPlan: Processing CDC stream for drop: " << streamName 
-              << " on table: " << tableName);
-    }
-
     const auto workingDirPath = TPath::Resolve(tx.GetWorkingDir(), context.SS);
 
     // Validate all streams exist on the same table
     TVector<TPath> streamPaths;
     
-    // Get the first stream to establish the table path
     if (streamNames.empty()) {
         result = {CreateReject(opId, NKikimrScheme::StatusInvalidParameter, 
                              "At least one StreamName must be specified")};
@@ -707,7 +679,6 @@ bool CreateDropCdcStream(TOperationId opId, const TTxTransaction& tx, TOperation
     const auto [tablePath, firstStreamPath] = std::get<TStreamPaths>(firstStreamChecksResult);
     streamPaths.push_back(firstStreamPath);
     
-    // Process remaining streams and validate they're on the same table
     for (size_t i = 1; i < streamNames.size(); ++i) {
         const auto checksResult = DoDropStreamPathChecks(opId, workingDirPath, tableName, streamNames[i]);
         if (std::holds_alternative<ISubOperation::TPtr>(checksResult)) {

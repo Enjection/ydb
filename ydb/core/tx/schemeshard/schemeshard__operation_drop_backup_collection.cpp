@@ -1,9 +1,9 @@
 #include "schemeshard__backup_collection_common.h"
 #include "schemeshard__operation_common.h"
 #include "schemeshard__operation_part.h"
-#include "schemeshard__operation.h"  // for NextPartId
+#include "schemeshard__operation.h"
 #include "schemeshard_impl.h"
-#include "schemeshard_utils.h"  // for TransactionTemplate
+#include "schemeshard_utils.h"
 
 #include <algorithm>
 
@@ -14,7 +14,6 @@ namespace NKikimr::NSchemeShard {
 
 namespace {
 
-// Helper structures for the new hybrid suboperations approach
 struct TDropPlan {
     struct TCdcStreamInfo {
         TPathId TablePathId;
@@ -22,7 +21,6 @@ struct TDropPlan {
         TString TablePath;
     };
     
-    // Group CDC streams by table for efficient multi-stream drops
     struct TTableCdcStreams {
         TPathId TablePathId;
         TString TablePath;
@@ -39,7 +37,6 @@ struct TDropPlan {
     }
 };
 
-// Collect all external objects that need suboperations for dropping
 THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPath& bcPath) {
     auto plan = MakeHolder<TDropPlan>();
     plan->BackupCollectionId = bcPath.Base()->PathId;
@@ -69,12 +66,9 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
             }
             
             TString tablePathStr = TPath::Init(streamPath->ParentPathId, context.SS).PathString();
-            LOG_I("DropPlan: Found CDC stream '" << streamPath->Name << "' on table: " << tablePathStr);
             
-            // Group streams by table for atomic multi-stream drops
             auto& tableEntry = plan->CdcStreamsByTable[streamPath->ParentPathId];
             if (tableEntry.StreamNames.empty()) {
-                // First stream for this table - initialize the entry
                 tableEntry.TablePathId = streamPath->ParentPathId;
                 tableEntry.TablePath = tablePathStr;
             }
@@ -92,29 +86,14 @@ THolder<TDropPlan> CollectExternalObjects(TOperationContext& context, const TPat
             TPath childPath = current.Child(childName);
             
             if (childPath.Base()->IsTable()) {
-                LOG_I("DropPlan: Found backup table to drop: " << childPath.PathString());
                 plan->BackupTables.push_back(childPath);
             } else if (childPath.Base()->IsPQGroup()) {
-                LOG_I("DropPlan: Found backup topic to drop: " << childPath.PathString());
                 plan->BackupTopics.push_back(childPath);
             } else if (childPath.Base()->IsDirectory()) {
-                LOG_I("DropPlan: Traversing directory: " << childPath.PathString());
                 toVisit.push_back(childPath);
             }
         }
     }
-    
-    // Log summary with grouped information
-    ui32 totalCdcStreams = 0;
-    for (const auto& [tableId, tableStreams] : plan->CdcStreamsByTable) {
-        totalCdcStreams += tableStreams.StreamNames.size();
-        LOG_I("DropPlan: Table " << tableStreams.TablePath << " has " << tableStreams.StreamNames.size() << " CDC streams to drop");
-    }
-    
-    LOG_I("DropPlan: Collection complete - " << plan->CdcStreamsByTable.size() << " tables with " 
-          << totalCdcStreams << " CDC streams total, " 
-          << plan->BackupTables.size() << " backup tables, " 
-          << plan->BackupTopics.size() << " backup topics");
     
     return plan;
 }
@@ -147,17 +126,7 @@ TTxTransaction CreateTableDropTransaction(const TPath& tablePath) {
     return tableDropTx;
 }
 
-// TTxTransaction CreateTopicDropTransaction(const TPath& topicPath) {
-//     TTxTransaction topicDropTx;
-//     topicDropTx.SetWorkingDir(topicPath.Parent().PathString());
-//     topicDropTx.SetOperationType(NKikimrSchemeOp::ESchemeOpDropPersQueueGroup);
-    
-//     auto* drop = topicDropTx.MutableDrop();
-//     drop->SetName(topicPath.LeafName());
-    
-//     return topicDropTx;
-// }
-
+// TODO: replace UGLY scan
 // Clean up incremental restore state for a backup collection
 void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOperationContext& context, NIceDb::TNiceDb& db) {
     LOG_I("CleanupIncrementalRestoreState for backup collection pathId: " << backupCollectionPathId);
@@ -187,7 +156,7 @@ void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOper
         // Delete all shard progress records for this state
         auto shardProgressRowset = db.Table<Schema::IncrementalRestoreShardProgress>().Range().Select();
         if (!shardProgressRowset.IsReady()) {
-            return; // Will retry later
+            return;
         }
         
         while (!shardProgressRowset.EndOfSet()) {
@@ -332,6 +301,7 @@ class TDropBackupCollection : public TSubOperation {
         context.DbChanges.PersistPath(dstPath->ParentPathId);
     }
 
+    // TODO: replace UGLY scan
     bool HasActiveBackupOperations(const TPath& bcPath, TOperationContext& context) const {
         // Check if there are any active backup or restore operations for this collection
         const TPathId& bcPathId = bcPath.Base()->PathId;
@@ -418,8 +388,6 @@ public:
                 // Check for concurrent operations on the same path
                 // This catches the race condition where another drop operation is in progress
                 // but hasn't yet marked the path as "under deleting"
-                LOG_I("DropPlan: Checking for concurrent operations on path: " << dstPath.PathString() 
-                     << ", pathId: " << dstPath.Base()->PathId << ", currentTxId: " << OperationId.GetTxId());
                 
                 for (const auto& [txId, txState] : context.SS->TxInFlight) {
                     LOG_I("DropPlan: Found TxInFlight - txId: " << txId.GetTxId() 
@@ -428,7 +396,6 @@ public:
                          
                     if (txState.TargetPathId == dstPath.Base()->PathId && 
                         txId.GetTxId() != OperationId.GetTxId()) {
-                        LOG_I("DropPlan: Detected concurrent operation - failing with StatusMultipleModifications");
                         result->SetError(NKikimrScheme::StatusMultipleModifications, 
                                        TStringBuilder() << "Check failed: path: '" << dstPath.PathString() 
                                        << "', error: another operation is already in progress for this backup collection");
@@ -518,7 +485,7 @@ public:
             // Remove from in-memory state
             context.SS->IncrementalRestoreStates.erase(opId);
             
-            // Clean up related mappings using iterators
+            // Clean up related mappings
             auto txIt = context.SS->TxIdToIncrementalRestore.begin();
             while (txIt != context.SS->TxIdToIncrementalRestore.end()) {
                 if (txIt->second == opId) {
@@ -597,6 +564,7 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
             .IsCommonSensePath();
 
         if (!checks) {
+            // TODO: is there more clean way to write it?
             // Handle the special case where the path is being deleted
             if (dstPath.IsResolved() && dstPath.Base()->IsBackupCollection() && 
                 (dstPath.Base()->PlannedToDrop() || dstPath.Base()->Dropped())) {
@@ -612,7 +580,6 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
         }
     }
 
-    // Check for active backup/restore operations
     const TPathId& pathId = dstPath.Base()->PathId;
     
     // Check if any backup or restore operations are active for this collection
@@ -635,7 +602,6 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
 
     TVector<ISubOperation::TPtr> result;
 
-    // First, add incremental restore state cleanup operation
     auto cleanupOp = MakeSubOperation<TDropBackupCollection>(nextId, tx);
     result.push_back(cleanupOp);
 
@@ -649,10 +615,6 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
                 streamList << tableStreams.StreamNames[i];
             }
             
-            LOG_I("DropPlan: Creating multi-stream CDC drop operation for table '" << tableStreams.TablePath 
-                  << "' with " << tableStreams.StreamNames.size() << " streams: [" 
-                  << streamList << "]");
-            
             TTxTransaction cdcDropTx = CreateCdcDropTransaction(tableStreams, context);
             if (!CreateDropCdcStream(nextId, cdcDropTx, context, result)) {
                 return result;
@@ -661,21 +623,11 @@ TVector<ISubOperation::TPtr> CreateDropBackupCollectionCascade(TOperationId next
 
         // Create suboperations for backup tables
         for (const auto& tablePath : dropPlan->BackupTables) {
-            LOG_I("DropPlan: Creating table drop operation for: " << tablePath.PathString());
             TTxTransaction tableDropTx = CreateTableDropTransaction(tablePath);
             if (!CreateDropTable(nextId, tableDropTx, context, result)) {
                 return result;
             }
         }
-
-        // // Create suboperations for backup topics
-        // for (const auto& topicPath : dropPlan->BackupTopics) {
-        //     LOG_I("DropPlan: Creating topic drop operation for: " << topicPath.PathString());
-        //     TTxTransaction topicDropTx = CreateTopicDropTransaction(topicPath);
-        //     if (!CreateDropPQ(nextId, topicDropTx, context, result)) {
-        //         return result;
-        //     }
-        // }
     }
     
     return result;
