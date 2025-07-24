@@ -37,7 +37,7 @@ public:
 
         // Collect stream IDs to drop - works for both single and multiple
         TVector<TPathId> streamPathIds;
-        for (const auto& streamId : params.GetStreamPathId()) {  // repeated field iteration
+        for (const auto& streamId : params.GetStreamPathId()) {
             streamPathIds.push_back(TPathId::FromProto(streamId));
         }
 

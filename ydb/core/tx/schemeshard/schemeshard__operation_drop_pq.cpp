@@ -475,7 +475,6 @@ bool CreateDropPQ(TOperationId id, const TTxTransaction& tx, TOperationContext& 
     Y_UNUSED(context);
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup);
 
-    // Create the operation using the correct position in the result vector
     result.push_back(CreateDropPQ(NextPartId(id, result), tx));
     return true;
 }

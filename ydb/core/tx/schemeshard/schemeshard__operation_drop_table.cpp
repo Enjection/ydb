@@ -639,7 +639,6 @@ bool CreateDropTable(TOperationId id, const TTxTransaction& tx, TOperationContex
     Y_UNUSED(context);
     Y_ABORT_UNLESS(tx.GetOperationType() == NKikimrSchemeOp::EOperationType::ESchemeOpDropTable);
 
-    // Create the operation using the correct position in the result vector
     result.push_back(CreateDropTable(NextPartId(id, result), tx));
     return true;
 }

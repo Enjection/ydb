@@ -59,9 +59,9 @@ TVector<ISubOperation::TPtr> CreateDropContinuousBackup(TOperationId opId, const
 
             NKikimrSchemeOp::TDropCdcStream dropCdcStreamOp;
             dropCdcStreamOp.SetTableName(tableName);
-            dropCdcStreamOp.AddStreamName(child);  // Changed to AddStreamName for repeated field
+            dropCdcStreamOp.AddStreamName(child);
 
-            TVector<TPath> streamPaths = {streamPath};  // Convert to vector for new API
+            TVector<TPath> streamPaths = {streamPath};
             NCdc::DoDropStream(result, dropCdcStreamOp, opId, workingDirPath, tablePath, streamPaths, InvalidTxId, context);
         }
     }
