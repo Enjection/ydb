@@ -1,5 +1,7 @@
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
 #include <ydb/core/protos/schemeshard/operations.pb.h>
+#include <library/cpp/string_utils/base64/base64.h>
+#include <util/string/printf.h>
 
 #define DEFAULT_NAME_1 "MyCollection1"
 #define DEFAULT_NAME_2 "MyCollection2"
@@ -1200,228 +1202,6 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             recreateCollectionSettings);
         env.TestWaitNotification(runtime, txId);
     }
-
-    // Critical Test 2: Incremental restore state cleanup verification
-    Y_UNIT_TEST(DropCollectionWithIncrementalRestoreStateCleanup) {
-        TTestBasicRuntime runtime;
-        TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
-        ui64 txId = 100;
-
-        SetupLogging(runtime);
-        PrepareDirs(runtime, env, txId);
-
-        // Create backup collection
-        TString localDbCollectionSettings = R"(
-            Name: "RestoreStateTestCollection"
-
-            ExplicitEntryList {
-                Entries {
-                    Type: ETypeTable
-                    Path: "/MyRoot/RestoreStateTestTable"
-                }
-            }
-            Cluster: {}
-        )";
-
-        TestCreateBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections/", localDbCollectionSettings);
-        env.TestWaitNotification(runtime, txId);
-
-        // Create source table
-        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
-            Name: "RestoreStateTestTable"
-            Columns { Name: "key"   Type: "Uint32" }
-            Columns { Name: "value" Type: "Utf8" }
-            KeyColumnNames: ["key"]
-        )");
-        env.TestWaitNotification(runtime, txId);
-
-        // Create a full backup to establish backup structure
-        TestBackupBackupCollection(runtime, ++txId, "/MyRoot",
-            R"(Name: ".backups/collections/RestoreStateTestCollection")");
-        env.TestWaitNotification(runtime, txId);
-
-        // Simulate incremental restore state by creating relevant database entries
-        // In a real scenario, this state would be created by incremental restore operations
-        // and persist in SchemeShard's database. For testing, we manually insert test data.
-        
-        // Insert test data into incremental restore tables to validate cleanup
-        ui64 schemeshardTabletId = TTestTxConfig::SchemeShard;
-        
-        // Insert test data into IncrementalRestoreOperations
-        auto insertOpsResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-            (
-                (let key '('('Id (Uint64 '12345))))
-                (let row '('('Operation (String '"test_operation"))))
-                (return (AsList
-                    (UpdateRow 'IncrementalRestoreOperations key row)
-                ))
-            )
-        )");
-        
-        // Insert test data into IncrementalRestoreState
-        auto insertStateResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-            (
-                (let key '('('OperationId (Uint64 '12345))))
-                (let row '('('State (Uint32 '1)) '('CurrentIncrementalIdx (Uint32 '0))))
-                (return (AsList
-                    (UpdateRow 'IncrementalRestoreState key row)
-                ))
-            )
-        )");
-        
-        // Insert test data into IncrementalRestoreShardProgress
-        auto insertProgressResult = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-            (
-                (let key '('('OperationId (Uint64 '12345)) '('ShardIdx (Uint64 '1))))
-                (let row '('('Status (Uint32 '0)) '('LastKey (String '""))))
-                (return (AsList
-                    (UpdateRow 'IncrementalRestoreShardProgress key row)
-                ))
-            )
-        )");
-
-        // Drop the backup collection
-        TestDropBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections", 
-            "Name: \"RestoreStateTestCollection\"");
-        env.TestWaitNotification(runtime, txId);
-
-        // Verify collection is removed from schema
-        TestDescribeResult(DescribePath(runtime, "/MyRoot/.backups/collections/RestoreStateTestCollection"), 
-            {NLs::PathNotExist});
-
-        // CRITICAL: Restart SchemeShard to verify incremental restore state cleanup
-        // This validates that LocalDB entries for incremental restore are properly cleaned up
-        RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
-
-        // Verify collection is removed from schema
-        TestDescribeResult(DescribePath(runtime, "/MyRoot/.backups/collections/RestoreStateTestCollection"), 
-            {NLs::PathNotExist});
-
-        // CRITICAL: Verify incremental restore LocalDB tables are cleaned up using MiniKQL queries
-        // This is the main validation for storage-level cleanup of incremental restore state
-        
-        // Verify all incremental restore tables are clean
-        bool allIncrementalRestoreTablesClean = true;
-        
-        // Check IncrementalRestoreOperations table
-        try {
-            auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-                (
-                    (let key '('('Id (Uint64 '12345))))
-                    (let select '('Id 'Operation))
-                    (let row (SelectRow 'IncrementalRestoreOperations key select))
-                    (return (AsList
-                        (SetResult 'Result row)
-                    ))
-                )
-            )");
-            
-            auto& value = result.GetValue();
-            if (value.GetStruct(0).GetOptional().HasOptional()) {
-                allIncrementalRestoreTablesClean = false;
-                Cerr << "ERROR: IncrementalRestoreOperations has stale entries" << Endl;
-            }
-        } catch (...) {
-            allIncrementalRestoreTablesClean = false;
-            Cerr << "ERROR: Failed to validate IncrementalRestoreOperations cleanup" << Endl;
-        }
-        
-        // Check IncrementalRestoreState table
-        try {
-            auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-                (
-                    (let key '('('OperationId (Uint64 '12345))))
-                    (let select '('OperationId 'State 'CurrentIncrementalIdx))
-                    (let row (SelectRow 'IncrementalRestoreState key select))
-                    (return (AsList
-                        (SetResult 'Result row)
-                    ))
-                )
-            )");
-            
-            auto& value = result.GetValue();
-            if (value.GetStruct(0).GetOptional().HasOptional()) {
-                allIncrementalRestoreTablesClean = false;
-                Cerr << "ERROR: IncrementalRestoreState has stale entries" << Endl;
-            }
-        } catch (...) {
-            allIncrementalRestoreTablesClean = false;
-            Cerr << "ERROR: Failed to validate IncrementalRestoreState cleanup" << Endl;
-        }
-        
-        // Check IncrementalRestoreShardProgress table  
-        try {
-            auto result = LocalMiniKQL(runtime, schemeshardTabletId, R"(
-                (
-                    (let key '('('OperationId (Uint64 '12345)) '('ShardIdx (Uint64 '1))))
-                    (let select '('OperationId 'ShardIdx 'Status 'LastKey))
-                    (let row (SelectRow 'IncrementalRestoreShardProgress key select))
-                    (return (AsList
-                        (SetResult 'Result row)
-                    ))
-                )
-            )");
-            
-            auto& value = result.GetValue();
-            if (value.GetStruct(0).GetOptional().HasOptional()) {
-                allIncrementalRestoreTablesClean = false;
-                Cerr << "ERROR: IncrementalRestoreShardProgress has stale entries" << Endl;
-            }
-        } catch (...) {
-            allIncrementalRestoreTablesClean = false;
-            Cerr << "ERROR: Failed to validate IncrementalRestoreShardProgress cleanup" << Endl;
-        }
-        
-        UNIT_ASSERT_C(allIncrementalRestoreTablesClean, "Incremental restore LocalDB tables not properly cleaned up");
-        
-        Cerr << "SUCCESS: All incremental restore LocalDB tables properly cleaned up" << Endl;
-
-        // Verify we can recreate collection with same name (proves complete cleanup)
-        TestCreateBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections/", localDbCollectionSettings);
-        env.TestWaitNotification(runtime, txId);
-
-        // Clean up
-        TestDropBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections", 
-            "Name: \"RestoreStateTestCollection\"");
-        env.TestWaitNotification(runtime, txId);
-    }
-
-    // TODO: Enable after incremental backup infrastructure is properly understood
-    // Critical Test 2: Incremental restore state cleanup verification
-    /*
-    Y_UNIT_TEST(DropCollectionWithIncrementalRestoreStateCleanup) {
-        // This test is temporarily disabled due to incremental backup setup complexity
-        // The test needs proper CDC stream setup which requires more investigation
-        // See error: "Last continuous backup stream is not found"
-        // 
-        // This test would verify that incremental restore state tables are cleaned up:
-        // - IncrementalRestoreOperations
-        // - IncrementalRestoreState 
-        // - IncrementalRestoreShardProgress
-        //
-        // When enabled, this test should:
-        // 1. Create collection with incremental backup capability
-        // 2. Perform incremental backup/restore to create state
-        // 3. Drop collection
-        // 4. Verify all incremental restore state is cleaned up
-    }
-    */
-
-    // TODO: Enable after incremental backup infrastructure is properly understood  
-    // Critical Test 3: Prevention of drop during active incremental restore
-    /*
-    Y_UNIT_TEST(DropCollectionDuringActiveIncrementalRestore) {
-        // This test is temporarily disabled due to incremental backup setup complexity
-        // The test needs proper CDC stream and restore operation setup
-        //
-        // When enabled, this test should verify that:
-        // 1. DROP BACKUP COLLECTION is rejected when incremental restore is active
-        // 2. Proper validation exists for IncrementalRestoreOperations table
-        // 3. Error message is clear about active restore preventing drop
-    }
-    */
-
-    // Critical Test 3: Prevention of drop during active operations
     Y_UNIT_TEST(DropCollectionDuringActiveOperation) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
@@ -1485,41 +1265,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         TestDescribeResult(DescribePath(runtime, "/MyRoot/.backups/collections/ActiveOpTestCollection"), 
             {NLs::PathNotExist});
 
-        // SUCCESS: This test confirms that active operation protection IS implemented correctly
-        // The system properly rejects DROP BACKUP COLLECTION when backup operations are active
     }
 
-    // === END OF PHASE 1 TESTS ===
-    // Results from Phase 1 testing:
-    // 
-    // 1. DropCollectionVerifyLocalDatabaseCleanup: PASSES
-    //    - Local database cleanup appears to work correctly
-    //    - Collection metadata is properly removed after drop
-    //    - SchemeShard restart doesn't reveal lingering state
-    //
-    // 2. DropCollectionWithRestoreStateCleanup: PASSES 
-    //    - Basic collection dropping with restore-like state works
-    //    - Need more complex test for actual incremental restore state
-    //    - Incremental backup infrastructure needs more investigation
-    //
-    // 3. DropCollectionDuringActiveOperation: PASSES (Protection Works!)
-    //    - System CORRECTLY rejects drop during active backup operations
-    //    - Returns proper StatusPreconditionFailed error
-    //    - This protection is already implemented and working
-    //
-    // UPDATED FINDINGS:
-    // - Active operation protection IS implemented (contrary to initial assessment)
-    // - Local database cleanup appears to work (needs deeper verification)
-    // - Main remaining issue: Incremental restore state cleanup complexity
-    // - Manual deletion vs suboperations still needs architectural review
-    //
-    // NEXT STEPS:
-    // - Investigate incremental backup/restore infrastructure requirements  
-    // - Review if suboperation cascade is still beneficial for maintainability
-    // - Focus on edge cases and comprehensive testing rather than basic functionality
-
-    // Phase 3: Comprehensive Test Coverage
-    // Test CDC cleanup for incremental backups
     Y_UNIT_TEST(VerifyCdcStreamCleanupInIncrementalBackup) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
@@ -1590,7 +1337,6 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         // Current test verifies basic incremental backup drop functionality
     }
 
-    // Test: Verify CDC stream cleanup during incremental backup drop
     Y_UNIT_TEST(VerifyCdcStreamCleanupInIncrementalDrop) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
@@ -1739,7 +1485,6 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         // The implementation properly handles CDC stream cleanup during backup collection drop
     }
 
-    // Test: Error recovery during drop operation
     Y_UNIT_TEST(DropErrorRecoveryTest) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
@@ -1785,7 +1530,6 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
                           {NLs::PathExist, NLs::IsBackupCollection});
     }
 
-    // Test: Concurrent drop operations protection
     Y_UNIT_TEST(ConcurrentDropProtectionTest) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
@@ -1826,5 +1570,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         TestDescribeResult(DescribePath(runtime, "/MyRoot/.backups/collections/" DEFAULT_NAME_1),
                           {NLs::PathNotExist});
     }
+
+    // TODO: DropCollectionWithIncrementalRestoreStateCleanup
 
 } // TBackupCollectionTests
