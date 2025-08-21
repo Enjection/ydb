@@ -1,8 +1,20 @@
-# Backup collections
+# Backup Collections (Legacy Location)
 
-Efficient incremental backup and point-in-time recovery for YDB tables.
+{% note info %}
 
-## Quick start
+This documentation has been moved and consolidated to provide better organization. The backup collections documentation is now available in a centralized structure:
+
+- **[Concepts](../../../../concepts/backup-collections.md)** - Core concepts and architecture
+- **[YQL Syntax Reference](../../../../yql/reference/backup-collections.md)** - Complete SQL command documentation  
+- **[Operations Guide](../../../../operations/backup-collections.md)** - Practical procedures and examples
+- **[CLI Reference](../../../../reference/ydb-cli/backup-collections.md)** - Command-line tools and automation
+- **[Common Recipes](../../../../recipes/backup-collections.md)** - Real-world usage scenarios
+
+{% endnote %}
+
+## Quick Start (Redirected Content)
+
+For the complete quick start guide, see the [new centralized documentation](../../../../concepts/backup-collections.md#quick-start).
 
 ```sql
 -- 1. Create collection
@@ -17,16 +29,13 @@ BACKUP `my_backups`;
 BACKUP `my_backups` INCREMENTAL;
 ```
 
-## Key features
+## New Documentation Structure
 
-- **Incremental backups** - Store only changes, reducing storage requirements.
-- **Point-in-time recovery** - Restore to any backup point in the chain.
-- **SQL API** - Manage backups with familiar SQL commands.
+The backup collections documentation has been reorganized to eliminate duplication and improve usability:
 
-## Documentation
+- **Single source of truth**: Each piece of information exists in one location
+- **Better organization**: Clear separation between concepts, reference, and practical guides  
+- **Comprehensive coverage**: All aspects of backup collections documented
+- **Easy maintenance**: Updates only need to be made once
 
-- [Concepts](concepts.md) — Architecture, backup types, and storage backends.
-- [Operations](operations.md) — Complete guide to creating, managing, and restoring.
-- [SQL API](sql-api.md) — SQL command reference.
-- [YQL Syntax Reference](../../../../yql/reference/syntax/backup-collections.md) — Complete SQL syntax documentation.
-- [Operation Monitoring](../../operation-list.md) — Monitor backup operations progress.
+**Please use the [new centralized documentation](../../../../concepts/backup-collections.md) for complete and up-to-date information.**

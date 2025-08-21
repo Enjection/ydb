@@ -1,81 +1,48 @@
-# Backup collections operations
+# Backup Collections Operations (Legacy Location)
 
-This section covers all operations for creating, managing, and restoring from [backup collections](../../../../concepts/backup/collections.md). For complete command syntax reference, see the [YQL backup collections syntax](../../../../yql/reference/syntax/backup-collections.md).
+{% note info %}
 
-## Creating collections {#creating-collections}
+This documentation has been moved and consolidated. Please refer to the [centralized backup collections operations guide](../../../../operations/backup-collections.md) for complete and up-to-date operational documentation.
 
-### Create a collection with SQL
+{% endnote %}
 
-Use the SQL API to create a new backup collection. For detailed syntax, see [SQL API CREATE BACKUP COLLECTION](sql-api.md#create-backup-collection).
+## New Documentation Structure
 
-**Basic example:**
+The backup collections operations documentation is now available at:
+**[Operations Guide](../../../../operations/backup-collections.md)**
+
+This new location provides comprehensive coverage of:
+- **Creating backup collections** - Complete setup procedures
+- **Taking backups** - Full and incremental backup operations  
+- **Monitoring operations** - Progress tracking and status checking
+- **Managing collections** - Collection lifecycle and maintenance
+- **Retention and cleanup** - Safe backup removal strategies
+- **Validation and verification** - Backup integrity checking
+- **Recovery and restoration** - Complete restore procedures
+
+## Quick Reference
+
+For immediate reference, basic operations:
 
 ```sql
+-- Create collection
 CREATE BACKUP COLLECTION `shop_backups`
     ( TABLE `/Root/test1/orders`, TABLE `/Root/test1/products` )
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
-```
 
-## Taking backups {#taking-backups}
-
-### Initial full backup
-
-After creating a collection, take the initial full backup:
-
-```sql
+-- Take full backup
 BACKUP `shop_backups`;
-```
 
-The first backup without the `INCREMENTAL` keyword creates a full backup containing all data from the specified tables.
-
-### Incremental backups
-
-Once you have a full backup, you can take incremental backups:
-
-```sql
+-- Take incremental backup
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-**Best practices:**
-
-- Take incremental backups on a regular schedule (daily, hourly, etc.).
-- Keep backup chains reasonably short (7-14 incremental backups recommended).
-- Monitor backup completion and chain integrity.
-
-For detailed guidelines and chain management, see [Chain validity rules](concepts.md#chain-validity-rules).
-
-## Monitoring operations {#monitoring-operations}
-
-All backup operations run in the background and can be monitored using the [operation list](../../operation-list.md) command:
-
+Monitor operations:
 ```bash
 ydb operation list incbackup
 ```
 
-This command shows all incremental backup operations and their current status.
-
-### Backup scheduling
-
-For automated backups, you can schedule SQL commands:
-
-```sql
--- Example daily schedule
--- Full backup every Sunday
-BACKUP `shop_backups`;
-
--- Incremental backups Monday through Saturday
-BACKUP `shop_backups` INCREMENTAL;
-```
-
-## Managing collections {#managing-collections}
-
-### List collections in schema
-
-Backup collections appear as directories in the database schema. You can browse them using standard schema navigation:
-
-```bash
-ydb scheme ls .backups/collections/
-```
+**Please use the [new centralized operations guide](../../../../operations/backup-collections.md) for complete step-by-step procedures.**
 
 This shows all backup collections as directories in the `.backups/collections/` path.
 

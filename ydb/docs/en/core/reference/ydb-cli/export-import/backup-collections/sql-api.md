@@ -1,55 +1,39 @@
-# SQL API: Backup collections
+# SQL API: Backup Collections (Legacy Location)
 
-This section provides guidance for using SQL commands with [backup collections](concepts.md). For complete syntax reference, see [Backup collection commands](../../../../yql/reference/syntax/backup-collections.md) in the YQL reference.
+{% note info %}
 
-## Quick reference
+This documentation has been moved and consolidated. Please refer to the [centralized YQL syntax reference](../../../../yql/reference/backup-collections.md) for complete and up-to-date SQL command documentation.
 
-The main SQL commands for backup collections are:
+{% endnote %}
 
-- `CREATE BACKUP COLLECTION` - Creates a new backup collection.
-- `BACKUP` - Creates a backup (full or incremental).  
-- `DROP BACKUP COLLECTION` - Removes a collection and all backups.
+## New Documentation Structure
 
-For detailed syntax, parameters, and examples, refer to the [YQL syntax reference](../../../../yql/reference/syntax/backup-collections.md).
+The backup collections SQL API documentation is now available at:
+**[YQL Syntax Reference](../../../../yql/reference/backup-collections.md)**
 
-## Using SQL commands with backup collections
+This new location provides:
+- **Complete SQL syntax** - All commands with full parameter documentation
+- **Comprehensive examples** - Practical usage scenarios
+- **Error handling** - Common errors and solutions
+- **Best practices** - SQL operation guidelines
+- **Parameter reference** - All options and configurations
 
-### Connection and execution
+## Quick Reference
 
-Execute backup collection commands through any SQL interface that supports YQL:
+For immediate reference, the main SQL commands:
 
-- **YDB CLI**: Use `ydb yql` command
-- **SDK connections**: Execute as standard SQL queries
-- **Web UI**: Run commands in the query editor
+- `CREATE BACKUP COLLECTION` - Creates a new backup collection
+- `BACKUP` - Creates a backup (full or incremental)  
+- `DROP BACKUP COLLECTION` - Removes a collection and all backups
 
-### Best practices for SQL operations
+**Example:**
+```sql
+CREATE BACKUP COLLECTION `my_collection`
+    ( TABLE `/Root/db/table1` )
+WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 
-- **Use quoted identifiers**: Always quote collection names with backticks
-- **Specify absolute paths**: Use full table paths starting with `/Root/`
-- **Monitor operations**: Check operation status using [operation list](../../operation-list.md) commands
-- **Plan retention**: Consider backup chain dependencies before deletion
-
-## Query backup information
-
-Browse collections through the database schema:
-
-```bash
-# List all collections
-ydb scheme ls .backups/collections/
-
-# View specific collection structure  
-ydb scheme ls .backups/collections/shop_backups/
+BACKUP `my_collection`;
+BACKUP `my_collection` INCREMENTAL;
 ```
 
-For monitoring backup operations, use the [operation list](../../operation-list.md) command:
-
-```bash
-# Monitor backup operations
-ydb operation list incbackup
-```
-
-## Next steps
-
-- [Complete YQL syntax reference for backup collections](../../../../yql/reference/syntax/backup-collections.md).
-- [Learn about backup collection concepts](concepts.md).
-- [Explore all operations and management tasks](operations.md).
+**Please use the [new centralized YQL reference](../../../../yql/reference/backup-collections.md) for complete syntax documentation.**

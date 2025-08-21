@@ -1,8 +1,8 @@
-# Backup collection commands
+# Backup Collection Commands
 
-YQL supports SQL commands for managing [backup collections](../../../concepts/backup/collections.md). These commands allow you to create, manage, and take backups of database tables using a declarative SQL syntax.
+YQL supports SQL commands for managing [backup collections](../../concepts/backup-collections.md). These commands allow you to create, manage, and take backups of database tables using a declarative SQL syntax.
 
-For practical usage examples and operational guidance, see the [backup collections operations guide](../../../reference/ydb-cli/export-import/backup-collections/operations.md).
+For practical usage examples and operational guidance, see the [backup collections operations guide](../../reference/ydb-cli/backup-collections.md).
 
 ## CREATE BACKUP COLLECTION {#create-backup-collection}
 
@@ -103,6 +103,39 @@ This operation is irreversible and will delete all backups in the collection. En
 
 {% endnote %}
 
+### Example
+
+```sql
+DROP BACKUP COLLECTION `old_backups`;
+```
+
+## ALTER BACKUP COLLECTION {#alter-backup-collection}
+
+{% note info %}
+
+Currently, backup collections cannot be modified after creation. To change table membership or settings, you must create a new collection.
+
+{% endnote %}
+
+## DESCRIBE BACKUP COLLECTION {#describe-backup-collection}
+
+View information about a backup collection through schema browsing:
+
+```bash
+# List all collections
+ydb scheme ls .backups/collections/
+
+# View specific collection structure  
+ydb scheme ls .backups/collections/shop_backups/
+```
+
+For monitoring backup operations, use the [operation list](../../reference/ydb-cli/operation-list.md) command:
+
+```bash
+# Monitor backup operations
+ydb operation list incbackup
+```
+
 ## Limitations and considerations {#limitations}
 
 ### Current limitations
@@ -111,7 +144,24 @@ This operation is irreversible and will delete all backups in the collection. En
 - **Collection modification**: Cannot add or remove tables from existing collections.  
 - **Concurrent backups**: Multiple backup operations on the same collection may conflict.
 
+### Best practices
+
+- **Use quoted identifiers**: Always quote collection names with backticks
+- **Specify absolute paths**: Use full table paths starting with `/Root/`
+- **Monitor operations**: Check operation status using [operation list](../../reference/ydb-cli/operation-list.md) commands
+- **Plan retention**: Consider backup chain dependencies before deletion
+
+## Error handling
+
+Common errors and solutions:
+
+- **Collection already exists**: Choose a different name or drop the existing collection
+- **Table not found**: Verify table paths are correct and accessible
+- **Permission denied**: Ensure proper access rights to tables and backup storage
+- **Storage unavailable**: Check cluster status and storage backend availability
+
 ## See also
 
-- [Backup collections concepts](../../../concepts/backup/collections.md).
-- [Backup collections operations guide](../../../reference/ydb-cli/export-import/backup-collections/operations.md).
+- [Backup collections concepts](../../concepts/backup-collections.md) - Core concepts and architecture
+- [Backup collections operations](../../reference/ydb-cli/backup-collections.md) - Practical operations guide
+- [Backup collections recipes](../../recipes/backup-collections.md) - Common use cases and examples

@@ -1,45 +1,26 @@
-# Backup collections concepts
+# Backup Collections Concepts (Legacy Location)
 
-This section explains operational details about backup collections, storage backends, and chain management. For architectural overview and core concepts, see [Backup collections](../../../../concepts/backup/collections.md).
+{% note info %}
 
-## Backup chain validation and integrity {#backup-chains-integrity}
+This documentation has been moved and consolidated. Please refer to the [centralized backup collections concepts](../../../../concepts/backup-collections.md) for complete and up-to-date conceptual documentation.
 
-When working with backup collections, understanding chain dependencies is critical for successful operations:
+{% endnote %}
 
-### Chain validity rules {#chain-validity-rules}
+## New Documentation Structure
 
-- **Sequential dependency**: Each incremental backup depends on all previous backups in the chain.
-- **Deletion constraints**: Removing any backup in the middle of a chain breaks the chain for subsequent backups.
-- **Restoration requirements**: To restore from an incremental backup, you need the full backup plus all preceding incremental backups.
+The backup collections concepts documentation is now available at:
+**[Core Concepts Documentation](../../../../concepts/backup-collections.md)**
 
-### Chain management best practices
+This new location provides:
+- **Comprehensive architecture overview** - How backup collections work internally
+- **Complete storage structure** - Directory layout and organization  
+- **Chain management details** - Backup chain validation and integrity
+- **Storage backends** - Current and future storage options
+- **When to use guidance** - Ideal scenarios and alternatives
 
-- **Monitor chain length**: Keep backup chains reasonably short (7-14 incremental backups recommended).
-- **Plan retention carefully**: Always consider chain dependencies when cleaning up old backups.
-- **Verify before deletion**: Use schema browsing to understand backup structure before removing backups.
+## Quick Reference
 
-## Storage backends {#storage-backends}
-
-### Cluster storage
-
-Stores backups within the YDB cluster itself (current implementation).
-
-```sql
-WITH ( STORAGE = 'cluster' )
-```
-
-For external storage (filesystem, S3), use [export/import operations](operations.md#restore-operations).
-
-## Backup chains and integrity {#backup-chains-integrity}
-
-### Chain structure
-
-A backup chain consists of:
-
-1. **One full backup** (the chain foundation)
-2. **Zero or more incremental backups** (applied in chronological order)
-
-### Chain validity rules {#chain-validity-rules}
+For immediate reference on chain validity rules:
 
 {% note alert %}
 
@@ -47,7 +28,12 @@ Never delete full backups that have dependent incremental backups. Deleting a fu
 
 {% endnote %}
 
-**Best practices:**
+**Chain management best practices:**
+- Keep backup chains reasonably short (7-14 incremental backups recommended)
+- Plan retention carefully and consider chain dependencies
+- Verify backup structure before deletion using schema browsing
+
+**Please use the [new centralized concepts documentation](../../../../concepts/backup-collections.md) for complete information.**
 
 - Apply retention policies carefully to preserve chain validity.
 - Verify backup chains periodically before critical operations.
