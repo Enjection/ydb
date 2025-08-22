@@ -1,6 +1,6 @@
 # Backup Collections Operations
 
-This guide covers all practical operations for creating, managing, and restoring from backup collections. For conceptual information, see [Backup collections concepts](../../concepts/backup-collections.md). For complete command syntax, see the [YQL syntax reference](../../yql/reference/syntax/backup-collections.md).
+This guide covers all practical operations for creating, managing, and restoring from backup collections. For conceptual information, see [Backup collections concepts](../../concepts/backup-collections.md).
 
 ## Creating backup collections {#creating-collections}
 
@@ -59,22 +59,22 @@ BACKUP `shop_backups` INCREMENTAL;
 
 ### Backup scheduling
 
-Implement regular backup schedules based on your requirements:
+Implement regular backup schedules based on your requirements. Note that scheduling must be implemented externally using cron or similar tools.
 
 **Daily full backups:**
 
 ```sql
--- Run daily at 2 AM
+-- Example: Run daily at 2 AM (requires external scheduling)
 BACKUP `shop_backups`;
 ```
 
 **Hourly incrementals with weekly full backups:**
 
 ```sql
--- Sunday: Full backup
+-- Example: Sunday: Full backup (requires external scheduling)
 BACKUP `shop_backups`;
 
--- Monday-Saturday: Incremental backups every hour
+-- Example: Monday-Saturday: Incremental backups (requires external scheduling)
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
@@ -84,6 +84,8 @@ BACKUP `shop_backups` INCREMENTAL;
 - **Avoid peak hours**: Don't run backups during high-traffic periods
 - **Monitor performance impact**: Observe backup duration and system load
 - **Stagger collections**: If you have multiple collections, stagger their backup times
+
+Note: Backup scheduling must be implemented using external tools like cron, as YDB does not provide built-in scheduling.
 
 ## Monitoring backup operations {#monitoring}
 
@@ -330,10 +332,9 @@ To restore to a specific point in time:
 - **Multiple collections**: Separate collections for different applications
 - **Documentation**: Maintain documentation of backup procedures
 
-### Monitoring and alerting
+### Monitoring and maintenance
 
-- **Automated monitoring**: Set up alerts for backup failures
-- **Regular validation**: Periodically test backup restoration
+- **Manual validation**: Periodically test backup restoration
 - **Performance tracking**: Monitor backup duration and resource usage
 - **Storage monitoring**: Track backup storage growth
 
@@ -347,6 +348,4 @@ To restore to a specific point in time:
 ## See also
 
 - [Backup collections concepts](../../concepts/backup-collections.md) - Core concepts and architecture
-- [YQL syntax reference](../../yql/reference/syntax/backup-collections.md) - Complete command documentation
 - [Common recipes](../../recipes/backup-collections.md) - Real-world usage examples
-- [CLI reference](../../reference/ydb-cli/backup-collections.md) - Command-line tools and options

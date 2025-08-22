@@ -8,14 +8,13 @@ A backup collection is a named set of coordinated backups for selected database 
 
 - **Efficiency**: Incremental backups capture only changes since the previous backup
 - **Organization**: Related backups are grouped into logical collections
-- **Recovery flexibility**: Enables point-in-time recovery to any backup in the chain
-- **Automation**: SQL-based API for backup management and scheduling
+- **Recovery flexibility**: Enables recovery using any backup in the chain
 
 ## Core concepts {#core-concepts}
 
 ### Backup collection
 
-A named container that groups backups for a specific set of database tables. Collections ensure that all included tables are backed up consistently and can be restored together to the same point in time.
+A named container that groups backups for a specific set of database tables. Collections ensure that all included tables are backed up consistently.
 
 ### Full backup
 
@@ -35,9 +34,8 @@ An ordered sequence of backups starting with a full backup followed by zero or m
 
 1. **Collection creation**: Define which tables to include and storage settings
 2. **Initial full backup**: Create baseline snapshot of all tables
-3. **Regular incremental backups**: Capture ongoing changes automatically or on-demand
-4. **Chain management**: Monitor backup chains and manage retention policies
-5. **Point-in-time recovery**: Restore to any backup point in the chain
+3. **Regular incremental backups**: Capture ongoing changes on-demand
+4. **Chain management**: Monitor backup chains and manage retention manually
 
 ### Storage structure {#storage-structure}
 
@@ -80,12 +78,11 @@ Future versions may support automatic export to external storage systems for lon
 
 ### Background operations {#background-operations}
 
-All backup and restore operations run asynchronously in the background, allowing you to:
+All backup operations run asynchronously in the background, allowing you to:
 
 - Continue normal database operations during backups
 - Monitor progress through the long operations API
 - Handle large datasets without blocking other activities
-- Schedule backups for optimal performance windows
 
 ## How backup collections work internally {#how-they-work}
 
@@ -122,7 +119,6 @@ Backup collections are the foundation for incremental backup functionality:
 - **Collections enable incrementals**: You must have a collection to create incremental backups
 - **Chain management**: Collections manage the sequence of full and incremental backups
 - **Consistency**: All tables in a collection are backed up consistently
-- **Recovery coordination**: Restoration applies all backups in correct order
 
 Without backup collections, only full export/import operations are available.
 
@@ -132,9 +128,7 @@ Without backup collections, only full export/import operations are available.
 
 - Production environments requiring regular backup schedules
 - Large datasets where incremental changes are much smaller than total data size
-- Point-in-time recovery requirements
-- Disaster recovery planning with RTO/RPO constraints
-- Automated backup workflows
+- Scenarios requiring backup chains for efficiency
 
 **Consider traditional export/import for:**
 
@@ -150,7 +144,6 @@ Without backup collections, only full export/import operations are available.
 
 - **Storage efficiency**: Incremental backups use significantly less storage
 - **Faster backups**: Only changes are processed after initial full backup
-- **Point-in-time recovery**: Restore to any backup point in the chain
 - **SQL interface**: Familiar SQL commands for backup management
 - **Background processing**: Non-blocking operations
 - **Chain integrity**: Automatic validation and consistency checks
@@ -165,12 +158,10 @@ Without backup collections, only full export/import operations are available.
 ## Next steps {#next-steps}
 
 - **Get started**: Follow the [operations guide](../maintenance/manual/backup-collections.md) for step-by-step instructions
-- **Learn commands**: Review the [YQL syntax reference](../yql/reference/syntax/backup-collections.md) for complete command documentation
 - **See examples**: Explore [common scenarios](../recipes/backup-collections.md) and best practices
 
 ## See also
 
 - [General backup concepts](backup.md) - Overview of all backup approaches in YDB
-- [YQL backup commands](../yql/reference/syntax/backup-collections.md) - Complete SQL syntax reference
 - [Operations guide](../maintenance/manual/backup-collections.md) - Practical instructions and examples
 - [Common recipes](../recipes/backup-collections.md) - Real-world usage scenarios
