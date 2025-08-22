@@ -72,16 +72,16 @@ Backups are stored within the YDB cluster itself, providing:
 WITH ( STORAGE = 'cluster' )
 ```
 
-#### External storage (future)
+#### External storage
 
-Future versions may support automatic export to external storage systems for long-term archival. Currently, use [export/import operations](../reference/ydb-cli/export-import/index.md) for external storage.
+Currently, external storage requires manual export/import operations. Use [export/import operations](../reference/ydb-cli/export-import/index.md) to move backups to external storage systems.
 
 ### Background operations {#background-operations}
 
 All backup operations run asynchronously in the background, allowing you to:
 
 - Continue normal database operations during backups
-- Monitor progress through the long operations API
+- Monitor progress using YDB CLI operation commands
 - Handle large datasets without blocking other activities
 
 ## How backup collections work internally {#how-they-work}
@@ -153,7 +153,6 @@ Without backup collections, only full export/import operations are available.
 - **Cluster storage only**: External storage requires manual export/import
 - **No collection modification**: Cannot add/remove tables after creation
 - **Single storage backend**: Only 'cluster' storage supported via SQL
-- **Concurrent limitations**: Multiple backups on same collection may conflict
 
 ## Next steps {#next-steps}
 

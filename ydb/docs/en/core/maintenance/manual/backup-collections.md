@@ -4,6 +4,23 @@ This guide covers all practical operations for creating, managing, and restoring
 
 ## Creating backup collections {#creating-collections}
 
+### SQL Syntax Reference
+
+```sql
+-- CREATE BACKUP COLLECTION syntax
+CREATE BACKUP COLLECTION `collection_name`
+    ( TABLE `table_path` [, TABLE `table_path` ...] )
+WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
+
+-- BACKUP syntax
+BACKUP `collection_name` [INCREMENTAL];
+
+-- DROP BACKUP COLLECTION syntax
+DROP BACKUP COLLECTION `collection_name`;
+```
+
+For detailed syntax, see [YQL reference documentation](../reference/yql/reference/index.md).
+
 ### Basic collection creation
 
 Create a backup collection using SQL commands. The collection defines which tables to include and storage settings:
@@ -57,7 +74,7 @@ Once you have a full backup, create incremental backups to capture changes:
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-### Backup scheduling
+### Backup timing considerations
 
 Implement regular backup schedules based on your requirements. Note that scheduling must be implemented externally using cron or similar tools.
 
@@ -78,16 +95,37 @@ BACKUP `shop_backups`;
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-### Best practices for backup timing
+### Backup timing considerations
 
-- **Schedule during low activity**: Take backups during maintenance windows
-- **Avoid peak hours**: Don't run backups during high-traffic periods
-- **Monitor performance impact**: Observe backup duration and system load
-- **Stagger collections**: If you have multiple collections, stagger their backup times
+- **External scheduling required**: YDB does not provide built-in scheduling. Use cron or similar tools
+- **Background operations**: Backups run asynchronously and don't block database operations
+- **Multiple collections**: Can run backups on different collections independently
 
 Note: Backup scheduling must be implemented using external tools like cron, as YDB does not provide built-in scheduling.
 
 ## Monitoring backup operations {#monitoring}
+
+### Monitoring backup operations
+
+```bash
+# Check backup operation status
+ydb operation list incbackup
+
+# Get details for specific operation
+ydb operation get <operation-id>
+
+# Cancel running operation if needed
+ydb operation cancel <operation-id>
+
+# Browse backup collections
+ydb scheme ls .backups/collections/
+
+# List backups in a collection
+ydb scheme ls .backups/collections/production_backups/
+
+# Get backup metadata
+ydb scheme describe .backups/collections/production_backups/backup_20240315_120000/
+```
 
 ### Check operation status
 
@@ -328,7 +366,7 @@ To restore to a specific point in time:
 ### Backup strategy
 
 - **Regular schedule**: Establish consistent backup timing
-- **Chain management**: Keep backup chains reasonably short (7-14 incrementals)
+- **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains
 - **Multiple collections**: Separate collections for different applications
 - **Documentation**: Maintain documentation of backup procedures
 

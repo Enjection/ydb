@@ -207,7 +207,7 @@ ydb tools restore -i /tmp/test_restore -d /Root/test_restore_verification
 
 ### Backup strategy
 
-- **Keep backup chains short**: Limit incremental chains to 7-14 backups before taking new full backup
+- **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains
 - **Separate collections by service**: Use different collections for different applications/services
 - **Regular full backups**: Take full backups weekly or bi-weekly
 - **Test regularly**: Periodically verify backups can be restored

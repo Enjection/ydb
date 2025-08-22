@@ -20,6 +20,20 @@ For local database backups and development workflows:
 - **Characteristics**: Designed for local filesystem operations with moderate data volumes.
 - **Storage**: Filesystem.
 
+## Backup collections {#backup-collections}
+
+For production workloads requiring incremental backups:
+
+- **Use cases**: Production environments, large datasets, regular backup schedules
+- **Characteristics**: Full and incremental backups organized in collections
+- **Storage**: Currently supports cluster storage only
+- **Operations**: Asynchronous background operations
+
+Learn more:
+- [Backup collections concepts](backup-collections.md) - Architecture and concepts
+- [Operations guide](../maintenance/manual/backup-collections.md) - Practical operations
+- [Common recipes](../recipes/backup-collections.md) - Usage examples
+
 Learn more:
 
 - [Export and import reference](../reference/ydb-cli/export-import/index.md) - Export/import operations.
