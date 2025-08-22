@@ -9,14 +9,15 @@ This guide provides practical examples and recipes for common backup collection 
 Set up a simple daily backup routine with weekly full backups:
 
 ```sql
--- Sunday: Full backup
-CREATE BACKUP COLLECTION IF NOT EXISTS `daily_production_backups`
+-- Create the collection first (only needs to be done once)
+CREATE BACKUP COLLECTION `daily_production_backups`
     ( TABLE `/Root/production/users`
     , TABLE `/Root/production/orders`
     , TABLE `/Root/production/products`
     )
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 
+-- Take backups on a schedule:
 -- Sunday (day 0): Full backup
 BACKUP `daily_production_backups`;
 
@@ -173,7 +174,7 @@ replicate_to_regions() {
         # Create collection in backup region if needed
         ydb -e "grpc://$region.ydb.cluster:2136" \
             -d "/Root/backup" \
-            yql -s "CREATE BACKUP COLLECTION IF NOT EXISTS \`$COLLECTION_NAME\`
+            yql -s "CREATE BACKUP COLLECTION \`$COLLECTION_NAME\`
                 ( TABLE \`/Root/backup/users\`
                 , TABLE \`/Root/backup/orders\`
                 , TABLE \`/Root/backup/products\`
@@ -445,7 +446,7 @@ setup_dr_collection() {
     
     # Primary cluster collection
     ydb -e "$PRIMARY_CLUSTER" -d "$PRIMARY_DB" yql -s "
-        CREATE BACKUP COLLECTION IF NOT EXISTS \`$COLLECTION_NAME\`
+        CREATE BACKUP COLLECTION \`$COLLECTION_NAME\`
             ( TABLE \`/Root/production/users\`
             , TABLE \`/Root/production/orders\`
             , TABLE \`/Root/production/products\`
@@ -456,7 +457,7 @@ setup_dr_collection() {
     
     # DR cluster collection (for importing backups)
     ydb -e "$DR_CLUSTER" -d "$DR_DB" yql -s "
-        CREATE BACKUP COLLECTION IF NOT EXISTS \`$COLLECTION_NAME\`
+        CREATE BACKUP COLLECTION \`$COLLECTION_NAME\`
             ( TABLE \`/Root/disaster_recovery/users\`
             , TABLE \`/Root/disaster_recovery/orders\`
             , TABLE \`/Root/disaster_recovery/products\`
@@ -745,7 +746,7 @@ backup_service() {
     
     # Create collection if needed
     ydb -d "$DATABASE" yql -s "
-        CREATE BACKUP COLLECTION IF NOT EXISTS \`$collection_name\`
+        CREATE BACKUP COLLECTION \`$collection_name\`
             ( $tables )
         WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );" 2>/dev/null
     
@@ -794,7 +795,7 @@ backup_shard() {
     
     # Create shard collection
     ydb -d "$database" yql -s "
-        CREATE BACKUP COLLECTION IF NOT EXISTS \`$collection_name\`
+        CREATE BACKUP COLLECTION \`$collection_name\`
             ( TABLE \`${database}/users\`
             , TABLE \`${database}/data\`
             )
