@@ -1,8 +1,8 @@
 # Backup Collection Commands
 
-YQL supports SQL commands for managing [backup collections](../../concepts/backup-collections.md). These commands allow you to create, manage, and take backups of database tables using a declarative SQL syntax.
+YQL supports SQL commands for managing [backup collections](../../../concepts/backup-collections.md). These commands allow you to create, manage, and take backups of database tables using a declarative SQL syntax.
 
-For practical usage examples and operational guidance, see the [backup collections operations guide](../../reference/ydb-cli/backup-collections.md).
+For practical usage examples and operational guidance, see the [backup collections operations guide](../../../maintenance/manual/backup-collections.md).
 
 ## CREATE BACKUP COLLECTION {#create-backup-collection}
 
@@ -129,7 +129,7 @@ ydb scheme ls .backups/collections/
 ydb scheme ls .backups/collections/shop_backups/
 ```
 
-For monitoring backup operations, use the [operation list](../../reference/ydb-cli/operation-list.md) command:
+For monitoring backup operations, use the [operation list](../../../reference/ydb-cli/operation-list.md) command:
 
 ```bash
 # Monitor backup operations
@@ -148,7 +148,7 @@ ydb operation list incbackup
 
 - **Use quoted identifiers**: Always quote collection names with backticks
 - **Specify absolute paths**: Use full table paths starting with `/Root/`
-- **Monitor operations**: Check operation status using [operation list](../../reference/ydb-cli/operation-list.md) commands
+- **Monitor operations**: Check operation status using [operation list](../../../reference/ydb-cli/operation-list.md) commands
 - **Plan retention**: Consider backup chain dependencies before deletion
 
 ## Error handling
@@ -162,6 +162,6 @@ Common errors and solutions:
 
 ## See also
 
-- [Backup collections concepts](../../concepts/backup-collections.md) - Core concepts and architecture
-- [Backup collections operations](../../reference/ydb-cli/backup-collections.md) - Practical operations guide
-- [Backup collections recipes](../../recipes/backup-collections.md) - Common use cases and examples
+- [Backup collections concepts](../../../concepts/backup-collections.md) - Core concepts and architecture
+- [Backup collections operations](../../../maintenance/manual/backup-collections.md) - Practical operations guide
+- [Backup collections recipes](../../../recipes/backup-collections.md) - Common use cases and examples

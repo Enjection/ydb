@@ -43,7 +43,7 @@ An ordered sequence of backups starting with a full backup followed by zero or m
 
 Backup collections are stored in a dedicated directory structure within the database:
 
-```
+```text
 /.backups/collections/
 ├── collection_name_1/
 │   ├── backup_20240315_120000/     # Full backup
@@ -54,6 +54,7 @@ Backup collections are stored in a dedicated directory structure within the data
 ```
 
 Each backup contains:
+
 - Table schemas at backup time
 - Data files (full or incremental changes)
 - Metadata for chain validation and restoration
@@ -63,6 +64,7 @@ Each backup contains:
 #### Cluster storage
 
 Backups are stored within the YDB cluster itself, providing:
+
 - **High availability**: Leverages cluster replication and fault tolerance
 - **Performance**: Fast backup and restore operations
 - **Integration**: Seamless integration with cluster operations
@@ -79,6 +81,7 @@ Future versions may support automatic export to external storage systems for lon
 ### Background operations {#background-operations}
 
 All backup and restore operations run asynchronously in the background, allowing you to:
+
 - Continue normal database operations during backups
 - Monitor progress through the long operations API
 - Handle large datasets without blocking other activities
@@ -97,6 +100,7 @@ All backup and restore operations run asynchronously in the background, allowing
 ### Incremental backup mechanism
 
 Incremental backups use change tracking to identify:
+
 - **New rows**: Added since last backup
 - **Modified rows**: Changed data in existing rows  
 - **Deleted rows**: Removed data (tombstone records)
@@ -105,6 +109,7 @@ Incremental backups use change tracking to identify:
 ### Chain validation and integrity
 
 The system ensures backup chain integrity through:
+
 - **Dependency tracking**: Each incremental backup records its parent
 - **Validation checks**: Chain completeness verified before operations
 - **Consistency guarantees**: All tables backed up from the same transaction point
@@ -159,13 +164,13 @@ Without backup collections, only full export/import operations are available.
 
 ## Next steps {#next-steps}
 
-- **Get started**: Follow the [operations guide](../reference/ydb-cli/backup-collections.md) for step-by-step instructions
-- **Learn commands**: Review the [YQL syntax reference](../yql/reference/backup-collections.md) for complete command documentation
+- **Get started**: Follow the [operations guide](../maintenance/manual/backup-collections.md) for step-by-step instructions
+- **Learn commands**: Review the [YQL syntax reference](../yql/reference/syntax/backup-collections.md) for complete command documentation
 - **See examples**: Explore [common scenarios](../recipes/backup-collections.md) and best practices
 
 ## See also
 
 - [General backup concepts](backup.md) - Overview of all backup approaches in YDB
-- [YQL backup commands](../yql/reference/backup-collections.md) - Complete SQL syntax reference
-- [Operations guide](../reference/ydb-cli/backup-collections.md) - Practical instructions and examples
+- [YQL backup commands](../yql/reference/syntax/backup-collections.md) - Complete SQL syntax reference
+- [Operations guide](../maintenance/manual/backup-collections.md) - Practical instructions and examples
 - [Common recipes](../recipes/backup-collections.md) - Real-world usage scenarios

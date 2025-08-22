@@ -1,6 +1,6 @@
 # YDB CLI: Коллекции резервных копий
 
-Данный раздел охватывает команды и инструменты YDB CLI для работы с коллекциями резервных копий. Для операций резервного копирования на основе SQL см. [справочник по синтаксису YQL](../yql/reference/backup-collections.md).
+Данный раздел охватывает команды и инструменты YDB CLI для работы с коллекциями резервных копий. Для операций резервного копирования на основе SQL см. [справочник по синтаксису YQL](../../yql/reference/syntax/backup-collections.md).
 
 ## Обзор {#overview}
 
@@ -471,6 +471,7 @@ ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" monitoring
 ### Частые проблемы и решения
 
 1. **Ошибка прав доступа**:
+
    ```bash
    # Проверьте права пользователя
    ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" yql -s "
@@ -479,6 +480,7 @@ ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" monitoring
    ```
 
 2. **Нехватка места**:
+
    ```bash
    # Проверьте использование дискового пространства
    ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" yql -s "
@@ -486,6 +488,7 @@ ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" monitoring
    ```
 
 3. **Зависшие операции**:
+
    ```bash
    # Найдите долго выполняющиеся операции
    ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" yql -s "
@@ -525,7 +528,7 @@ ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" monitoring
 
 ## См. также {#see-also}
 
-- [Концепции коллекций резервных копий](../concepts/backup-collections.md)
-- [Операции с коллекциями резервных копий](../operations/backup-collections.md)
-- [Справочник по YQL синтаксису для коллекций резервных копий](../yql/reference/backup-collections.md)
-- [Рецепты по коллекциям резервных копий](../recipes/backup-collections.md)
+- [Концепции коллекций резервных копий](../../concepts/backup-collections.md)
+- [Операции с коллекциями резервных копий](../../maintenance/manual/backup-collections.md)
+- [Справочник по YQL синтаксису для коллекций резервных копий](../../yql/reference/syntax/backup-collections.md)
+- [Рецепты по коллекциям резервных копий](../../recipes/backup-collections.md)

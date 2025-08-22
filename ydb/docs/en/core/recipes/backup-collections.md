@@ -1,6 +1,6 @@
 # Backup Collections: Common Recipes and Examples
 
-This guide provides practical examples and recipes for common backup collection use cases. For basic operations, see the [operations guide](../operations/backup-collections.md). For complete syntax, see the [YQL reference](../yql/reference/backup-collections.md).
+This guide provides practical examples and recipes for common backup collection use cases. For basic operations, see the [operations guide](../maintenance/manual/backup-collections.md). For complete syntax, see the [YQL reference](../yql/reference/syntax/backup-collections.md).
 
 ## Automated daily backups {#automated-daily-backups}
 
@@ -948,7 +948,7 @@ Example Grafana dashboard JSON snippet:
         "targets": [
           {
             "expr": "ydb_backup_collection_count",
-            "legendFormat": "{{collection}}"
+            "legendFormat": "{{ "{{" }}collection{{ "}}" }}"
           }
         ]
       },
@@ -1014,7 +1014,7 @@ groups:
           severity: critical
         annotations:
           summary: "YDB backup is too old"
-          description: "Collection {{ $labels.collection }} has not been backed up for {{ $value }} hours"
+          description: "Collection {% raw %}{{ $labels.collection }}{% endraw %} has not been backed up for {% raw %}{{ $value }}{% endraw %} hours"
       
       - alert: BackupOperationStuck
         expr: ydb_backup_operations_running > 0 and rate(ydb_backup_collection_count[1h]) == 0
@@ -1023,7 +1023,7 @@ groups:
           severity: warning
         annotations:
           summary: "YDB backup operation appears stuck"
-          description: "Backup operation running for {{ $labels.collection }} but no progress detected"
+          description: "Backup operation running for {% raw %}{{ $labels.collection }}{% endraw %} but no progress detected"
       
       - alert: NoRecentBackups
         expr: increase(ydb_backup_collection_count[24h]) == 0
@@ -1032,12 +1032,12 @@ groups:
           severity: critical
         annotations:
           summary: "No YDB backups created in 24 hours"
-          description: "Collection {{ $labels.collection }} has not had any new backups in 24 hours"
+          description: "Collection {% raw %}{{ $labels.collection }}{% endraw %} has not had any new backups in 24 hours"
 ```
 
 ## See also
 
-- [Operations guide](../operations/backup-collections.md) - Complete operational procedures
+- [Operations guide](../maintenance/manual/backup-collections.md) - Complete operational procedures
 - [Concepts](../concepts/backup-collections.md) - Core concepts and architecture  
-- [YQL reference](../yql/reference/backup-collections.md) - Complete SQL syntax documentation
+- [YQL reference](../yql/reference/syntax/backup-collections.md) - Complete SQL syntax documentation
 - [CLI reference](../reference/ydb-cli/backup-collections.md) - Command-line tools and options

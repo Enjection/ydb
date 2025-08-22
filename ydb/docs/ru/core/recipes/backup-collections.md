@@ -1,6 +1,6 @@
 # Коллекции резервных копий: Распространенные рецепты и примеры
 
-Данное руководство предоставляет практические примеры и рецепты для распространенных случаев использования коллекций резервных копий. Для базовых операций см. [руководство по операциям](../operations/backup-collections.md). Для полного синтаксиса см. [справочник YQL](../yql/reference/backup-collections.md).
+Данное руководство предоставляет практические примеры и рецепты для распространенных случаев использования коллекций резервных копий. Для базовых операций см. [руководство по операциям](../maintenance/manual/backup-collections.md). Для полного синтаксиса см. [справочник YQL](../yql/reference/syntax/backup-collections.md).
 
 ## Автоматизированное ежедневное резервное копирование {#automated-daily-backups}
 
@@ -570,6 +570,6 @@ backup_with_notifications
 ## См. также {#see-also}
 
 - [Концепции коллекций резервных копий](../concepts/backup-collections.md)
-- [Операции с коллекциями резервных копий](../operations/backup-collections.md)
-- [Справочник по YQL синтаксису для коллекций резервных копий](../yql/reference/backup-collections.md)
+- [Операции с коллекциями резервных копий](../maintenance/manual/backup-collections.md)
+- [Справочник по YQL синтаксису для коллекций резервных копий](../yql/reference/syntax/backup-collections.md)
 - [Команды YDB CLI для коллекций резервных копий](../reference/ydb-cli/backup-collections.md)

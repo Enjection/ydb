@@ -1,6 +1,6 @@
 # YDB CLI: Backup Collections
 
-This section covers YDB CLI commands and tools for working with backup collections. For SQL-based backup operations, see the [YQL syntax reference](../yql/reference/backup-collections.md).
+This section covers YDB CLI commands and tools for working with backup collections. For SQL-based backup operations, see the [YQL syntax reference](../../yql/reference/syntax/backup-collections.md).
 
 ## Overview {#overview}
 
@@ -325,6 +325,7 @@ watch -n 30 "du -sh .backups/collections/*"
 ### Common CLI errors
 
 **Connection errors:**
+
 ```bash
 # Check connectivity
 ydb scheme ls /
@@ -334,6 +335,7 @@ ydb -e grpc://localhost:2136 -d /Root/mydb scheme ls /
 ```
 
 **Authentication errors:**
+
 ```bash
 # Check credentials
 ydb --user myuser --password-file pass.txt scheme ls /
@@ -343,6 +345,7 @@ ydb --ca-file ca.crt scheme ls /
 ```
 
 **Permission errors:**
+
 ```bash
 # Check user permissions
 ydb yql -s "SELECT * FROM [/.sys/acl] WHERE path = '/'"
@@ -509,7 +512,7 @@ ydb yql -s "BACKUP \`production_data\` INCREMENTAL;" 2>&1 | \
 
 ## See also
 
-- [YQL syntax reference](../yql/reference/backup-collections.md) - Complete SQL command documentation
-- [Operations guide](../operations/backup-collections.md) - Practical backup procedures
-- [Concepts](../concepts/backup-collections.md) - Core concepts and architecture
+- [YQL syntax reference](../../yql/reference/syntax/backup-collections.md) - Complete SQL command documentation
+- [Operations guide](../../maintenance/manual/backup-collections.md) - Practical backup procedures
+- [Concepts](../../concepts/backup-collections.md) - Core concepts and architecture
 - [CLI reference](./ydb-cli/) - General YDB CLI documentation

@@ -1,6 +1,6 @@
 # Backup Collections Operations
 
-This guide covers all practical operations for creating, managing, and restoring from backup collections. For conceptual information, see [Backup collections concepts](../concepts/backup-collections.md). For complete command syntax, see the [YQL syntax reference](../yql/reference/backup-collections.md).
+This guide covers all practical operations for creating, managing, and restoring from backup collections. For conceptual information, see [Backup collections concepts](../../concepts/backup-collections.md). For complete command syntax, see the [YQL syntax reference](../../yql/reference/syntax/backup-collections.md).
 
 ## Creating backup collections {#creating-collections}
 
@@ -26,11 +26,13 @@ Before creating a collection, consider:
 ### Naming conventions
 
 Use descriptive names that indicate:
+
 - Application or service name
 - Environment (prod, staging, test)
 - Purpose or scope
 
 Examples:
+
 - `production_user_data`
 - `staging_analytics`
 - `daily_transaction_backups`
@@ -60,12 +62,14 @@ BACKUP `shop_backups` INCREMENTAL;
 Implement regular backup schedules based on your requirements:
 
 **Daily full backups:**
+
 ```sql
 -- Run daily at 2 AM
 BACKUP `shop_backups`;
 ```
 
 **Hourly incrementals with weekly full backups:**
+
 ```sql
 -- Sunday: Full backup
 BACKUP `shop_backups`;
@@ -148,6 +152,7 @@ Check the health and status of your collections:
 ### Collection lifecycle management
 
 **Creation checklist:**
+
 - [ ] Define table list
 - [ ] Choose appropriate name
 - [ ] Configure storage settings
@@ -155,6 +160,7 @@ Check the health and status of your collections:
 - [ ] Document backup schedule
 
 **Ongoing maintenance:**
+
 - [ ] Monitor backup success
 - [ ] Manage retention policies
 - [ ] Update documentation
@@ -173,12 +179,14 @@ Before deleting backups, understand chain dependencies:
 ### Manual cleanup strategies
 
 **Safe cleanup approach:**
+
 1. Create new full backup
 2. Verify new backup is complete
 3. Delete old backup chains (full backup + all its incrementals)
 4. Never delete partial chains
 
 **Example cleanup workflow:**
+
 ```bash
 # 1. Create new full backup
 ydb yql -s "BACKUP \`shop_backups\`;"
@@ -205,6 +213,7 @@ Implement retention policies based on:
 - **Compliance**: Legal or regulatory requirements
 
 **Example retention policy:**
+
 - Keep daily backups for 30 days
 - Keep weekly backups for 12 weeks
 - Keep monthly backups for 12 months
@@ -253,11 +262,13 @@ Regularly test backup restoration:
 ### Backup chain issues
 
 **Broken chains:**
+
 - Identify missing backups in the sequence
 - Consider creating new full backup to start fresh chain
 - Document chain breaks for future reference
 
 **Inconsistent backups:**
+
 - Check for concurrent operations during backup
 - Verify table consistency across backup points
 - Review backup logs for errors or warnings
@@ -265,12 +276,14 @@ Regularly test backup restoration:
 ### Performance issues
 
 **Slow backup operations:**
+
 - Monitor system resources during backup
 - Consider adjusting backup timing
 - Review table sizes and data distribution
 - Check storage backend performance
 
 **High storage usage:**
+
 - Review retention policies
 - Clean up old backup chains
 - Monitor incremental backup sizes
@@ -333,7 +346,7 @@ To restore to a specific point in time:
 
 ## See also
 
-- [Backup collections concepts](../concepts/backup-collections.md) - Core concepts and architecture
-- [YQL syntax reference](../yql/reference/backup-collections.md) - Complete command documentation
-- [Common recipes](../recipes/backup-collections.md) - Real-world usage examples
-- [CLI reference](ydb-cli/backup-collections.md) - Command-line tools and options
+- [Backup collections concepts](../../concepts/backup-collections.md) - Core concepts and architecture
+- [YQL syntax reference](../../yql/reference/syntax/backup-collections.md) - Complete command documentation
+- [Common recipes](../../recipes/backup-collections.md) - Real-world usage examples
+- [CLI reference](../../reference/ydb-cli/backup-collections.md) - Command-line tools and options

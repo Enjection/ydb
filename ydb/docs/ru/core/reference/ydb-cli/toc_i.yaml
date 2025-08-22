@@ -51,6 +51,8 @@ items:
     include:
       mode: link
       path: export-import/toc_p.yaml
+  - name: Коллекции резервных копий
+    href: backup-collections.md
   - name: Работа с топиками
     items:
     - name: Команды для работы с топиком

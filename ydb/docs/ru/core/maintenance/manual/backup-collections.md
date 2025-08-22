@@ -1,6 +1,6 @@
 # Операции с коллекциями резервных копий
 
-Данное руководство охватывает все практические операции для создания, управления и восстановления из коллекций резервных копий. Для получения концептуальной информации см. [Концепции коллекций резервных копий](../concepts/backup-collections.md). Для полного синтаксиса команд см. [справочник по синтаксису YQL](../yql/reference/backup-collections.md).
+Данное руководство охватывает все практические операции для создания, управления и восстановления из коллекций резервных копий. Для получения концептуальной информации см. [Концепции коллекций резервных копий](../../concepts/backup-collections.md). Для полного синтаксиса команд см. [справочник по синтаксису YQL](../../yql/reference/syntax/backup-collections.md).
 
 ## Создание коллекций резервных копий {#creating-collections}
 
@@ -26,11 +26,13 @@ WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 ### Соглашения об именах
 
 Используйте описательные имена, которые указывают:
+
 - Имя приложения или сервиса
 - Окружение (prod, staging, test)
 - Цель или область применения
 
 Примеры:
+
 - `production_user_data`
 - `staging_analytics`
 - `daily_transaction_backups`
@@ -175,7 +177,7 @@ ORDER BY created_at DESC;
 
 ## См. также {#see-also}
 
-- [Концепции коллекций резервных копий](../concepts/backup-collections.md)
-- [Справочник по YQL синтаксису для коллекций резервных копий](../yql/reference/backup-collections.md)
-- [Команды YDB CLI для коллекций резервных копий](../reference/ydb-cli/backup-collections.md)
-- [Рецепты по коллекциям резервных копий](../recipes/backup-collections.md)
+- [Концепции коллекций резервных копий](../../concepts/backup-collections.md)
+- [Справочник по YQL синтаксису для коллекций резервных копий](../../yql/reference/syntax/backup-collections.md)
+- [Команды YDB CLI для коллекций резервных копий](../../reference/ydb-cli/backup-collections.md)
+- [Рецепты по коллекциям резервных копий](../../recipes/backup-collections.md)
