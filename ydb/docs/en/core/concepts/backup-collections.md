@@ -6,9 +6,9 @@ Backup collections provide an advanced backup solution for YDB that organizes fu
 
 A backup collection is a named set of coordinated backups for selected database tables. Collections organize related backups and ensure they can be restored together consistently, providing:
 
-- **Efficiency**: Incremental backups capture only changes since the previous backup
-- **Organization**: Related backups are grouped into logical collections
-- **Recovery flexibility**: Enables recovery using any backup in the chain
+- **Efficiency**: Incremental backups capture only changes since the previous backup.
+- **Organization**: Related backups are grouped into logical collections.
+- **Recovery flexibility**: Enables recovery using any backup in the chain.
 
 ## Core concepts {#core-concepts}
 
@@ -53,9 +53,9 @@ Backup collections are stored in a dedicated directory structure within the data
 
 Each backup contains:
 
-- Table schemas at backup time
-- Data files (full or incremental changes)
-- Metadata for chain validation and restoration
+- Table schemas at backup time.
+- Data files (full or incremental changes).
+- Metadata for chain validation and restoration.
 
 ### Storage backends {#storage-backends}
 
@@ -63,10 +63,10 @@ Each backup contains:
 
 Backups are stored within the YDB cluster itself, providing:
 
-- **High availability**: Leverages cluster replication and fault tolerance
-- **Performance**: Fast backup and restore operations
-- **Integration**: Seamless integration with cluster operations
-- **Security**: Uses cluster security mechanisms
+- **High availability**: Leverages cluster replication and fault tolerance.
+- **Performance**: Fast backup and restore operations.
+- **Integration**: Seamless integration with cluster operations.
+- **Security**: Uses cluster security mechanisms.
 
 ```sql
 WITH ( STORAGE = 'cluster' )
@@ -80,9 +80,9 @@ Currently, external storage requires manual export/import operations. Use [expor
 
 All backup operations run asynchronously in the background, allowing you to:
 
-- Continue normal database operations during backups
-- Monitor progress using YDB CLI operation commands
-- Handle large datasets without blocking other activities
+- Continue normal database operations during backups.
+- Monitor progress using YDB CLI operation commands.
+- Handle large datasets without blocking other activities.
 
 ## How backup collections work internally {#how-they-work}
 
@@ -98,27 +98,27 @@ All backup operations run asynchronously in the background, allowing you to:
 
 Incremental backups use change tracking to identify:
 
-- **New rows**: Added since last backup
-- **Modified rows**: Changed data in existing rows  
-- **Deleted rows**: Removed data (tombstone records)
-- **Schema changes**: Table structure modifications
+- **New rows**: Added since last backup.
+- **Modified rows**: Changed data in existing rows.  
+- **Deleted rows**: Removed data (tombstone records).
+- **Schema changes**: Table structure modifications.
 
 ### Chain validation and integrity {#chain-validation-integrity}
 
 The system ensures backup chain integrity through:
 
-- **Dependency tracking**: Each incremental backup records its parent
-- **Validation checks**: Chain completeness verified before operations
-- **Consistency guarantees**: All tables backed up from the same transaction point
-- **Error detection**: Corrupted or missing backups identified automatically
+- **Dependency tracking**: Each incremental backup records its parent.
+- **Validation checks**: Chain completeness verified before operations.
+- **Consistency guarantees**: All tables backed up from the same transaction point.
+- **Error detection**: Corrupted or missing backups identified automatically.
 
 ## Relationship with incremental backups {#relationship-with-incremental-backups}
 
 Backup collections are the foundation for incremental backup functionality:
 
-- **Collections enable incrementals**: You must have a collection to create incremental backups
-- **Chain management**: Collections manage the sequence of full and incremental backups
-- **Consistency**: All tables in a collection are backed up consistently
+- **Collections enable incrementals**: You must have a collection to create incremental backups.
+- **Chain management**: Collections manage the sequence of full and incremental backups.
+- **Consistency**: All tables in a collection are backed up consistently.
 
 Without backup collections, only full export/import operations are available.
 
@@ -126,33 +126,33 @@ Without backup collections, only full export/import operations are available.
 
 **Ideal scenarios:**
 
-- Production environments requiring regular backup schedules
-- Large datasets where incremental changes are much smaller than total data size
-- Scenarios requiring backup chains for efficiency
+- Production environments requiring regular backup schedules.
+- Large datasets where incremental changes are much smaller than total data size.
+- Scenarios requiring backup chains for efficiency.
 
 **Consider traditional export/import for:**
 
-- Small databases or individual tables
-- One-time data migration tasks
-- Development/testing environments
-- Simple backup scenarios without incremental needs
-- External storage requirements (until automatic external storage is supported)
+- Small databases or individual tables.
+- One-time data migration tasks.
+- Development/testing environments.
+- Simple backup scenarios without incremental needs.
+- External storage requirements (until automatic external storage is supported).
 
 ## Benefits and limitations {#benefits-limitations}
 
 ### Benefits
 
-- **Storage efficiency**: Incremental backups use significantly less storage
-- **Faster backups**: Only changes are processed after initial full backup
-- **SQL interface**: Familiar SQL commands for backup management
-- **Background processing**: Non-blocking operations
-- **Chain integrity**: Automatic validation and consistency checks
+- **Storage efficiency**: Incremental backups use significantly less storage.
+- **Faster backups**: Only changes are processed after initial full backup.
+- **SQL interface**: Familiar SQL commands for backup management.
+- **Background processing**: Non-blocking operations.
+- **Chain integrity**: Automatic validation and consistency checks.
 
 ### Current limitations
 
-- **Cluster storage only**: External storage requires manual export/import
-- **No collection modification**: Cannot add/remove tables after creation
-- **Single storage backend**: Only 'cluster' storage supported via SQL
+- **Cluster storage only**: External storage requires manual export/import.
+- **No collection modification**: Cannot add/remove tables after creation.
+- **Single storage backend**: Only 'cluster' storage supported via SQL.
 
 ## Next steps {#next-steps}
 
@@ -161,6 +161,6 @@ Without backup collections, only full export/import operations are available.
 
 ## See also
 
-- [General backup concepts](backup.md) - Overview of all backup approaches in YDB
-- [Operations guide](../maintenance/manual/backup-collections.md) - Practical instructions and examples
-- [Common recipes](../recipes/backup-collections.md) - Real-world usage scenarios
+- [General backup concepts](backup.md) - Overview of all backup approaches in YDB.
+- [Operations guide](../maintenance/manual/backup-collections.md) - Practical instructions and examples.
+- [Common recipes](../recipes/backup-collections.md) - Real-world usage scenarios.

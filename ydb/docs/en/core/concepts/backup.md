@@ -24,16 +24,16 @@ For local database backups and development workflows:
 
 For production workloads requiring incremental backups:
 
-- **Use cases**: Production environments, large datasets, regular backup schedules
-- **Characteristics**: Full and incremental backups organized in collections
-- **Storage**: Currently supports cluster storage only
-- **Operations**: Asynchronous background operations
+- **Use cases**: Production environments, large datasets, regular backup schedules.
+- **Characteristics**: Full and incremental backups organized in collections.
+- **Storage**: Currently supports cluster storage only.
+- **Operations**: Asynchronous background operations.
 
 Learn more:
 
-- [Backup collections concepts](backup-collections.md) - Architecture and concepts
-- [Operations guide](../maintenance/manual/backup-collections.md) - Practical operations
-- [Common recipes](../recipes/backup-collections.md) - Usage examples
+- [Backup collections concepts](backup-collections.md) - Architecture and concepts.
+- [Operations guide](../maintenance/manual/backup-collections.md) - Practical operations.
+- [Common recipes](../recipes/backup-collections.md) - Usage examples.
 
 Learn more:
 

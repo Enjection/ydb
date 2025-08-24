@@ -207,46 +207,46 @@ ydb tools restore -i /tmp/test_restore -d /Root/test_restore_verification
 
 ### Backup strategy {#backup-strategy}
 
-- **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains
-- **Separate collections by service**: Use different collections for different applications/services
-- **Regular full backups**: Take full backups weekly or bi-weekly
-- **Test regularly**: Periodically verify backups can be restored
+- **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains.
+- **Separate collections by service**: Use different collections for different applications/services.
+- **Regular full backups**: Take full backups weekly or bi-weekly.
+- **Test regularly**: Periodically verify backups can be restored.
 
 ### Operations {#operations}
 
-- **Monitor operation status**: Always check backup operation completion
-- **Clean up manually**: Remove old backup chains manually to manage storage
-- **Document procedures**: Maintain documentation of backup and restore procedures
-- **Plan for disasters**: Practice restore procedures in non-production environments
+- **Monitor operation status**: Always check backup operation completion.
+- **Clean up manually**: Remove old backup chains manually to manage storage.
+- **Document procedures**: Maintain documentation of backup and restore procedures.
+- **Plan for disasters**: Practice restore procedures in non-production environments.
 
 ### Storage management {#storage-management}
 
-- **Monitor storage usage**: Track backup storage consumption
-- **Plan retention**: Determine how long to keep backup chains
-- **Export important backups**: Use export/import for long-term archival
-- **Verify chain integrity**: Never delete partial backup chains
+- **Monitor storage usage**: Track backup storage consumption.
+- **Plan retention**: Determine how long to keep backup chains.
+- **Export important backups**: Use export/import for long-term archival.
+- **Verify chain integrity**: Never delete partial backup chains.
 
 ## Common issues and solutions {#troubleshooting}
 
 ### Backup operation failures {#backup-operation-failures}
 
-- **Check permissions**: Ensure user has backup operation permissions
-- **Verify table access**: Confirm all tables in collection are accessible
-- **Monitor resources**: Check system resources during backup operations
+- **Check permissions**: Ensure user has backup operation permissions.
+- **Verify table access**: Confirm all tables in collection are accessible.
+- **Monitor resources**: Check system resources during backup operations.
 
 ### Storage issues {#storage-issues}
 
-- **Clean up old backups**: Remove old backup chains to free space
-- **Monitor backup sizes**: Track incremental backup growth
-- **Plan storage capacity**: Estimate storage needs for backup retention
+- **Clean up old backups**: Remove old backup chains to free space.
+- **Monitor backup sizes**: Track incremental backup growth.
+- **Plan storage capacity**: Estimate storage needs for backup retention.
 
 ### Chain management {#chain-management}
 
-- **Avoid partial deletions**: Never delete individual backups from a chain
-- **Document chain breaks**: Keep track of any backup chain interruptions
-- **Start fresh chains**: Create new full backups when chains become too long
+- **Avoid partial deletions**: Never delete individual backups from a chain.
+- **Document chain breaks**: Keep track of any backup chain interruptions.
+- **Start fresh chains**: Create new full backups when chains become too long.
 
 ## See also {#see-also}
 
-- [Backup collections concepts](../concepts/backup-collections.md) - Core concepts and architecture
-- [Operations guide](../maintenance/manual/backup-collections.md) - Detailed operational procedures
+- [Backup collections concepts](../concepts/backup-collections.md) - Core concepts and architecture.
+- [Operations guide](../maintenance/manual/backup-collections.md) - Detailed operational procedures.
