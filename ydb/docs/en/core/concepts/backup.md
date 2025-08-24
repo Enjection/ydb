@@ -9,7 +9,6 @@ This section covers backup concepts and technologies available in {{ ydb-short-n
 For large-scale data migration and portability scenarios:
 
 - **Use cases**: Large data migration between systems, archival storage, production data transfers.
-- **Characteristics**: Point-in-time snapshots with flexible format options, optimized for large datasets.
 - **Storage**: S3-compatible storage.
 
 ## Backup/restore {#backup-restore}
@@ -17,7 +16,6 @@ For large-scale data migration and portability scenarios:
 For local database backups and development workflows:
 
 - **Use cases**: Local development environments, testing scenarios, smaller production environments, database cloning for local use.
-- **Characteristics**: Designed for local filesystem operations with moderate data volumes.
 - **Storage**: Filesystem.
 
 ## Backup collections {#backup-collections}
@@ -25,9 +23,7 @@ For local database backups and development workflows:
 For production workloads requiring incremental backups:
 
 - **Use cases**: Production environments, large datasets, regular backup schedules.
-- **Characteristics**: Full and incremental backups organized in collections.
 - **Storage**: Currently supports cluster storage only.
-- **Operations**: Asynchronous background operations.
 
 Learn more:
 

@@ -42,20 +42,27 @@ An ordered sequence of backups starting with a full backup followed by zero or m
 Backup collections are stored in a dedicated directory structure within the database:
 
 ```text
-/.backups/collections/
-├── collection_name_1/
-│   ├── backup_20240315_120000/     # Full backup
-│   ├── backup_20240315_180000/     # Incremental backup
-│   └── backup_20240316_060000/     # Incremental backup
-├── collection_name_2/
-│   └── backup_20240316_000000/     # Full backup
+/Root/test1/.backups/collections/
+├── backup_collection_1/
+│   ├── 20250821141425Z_full/       # Full backup
+│   │   ├── table_1/
+│   │   └── table_2/
+│   └── 20250821141519Z_incremental/ # Incremental backup
+│       ├── table_1/
+│       └── table_2/
+└── backup_collection_2/
+    ├── 20250820093012Z_full/       # Full backup
+    │   └── table_3/
+    ├── 20250820140000Z_incremental/ # First incremental
+    │   └── table_3/
+    └── 20250821080000Z_incremental/ # Second incremental
+        └── table_3/
 ```
 
 Each backup contains:
 
-- Table schemas at backup time.
+- Table schemas at backup time. (Implicitly)
 - Data files (full or incremental changes).
-- Metadata for chain validation and restoration.
 
 ### Storage backends {#storage-backends}
 
@@ -89,10 +96,8 @@ All backup operations run asynchronously in the background, allowing you to:
 ### Backup creation process {#backup-creation-process}
 
 1. **Transaction isolation**: Backup starts from a consistent snapshot point
-2. **Table scanning**: Each table is scanned for data and schema
-3. **Change tracking**: For incremental backups, only changes since last backup are captured
-4. **Storage writing**: Data is written to the backup storage location
-5. **Metadata recording**: Backup metadata is recorded for chain validation
+2. **Change tracking**: For incremental backups, only changes since last backup are captured and stored in CDC stream
+3. **Change materialization**: When incremental backup called CDC stream compacted to incremental backup tables
 
 ### Incremental backup mechanism {#incremental-backup-mechanism}
 
@@ -101,16 +106,7 @@ Incremental backups use change tracking to identify:
 - **New rows**: Added since last backup.
 - **Modified rows**: Changed data in existing rows.  
 - **Deleted rows**: Removed data (tombstone records).
-- **Schema changes**: Table structure modifications.
-
-### Chain validation and integrity {#chain-validation-integrity}
-
-The system ensures backup chain integrity through:
-
-- **Dependency tracking**: Each incremental backup records its parent.
-- **Validation checks**: Chain completeness verified before operations.
-- **Consistency guarantees**: All tables backed up from the same transaction point.
-- **Error detection**: Corrupted or missing backups identified automatically.
+- **Schema changes**: Currently not supported.
 
 ## Relationship with incremental backups {#relationship-with-incremental-backups}
 
@@ -136,23 +132,21 @@ Without backup collections, only full export/import operations are available.
 - One-time data migration tasks.
 - Development/testing environments.
 - Simple backup scenarios without incremental needs.
-- External storage requirements (until automatic external storage is supported).
 
 ## Benefits and limitations {#benefits-limitations}
 
 ### Benefits
 
 - **Storage efficiency**: Incremental backups use significantly less storage.
-- **Faster backups**: Only changes are processed after initial full backup.
+- **Faster backups**: Only changes are processed after initial full backup (note: change capture still incurs storage and cpu costs).
 - **SQL interface**: Familiar SQL commands for backup management.
 - **Background processing**: Non-blocking operations.
-- **Chain integrity**: Automatic validation and consistency checks.
 
 ### Current limitations
 
 - **Cluster storage only**: External storage requires manual export/import.
 - **No collection modification**: Cannot add/remove tables after creation.
-- **Single storage backend**: Only 'cluster' storage supported via SQL.
+- **No partial restore**: Partial restores from collections must be managed externally.
 
 ## Next steps {#next-steps}
 
