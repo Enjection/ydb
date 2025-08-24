@@ -49,8 +49,6 @@ items:
       href: commands/scan-query.md
   - name: Importing and exporting data
     include: { mode: link, path: export-import/toc_p.yaml }
-  - name: Backup collections
-    href: backup-collections.md
   - name: Working with topics
     items:
     - name: Commands for topics

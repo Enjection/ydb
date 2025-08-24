@@ -30,6 +30,7 @@ For production workloads requiring incremental backups:
 - **Operations**: Asynchronous background operations
 
 Learn more:
+
 - [Backup collections concepts](backup-collections.md) - Architecture and concepts
 - [Operations guide](../maintenance/manual/backup-collections.md) - Practical operations
 - [Common recipes](../recipes/backup-collections.md) - Usage examples

@@ -19,7 +19,7 @@ BACKUP `collection_name` [INCREMENTAL];
 DROP BACKUP COLLECTION `collection_name`;
 ```
 
-For detailed syntax, see [YQL reference documentation](../reference/yql/reference/index.md).
+For detailed syntax, see [YQL reference documentation](../../yql/reference/syntax/index.md).
 
 ### Basic collection creation
 
@@ -95,7 +95,7 @@ BACKUP `shop_backups`;
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-### Backup timing considerations
+### Important scheduling notes
 
 - **External scheduling required**: YDB does not provide built-in scheduling. Use cron or similar tools
 - **Background operations**: Backups run asynchronously and don't block database operations
