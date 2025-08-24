@@ -1,4 +1,4 @@
-# Backup Collections
+# Backup Collections {#backup-collections}
 
 Backup collections provide an advanced backup solution for YDB that organizes full and incremental backups into managed collections. This approach is designed for production workloads requiring efficient disaster recovery and point-in-time recovery capabilities.
 
@@ -12,19 +12,19 @@ A backup collection is a named set of coordinated backups for selected database 
 
 ## Core concepts {#core-concepts}
 
-### Backup collection
+### Backup collection {#backup-collection}
 
 A named container that groups backups for a specific set of database tables. Collections ensure that all included tables are backed up consistently.
 
-### Full backup
+### Full backup {#full-backup}
 
 A complete snapshot of all selected tables at a specific point in time. Serves as the baseline for subsequent incremental backups and contains all data needed for independent restoration.
 
-### Incremental backup
+### Incremental backup {#incremental-backup}
 
 Captures only the changes (inserts, updates, deletes) since the previous backup in the chain. Significantly smaller than full backups for datasets with limited changes.
 
-### Backup chain
+### Backup chain {#backup-chain}
 
 An ordered sequence of backups starting with a full backup followed by zero or more incremental backups. Each incremental backup depends on all previous backups in the chain for complete restoration.
 
@@ -59,7 +59,7 @@ Each backup contains:
 
 ### Storage backends {#storage-backends}
 
-#### Cluster storage
+#### Cluster storage {#cluster-storage}
 
 Backups are stored within the YDB cluster itself, providing:
 
@@ -72,7 +72,7 @@ Backups are stored within the YDB cluster itself, providing:
 WITH ( STORAGE = 'cluster' )
 ```
 
-#### External storage
+#### External storage {#external-storage}
 
 Currently, external storage requires manual export/import operations. Use [export/import operations](../reference/ydb-cli/export-import/index.md) to move backups to external storage systems.
 
@@ -86,7 +86,7 @@ All backup operations run asynchronously in the background, allowing you to:
 
 ## How backup collections work internally {#how-they-work}
 
-### Backup creation process
+### Backup creation process {#backup-creation-process}
 
 1. **Transaction isolation**: Backup starts from a consistent snapshot point
 2. **Table scanning**: Each table is scanned for data and schema
@@ -94,7 +94,7 @@ All backup operations run asynchronously in the background, allowing you to:
 4. **Storage writing**: Data is written to the backup storage location
 5. **Metadata recording**: Backup metadata is recorded for chain validation
 
-### Incremental backup mechanism
+### Incremental backup mechanism {#incremental-backup-mechanism}
 
 Incremental backups use change tracking to identify:
 
@@ -103,7 +103,7 @@ Incremental backups use change tracking to identify:
 - **Deleted rows**: Removed data (tombstone records)
 - **Schema changes**: Table structure modifications
 
-### Chain validation and integrity
+### Chain validation and integrity {#chain-validation-integrity}
 
 The system ensures backup chain integrity through:
 

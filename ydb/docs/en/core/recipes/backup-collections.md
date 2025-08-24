@@ -1,10 +1,10 @@
-# Backup Collections: Common Recipes and Examples
+# Backup Collections: Common Recipes and Examples {#backup-collections-recipes}
 
 This guide provides practical examples for common backup collection use cases. For basic operations, see the [operations guide](../maintenance/manual/backup-collections.md).
 
 ## Basic backup workflow {#basic-workflow}
 
-### Creating your first backup collection
+### Creating your first backup collection {#creating-first-collection}
 
 ```sql
 -- Create a collection for related tables
@@ -16,7 +16,7 @@ CREATE BACKUP COLLECTION `production_backups`
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 ```
 
-### Taking backups
+### Taking backups {#taking-backups}
 
 ```sql
 -- Take initial full backup
@@ -26,7 +26,7 @@ BACKUP `production_backups`;
 BACKUP `production_backups` INCREMENTAL;
 ```
 
-### Monitoring backup operations
+### Monitoring backup operations {#monitoring-backup-operations}
 
 ```bash
 # Check backup operation status
@@ -44,7 +44,7 @@ ydb scheme ls .backups/collections/production_backups/
 
 ## Multi-environment setup {#multi-environment}
 
-### Development environment
+### Development environment {#development-environment}
 
 ```sql
 -- Create collection with fewer tables for testing
@@ -58,7 +58,7 @@ WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 BACKUP `dev_test_backups`;
 ```
 
-### Production environment
+### Production environment {#production-environment}
 
 ```sql
 -- Create comprehensive collection for production
@@ -80,7 +80,7 @@ BACKUP `prod_daily_backups` INCREMENTAL;
 
 ## Microservices backup strategy {#microservices}
 
-### Service-specific collections
+### Service-specific collections {#service-specific-collections}
 
 ```sql
 -- User service backup collection
@@ -108,7 +108,7 @@ CREATE BACKUP COLLECTION `inventory_service_backups`
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 ```
 
-### Service backup workflow
+### Service backup workflow {#service-backup-workflow}
 
 ```sql
 -- Take backups for each service independently
@@ -124,7 +124,7 @@ BACKUP `inventory_service_backups` INCREMENTAL;
 
 ## Data export and recovery {#export-recovery}
 
-### Exporting backup collections
+### Exporting backup collections {#exporting-backup-collections}
 
 For disaster recovery or migration, export backup collections using standard YDB tools:
 
@@ -205,21 +205,21 @@ ydb tools restore -i /tmp/test_restore -d /Root/test_restore_verification
 
 ## Best practices summary {#best-practices}
 
-### Backup strategy
+### Backup strategy {#backup-strategy}
 
 - **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains
 - **Separate collections by service**: Use different collections for different applications/services
 - **Regular full backups**: Take full backups weekly or bi-weekly
 - **Test regularly**: Periodically verify backups can be restored
 
-### Operations
+### Operations {#operations}
 
 - **Monitor operation status**: Always check backup operation completion
 - **Clean up manually**: Remove old backup chains manually to manage storage
 - **Document procedures**: Maintain documentation of backup and restore procedures
 - **Plan for disasters**: Practice restore procedures in non-production environments
 
-### Storage management
+### Storage management {#storage-management}
 
 - **Monitor storage usage**: Track backup storage consumption
 - **Plan retention**: Determine how long to keep backup chains
@@ -228,25 +228,25 @@ ydb tools restore -i /tmp/test_restore -d /Root/test_restore_verification
 
 ## Common issues and solutions {#troubleshooting}
 
-### Backup operation failures
+### Backup operation failures {#backup-operation-failures}
 
 - **Check permissions**: Ensure user has backup operation permissions
 - **Verify table access**: Confirm all tables in collection are accessible
 - **Monitor resources**: Check system resources during backup operations
 
-### Storage issues
+### Storage issues {#storage-issues}
 
 - **Clean up old backups**: Remove old backup chains to free space
 - **Monitor backup sizes**: Track incremental backup growth
 - **Plan storage capacity**: Estimate storage needs for backup retention
 
-### Chain management
+### Chain management {#chain-management}
 
 - **Avoid partial deletions**: Never delete individual backups from a chain
 - **Document chain breaks**: Keep track of any backup chain interruptions
 - **Start fresh chains**: Create new full backups when chains become too long
 
-## See also
+## See also {#see-also}
 
 - [Backup collections concepts](../concepts/backup-collections.md) - Core concepts and architecture
 - [Operations guide](../maintenance/manual/backup-collections.md) - Detailed operational procedures

@@ -1,10 +1,10 @@
-# Backup Collections Operations
+# Backup Collections Operations {#backup-collections-operations}
 
 This guide covers all practical operations for creating, managing, and restoring from backup collections. For conceptual information, see [Backup collections concepts](../../concepts/backup-collections.md).
 
 ## Creating backup collections {#creating-collections}
 
-### SQL Syntax Reference
+### SQL Syntax Reference {#sql-syntax-reference}
 
 ```sql
 -- CREATE BACKUP COLLECTION syntax
@@ -21,7 +21,7 @@ DROP BACKUP COLLECTION `collection_name`;
 
 For detailed syntax, see [YQL reference documentation](../../yql/reference/syntax/index.md).
 
-### Basic collection creation
+### Basic collection creation {#basic-collection-creation}
 
 Create a backup collection using SQL commands. The collection defines which tables to include and storage settings:
 
@@ -31,7 +31,7 @@ CREATE BACKUP COLLECTION `shop_backups`
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 ```
 
-### Collection planning
+### Collection planning {#collection-planning}
 
 Before creating a collection, consider:
 
@@ -40,7 +40,7 @@ Before creating a collection, consider:
 - **Backup frequency**: Plan for full and incremental backup schedules
 - **Retention policy**: Determine how long to keep backup chains
 
-### Naming conventions
+### Naming conventions {#naming-conventions}
 
 Use descriptive names that indicate:
 
@@ -56,7 +56,7 @@ Examples:
 
 ## Taking backups {#taking-backups}
 
-### Initial full backup
+### Initial full backup {#initial-full-backup}
 
 After creating a collection, take the initial full backup:
 
@@ -66,7 +66,7 @@ BACKUP `shop_backups`;
 
 The first backup without the `INCREMENTAL` keyword creates a full backup containing all data from the specified tables.
 
-### Incremental backups
+### Incremental backups {#incremental-backups}
 
 Once you have a full backup, create incremental backups to capture changes:
 
@@ -74,7 +74,7 @@ Once you have a full backup, create incremental backups to capture changes:
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-### Backup timing considerations
+### Backup timing considerations {#backup-timing-considerations}
 
 Implement regular backup schedules based on your requirements. Note that scheduling must be implemented externally using cron or similar tools.
 
@@ -95,7 +95,7 @@ BACKUP `shop_backups`;
 BACKUP `shop_backups` INCREMENTAL;
 ```
 
-### Important scheduling notes
+### Important scheduling notes {#important-scheduling-notes}
 
 - **External scheduling required**: YDB does not provide built-in scheduling. Use cron or similar tools
 - **Background operations**: Backups run asynchronously and don't block database operations
@@ -105,7 +105,7 @@ Note: Backup scheduling must be implemented using external tools like cron, as Y
 
 ## Monitoring backup operations {#monitoring}
 
-### Monitoring backup operations
+### Monitoring backup operations {#monitoring-backup-operations}
 
 ```bash
 # Check backup operation status
@@ -127,7 +127,7 @@ ydb scheme ls .backups/collections/production_backups/
 ydb scheme describe .backups/collections/production_backups/backup_20240315_120000/
 ```
 
-### Check operation status
+### Check operation status {#check-operation-status}
 
 All backup operations run in the background. Monitor their progress using:
 
@@ -139,7 +139,7 @@ ydb operation list incbackup
 ydb operation get <operation-id>
 ```
 
-### Browse backup structure
+### Browse backup structure {#browse-backup-structure}
 
 View backups through the database schema:
 
@@ -154,7 +154,7 @@ ydb scheme ls .backups/collections/shop_backups/
 ydb scheme ls .backups/collections/shop_backups/ | sort
 ```
 
-### Monitor backup chains
+### Monitor backup chains {#monitor-backup-chains}
 
 Verify backup chain integrity:
 
@@ -168,7 +168,7 @@ ydb scheme describe .backups/collections/shop_backups/backup_20240315/
 
 ## Managing backup collections {#managing-collections}
 
-### Collection information
+### Collection information {#collection-information}
 
 Since collections are managed through SQL, browse them using schema commands:
 
@@ -180,7 +180,7 @@ ydb scheme ls .backups/collections/
 ydb scheme describe .backups/collections/shop_backups/
 ```
 
-### Collection status monitoring
+### Collection status monitoring {#collection-status-monitoring}
 
 Check the health and status of your collections:
 
@@ -189,7 +189,7 @@ Check the health and status of your collections:
 3. **Monitor storage usage**
 4. **Validate backup accessibility**
 
-### Collection lifecycle management
+### Collection lifecycle management {#collection-lifecycle-management}
 
 **Creation checklist:**
 
@@ -208,7 +208,7 @@ Check the health and status of your collections:
 
 ## Retention and cleanup {#retention-cleanup}
 
-### Backup chain considerations
+### Backup chain considerations {#backup-chain-considerations}
 
 Before deleting backups, understand chain dependencies:
 
@@ -216,7 +216,7 @@ Before deleting backups, understand chain dependencies:
 - **Incremental backups**: Depend on all previous backups in chain
 - **Chain breaks**: Deleting intermediate backups breaks the chain
 
-### Manual cleanup strategies
+### Manual cleanup strategies {#manual-cleanup-strategies}
 
 **Safe cleanup approach:**
 
@@ -243,7 +243,7 @@ ydb scheme rmdir -r .backups/collections/shop_backups/backup_20240302/
 # ... (remove all related incrementals)
 ```
 
-### Retention policies
+### Retention policies {#retention-policies}
 
 Implement retention policies based on:
 
@@ -261,7 +261,7 @@ Implement retention policies based on:
 
 ## Backup validation and verification {#validation}
 
-### Pre-backup validation
+### Pre-backup validation {#pre-backup-validation}
 
 Before creating backups:
 
@@ -270,7 +270,7 @@ Before creating backups:
 3. **Validate permissions**: Verify backup operation permissions
 4. **Test connectivity**: Ensure database connectivity is stable
 
-### Post-backup validation
+### Post-backup validation {#post-backup-validation}
 
 After backup completion:
 
@@ -279,7 +279,7 @@ After backup completion:
 3. **Check backup size**: Compare with expected size
 4. **Test chain integrity**: Verify backup dependencies
 
-### Backup testing procedures
+### Backup testing procedures {#backup-testing-procedures}
 
 Regularly test backup restoration:
 
@@ -290,7 +290,7 @@ Regularly test backup restoration:
 
 ## Troubleshooting common issues {#troubleshooting}
 
-### Backup operation failures
+### Backup operation failures {#backup-operation-failures}
 
 **Common causes and solutions:**
 
@@ -299,7 +299,7 @@ Regularly test backup restoration:
 - **Table lock conflicts**: Avoid concurrent schema changes during backup
 - **Network issues**: Check database connectivity during backup
 
-### Backup chain issues
+### Backup chain issues {#backup-chain-issues}
 
 **Broken chains:**
 
@@ -313,7 +313,7 @@ Regularly test backup restoration:
 - Verify table consistency across backup points
 - Review backup logs for errors or warnings
 
-### Performance issues
+### Performance issues {#performance-issues}
 
 **Slow backup operations:**
 
@@ -331,7 +331,7 @@ Regularly test backup restoration:
 
 ## Recovery and restoration {#recovery}
 
-### Restoration planning
+### Restoration planning {#restoration-planning}
 
 Before restoring from backups:
 
@@ -340,7 +340,7 @@ Before restoring from backups:
 3. **Prepare target environment**: Ensure target database is ready
 4. **Coordinate with stakeholders**: Communicate restoration timeline
 
-### Export and import restoration
+### Export and import restoration {#export-import-restoration}
 
 For complete disaster recovery, use export/import operations:
 
@@ -352,7 +352,7 @@ ydb tools dump -p .backups/collections/shop_backups -o shop_backups_export
 ydb tools restore -i shop_backups_export -d /Root/restored_db
 ```
 
-### Point-in-time recovery
+### Point-in-time recovery {#point-in-time-recovery}
 
 To restore to a specific point in time:
 
@@ -363,27 +363,27 @@ To restore to a specific point in time:
 
 ## Best practices summary {#best-practices}
 
-### Backup strategy
+### Backup strategy {#backup-strategy}
 
 - **Regular schedule**: Establish consistent backup timing
 - **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains
 - **Multiple collections**: Separate collections for different applications
 - **Documentation**: Maintain documentation of backup procedures
 
-### Monitoring and maintenance
+### Monitoring and maintenance {#monitoring-maintenance}
 
 - **Manual validation**: Periodically test backup restoration
 - **Performance tracking**: Monitor backup duration and resource usage
 - **Storage monitoring**: Track backup storage growth
 
-### Security and compliance
+### Security and compliance {#security-compliance}
 
 - **Access control**: Restrict backup operation permissions
 - **Audit logging**: Log backup and restoration activities
 - **Data protection**: Ensure backups are properly secured
 - **Compliance**: Follow organizational data retention policies
 
-## See also
+## See also {#see-also}
 
 - [Backup collections concepts](../../concepts/backup-collections.md) - Core concepts and architecture
 - [Common recipes](../../recipes/backup-collections.md) - Real-world usage examples
