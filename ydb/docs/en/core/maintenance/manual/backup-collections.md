@@ -29,6 +29,7 @@ SELECT * FROM `/.backups/collections/collection_name`;
 ```
 
 **Parameters:**
+
 - `collection_name`: Name for the backup collection (must be unique)
 - `table_path`: Full path to the table in the database
 - `backup_id`: Specific backup identifier for restoration
@@ -36,8 +37,6 @@ SELECT * FROM `/.backups/collections/collection_name`;
 - `INCREMENTAL_BACKUP_ENABLED`: Must be 'true' to enable incremental backups
 
 For detailed syntax, see [YQL reference documentation](../../yql/reference/syntax/index.md).
-
-For complete YQL syntax documentation, see [YQL backup collections syntax](../../yql/reference/syntax/backup-collections.md).
 
 ### Basic collection creation {#basic-collection-creation}
 
