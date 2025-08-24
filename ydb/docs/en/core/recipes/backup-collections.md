@@ -139,39 +139,27 @@ ydb tools dump -p .backups/collections/production_backups/backup_20240315_120000
 ### Importing to target database
 
 ```bash
-# Import backup to target database
-ydb tools restore -i /backup/exports/production_backups_export -d /Root/restored_production
+# Import backup to target database (restores to backup collections)
+ydb tools restore -i /backup/exports/production_backups_export -d .backups/collections/production_backups_restored
 
-# Import specific backup
-ydb tools restore -i /backup/exports/backup_20240315 -d /Root/restored_data
-```
+# Import specific backup into a collection
+ydb tools restore -i /backup/exports/backup_20240315 -d .backups/collections/emergency_restore
 
-## Collection management {#collection-management}
-
-### Checking collection status
-
-```bash
-# List all collections
-ydb scheme ls .backups/collections/
-
-# Check specific collection contents
-ydb scheme ls .backups/collections/production_backups/ | sort
-
-# Get collection details
-ydb scheme describe .backups/collections/production_backups/
+# Note: Importing directly into .backups/collections/ must maintains backup collection structure
 ```
 
 ### Manual cleanup
 
 ```bash
+```bash
 # Remove old backup directories (manual cleanup)
-ydb scheme rmdir -r .backups/collections/production_backups/backup_20240301_120000/
+ydb scheme rmdir -r .backups/collections/production_backups/20250821141425Z_full/
 
 # Always remove complete chains, never partial chains
 # Example: Remove old full backup and all its incrementals
-ydb scheme rmdir -r .backups/collections/production_backups/backup_20240301_120000/
-ydb scheme rmdir -r .backups/collections/production_backups/backup_20240301_180000/
-ydb scheme rmdir -r .backups/collections/production_backups/backup_20240302_060000/
+ydb scheme rmdir -r .backups/collections/production_backups/20250821141425Z_full/
+ydb scheme rmdir -r .backups/collections/production_backups/20250821141451Z_incremental/
+ydb scheme rmdir -r .backups/collections/production_backups/20250822070000Z_incremental/
 ```
 
 ### Collection lifecycle
@@ -202,49 +190,6 @@ ydb tools dump -p .backups/collections/production_backups/backup_20240315_120000
 # Test restore to temporary location (in test environment)
 ydb tools restore -i /tmp/test_restore -d /Root/test_restore_verification
 ```
-
-## Best practices summary {#best-practices}
-
-### Backup strategy {#backup-strategy}
-
-- **Manage chain length**: Take new full backups periodically to avoid excessively long incremental chains.
-- **Separate collections by service**: Use different collections for different applications/services.
-- **Regular full backups**: Take full backups weekly or bi-weekly.
-- **Test regularly**: Periodically verify backups can be restored.
-
-### Operations {#operations}
-
-- **Monitor operation status**: Always check backup operation completion.
-- **Clean up manually**: Remove old backup chains manually to manage storage.
-- **Document procedures**: Maintain documentation of backup and restore procedures.
-- **Plan for disasters**: Practice restore procedures in non-production environments.
-
-### Storage management {#storage-management}
-
-- **Monitor storage usage**: Track backup storage consumption.
-- **Plan retention**: Determine how long to keep backup chains.
-- **Export important backups**: Use export/import for long-term archival.
-- **Verify chain integrity**: Never delete partial backup chains.
-
-## Common issues and solutions {#troubleshooting}
-
-### Backup operation failures {#backup-operation-failures}
-
-- **Check permissions**: Ensure user has backup operation permissions.
-- **Verify table access**: Confirm all tables in collection are accessible.
-- **Monitor resources**: Check system resources during backup operations.
-
-### Storage issues {#storage-issues}
-
-- **Clean up old backups**: Remove old backup chains to free space.
-- **Monitor backup sizes**: Track incremental backup growth.
-- **Plan storage capacity**: Estimate storage needs for backup retention.
-
-### Chain management {#chain-management}
-
-- **Avoid partial deletions**: Never delete individual backups from a chain.
-- **Document chain breaks**: Keep track of any backup chain interruptions.
-- **Start fresh chains**: Create new full backups when chains become too long.
 
 ## See also {#see-also}
 
