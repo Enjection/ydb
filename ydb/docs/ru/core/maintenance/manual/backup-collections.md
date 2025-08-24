@@ -21,6 +21,8 @@ DROP BACKUP COLLECTION `collection_name`;
 
 Для подробного синтаксиса см. [справочную документацию YQL](../../yql/reference/syntax/index.md).
 
+Для полной документации по синтаксису YQL см. [синтаксис коллекций резервных копий YQL](../../yql/reference/syntax/backup-collections.md).
+
 ### Базовое создание коллекции {#basic-collection-creation}
 
 Создайте коллекцию резервных копий с помощью SQL команд. Коллекция определяет, какие таблицы включить и настройки хранения:

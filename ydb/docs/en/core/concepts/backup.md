@@ -45,6 +45,7 @@ Learn more:
 |----------|----------|----------------|----------------|
 | **Export/import** | Large data migration, archival, production data transfers | Portability between systems, flexible formats, handles large datasets | Full snapshots only |
 | **Backup/restore** | Local development, testing, smaller production environments | Local filesystem operations, suitable for moderate data volumes | Full snapshots only, primarily for local use |
+| **Backup collections** | Production environments, large datasets | Incremental efficiency, point-in-time recovery | Requires collection setup, cluster storage only |
 
 ## See also
 

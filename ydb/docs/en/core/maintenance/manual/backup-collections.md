@@ -12,14 +12,32 @@ CREATE BACKUP COLLECTION `collection_name`
     ( TABLE `table_path` [, TABLE `table_path` ...] )
 WITH ( STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true' );
 
--- BACKUP syntax
-BACKUP `collection_name` [INCREMENTAL];
+-- BACKUP syntax (full backup)
+BACKUP `collection_name`;
+
+-- BACKUP syntax (incremental backup)
+BACKUP `collection_name` INCREMENTAL;
 
 -- DROP BACKUP COLLECTION syntax
 DROP BACKUP COLLECTION `collection_name`;
+
+-- RESTORE syntax
+RESTORE TABLE `table_path` FROM BACKUP `collection_name`.`backup_id`;
+
+-- LIST BACKUPS syntax
+SELECT * FROM `/.backups/collections/collection_name`;
 ```
 
+**Parameters:**
+- `collection_name`: Name for the backup collection (must be unique)
+- `table_path`: Full path to the table in the database
+- `backup_id`: Specific backup identifier for restoration
+- `STORAGE`: Currently only 'cluster' storage is supported
+- `INCREMENTAL_BACKUP_ENABLED`: Must be 'true' to enable incremental backups
+
 For detailed syntax, see [YQL reference documentation](../../yql/reference/syntax/index.md).
+
+For complete YQL syntax documentation, see [YQL backup collections syntax](../../yql/reference/syntax/backup-collections.md).
 
 ### Basic collection creation {#basic-collection-creation}
 
@@ -126,6 +144,22 @@ ydb scheme ls .backups/collections/production_backups/
 # Get backup metadata
 ydb scheme describe .backups/collections/production_backups/backup_20240315_120000/
 ```
+
+**Operation statuses:**
+
+- **PENDING**: Operation is queued and waiting to start
+- **RUNNING**: Backup operation is currently in progress
+- **SUCCESS**: Operation completed successfully
+- **FAILED**: Operation failed (check operation details for error information)
+- **CANCELLED**: Operation was manually cancelled
+
+**Interpreting operation output:**
+
+- **Operation ID**: Unique identifier for tracking the operation
+- **Progress**: Percentage completion for running operations
+- **Tables processed**: Number of tables completed vs. total
+- **Data size**: Amount of data processed vs. total estimated size
+- **Duration**: Time elapsed since operation started
 
 ### Check operation status {#check-operation-status}
 
