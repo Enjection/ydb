@@ -2519,6 +2519,433 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         }
     }
 
+    Y_UNIT_TEST(IncrementalBackupWithIndexes) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with one global sync index
+        TShardedTableOptions opts;
+        opts.Columns({
+            {"key", "Uint32", true, false},
+            {"value", "Uint32", false, false}
+        });
+        opts.Indexes({
+            TShardedTableOptions::TIndex{"ByValue", {"value"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+        });
+        CreateShardedTable(server, edgeActor, "/Root", "Table", opts);
+
+        // Create backup collection with incremental enabled
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MyCollection`
+              ( TABLE `/Root/Table`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+            )", false);
+
+        // Perform full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+
+        // Insert initial data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES
+                (1, 100)
+              , (2, 200)
+              , (3, 300)
+              ;
+            )");
+
+        // Update row: (2, 200) -> (2, 250)
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES (2, 250);
+            )");
+
+        // Delete row: (3, 300)
+        ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=3;)");
+
+        // Insert new row: (4, 400)
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES (4, 400);
+            )");
+
+        // Take incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Verify main table backup contains correct data
+        auto mainTableBackup = KqpSimpleExec(runtime, R"(
+            SELECT key, value FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/Table`
+            ORDER BY key
+            )");
+
+        // Should contain: (1, NULL) - not changed but tombstone or no entry, (2, 250), (3, NULL), (4, 400)
+        // Actually, incremental backup only contains changes, so: (2, 250), (3, NULL - tombstone), (4, 400)
+        Cerr << "Main table backup: " << mainTableBackup << Endl;
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 2") != TString::npos,
+            "Main table backup should contain updated key 2");
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 250") != TString::npos,
+            "Main table backup should contain new value 250");
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 3") != TString::npos,
+            "Main table backup should contain deleted key 3");
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 4") != TString::npos,
+            "Main table backup should contain new key 4");
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 400") != TString::npos,
+            "Main table backup should contain new value 400");
+
+        // Verify index backup table exists and contains correct data
+        auto indexBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByValue`
+            ORDER BY value
+            )");
+
+        Cerr << "Index backup: " << indexBackup << Endl;
+        
+        // Index should contain changes:
+        // - (200, 2) - old value deleted due to update
+        // - (250, 2) - new value from update
+        // - (300, 3) - tombstone for deleted row
+        // - (400, 4) - new insert
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 200") != TString::npos,
+            "Index backup should contain old value 200 (deleted)");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 250") != TString::npos,
+            "Index backup should contain new value 250");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 300") != TString::npos,
+            "Index backup should contain deleted value 300");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 400") != TString::npos,
+            "Index backup should contain new value 400");
+    }
+
+    Y_UNIT_TEST(IncrementalBackupWithCoveringIndex) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with covering index: ByAge on age, covering name
+        TShardedTableOptions opts;
+        opts.Columns({
+            {"key", "Uint32", true, false},
+            {"name", "Utf8", false, false},
+            {"age", "Uint32", false, false},
+            {"salary", "Uint32", false, false}
+        });
+        opts.Indexes({
+            TShardedTableOptions::TIndex{"ByAge", {"age"}, {"name"}, NKikimrSchemeOp::EIndexTypeGlobal}
+        });
+        CreateShardedTable(server, edgeActor, "/Root", "Table", opts);
+
+        // Create backup collection with incremental enabled
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MyCollection`
+              ( TABLE `/Root/Table`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+            )", false);
+
+        // Perform full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+
+        // Insert initial data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES
+                (1, 'Alice', 30u, 5000u)
+              , (2, 'Bob', 25u, 4000u)
+              ;
+            )");
+
+        // Update covered column: name changes (should appear in index)
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (1, 'Alice2', 30u, 5000u);
+            )");
+
+        // Update non-covered column: salary changes (should NOT appear in index backup as a separate change)
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (1, 'Alice2', 30u, 6000u);
+            )");
+
+        // Update indexed column: age changes (creates tombstone for old + new entry)
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (2, 'Bob', 26u, 4000u);
+            )");
+
+        // Delete row
+        ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=2;)");
+
+        // Take incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Verify index backup table exists and contains covered column data
+        auto indexBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByAge`
+            )");
+
+        Cerr << "Index backup with covering: " << indexBackup << Endl;
+        
+        // Index should contain:
+        // - Entry for (30, 1) with name changes (Alice -> Alice2)
+        // - Tombstone for old (25, 2) 
+        // - Entry for (26, 2) 
+        // - Tombstone for (26, 2) after deletion
+        // The salary change should not create a separate index entry since salary is not indexed or covered
+        
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 30") != TString::npos,
+            "Index backup should contain age 30");
+        UNIT_ASSERT_C(indexBackup.find("Alice") != TString::npos,
+            "Index backup should contain covered column name changes");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 25") != TString::npos || 
+                      indexBackup.find("uint32_value: 26") != TString::npos,
+            "Index backup should contain age changes (25 or 26)");
+        UNIT_ASSERT_C(indexBackup.find("Bob") != TString::npos,
+            "Index backup should contain covered column Bob");
+    }
+
+    Y_UNIT_TEST(IncrementalBackupMultipleIndexes) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with 3 indexes: simple, covering, composite
+        TShardedTableOptions opts;
+        opts.Columns({
+            {"key", "Uint32", true, false},
+            {"name", "Utf8", false, false},
+            {"age", "Uint32", false, false},
+            {"city", "Utf8", false, false},
+            {"salary", "Uint32", false, false}
+        });
+        opts.Indexes({
+            TShardedTableOptions::TIndex{"ByName", {"name"}, {}, NKikimrSchemeOp::EIndexTypeGlobal},
+            TShardedTableOptions::TIndex{"ByAge", {"age"}, {"salary"}, NKikimrSchemeOp::EIndexTypeGlobal},
+            TShardedTableOptions::TIndex{"ByCity", {"city", "name"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+        });
+        CreateShardedTable(server, edgeActor, "/Root", "Table", opts);
+
+        // Create backup collection with incremental enabled
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MyCollection`
+              ( TABLE `/Root/Table`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+            )", false);
+
+        // Perform full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+
+        // Insert initial data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES
+                (1, 'Alice', 30u, 'NYC', 5000u)
+              , (2, 'Bob', 25u, 'LA', 4000u)
+              ;
+            )");
+
+        // Update name: affects ByName and ByCity
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (1, 'Alice2', 30u, 'NYC', 5000u);
+            )");
+
+        // Update age: affects ByAge
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (2, 'Bob', 26u, 'LA', 4000u);
+            )");
+
+        // Delete: affects all indexes
+        ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=1;)");
+
+        // Insert new: affects all indexes
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (3, 'Carol', 28u, 'SF', 5500u);
+            )");
+
+        // Take incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Verify ByName index backup
+        auto byNameBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByName`
+            )");
+        Cerr << "ByName index backup: " << byNameBackup << Endl;
+        UNIT_ASSERT_C(byNameBackup.find("Alice") != TString::npos,
+            "ByName backup should contain Alice (deleted)");
+        UNIT_ASSERT_C(byNameBackup.find("Alice2") != TString::npos,
+            "ByName backup should contain Alice2 (updated)");
+        UNIT_ASSERT_C(byNameBackup.find("Carol") != TString::npos,
+            "ByName backup should contain Carol (new)");
+
+        // Verify ByAge index backup (covering index with salary)
+        auto byAgeBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByAge`
+            )");
+        Cerr << "ByAge index backup: " << byAgeBackup << Endl;
+        UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 30") != TString::npos,
+            "ByAge backup should contain age 30 (deleted)");
+        UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 25") != TString::npos || 
+                      byAgeBackup.find("uint32_value: 26") != TString::npos,
+            "ByAge backup should contain age change (25 or 26)");
+        UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 28") != TString::npos,
+            "ByAge backup should contain age 28 (new)");
+        UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 5500") != TString::npos,
+            "ByAge backup should contain covered salary 5500");
+
+        // Verify ByCity index backup (composite key)
+        auto byCityBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByCity`
+            )");
+        Cerr << "ByCity index backup: " << byCityBackup << Endl;
+        UNIT_ASSERT_C(byCityBackup.find("NYC") != TString::npos,
+            "ByCity backup should contain NYC");
+        UNIT_ASSERT_C(byCityBackup.find("Alice") != TString::npos,
+            "ByCity backup should contain Alice (part of composite key)");
+        UNIT_ASSERT_C(byCityBackup.find("Alice2") != TString::npos,
+            "ByCity backup should contain Alice2 (updated composite key)");
+        UNIT_ASSERT_C(byCityBackup.find("SF") != TString::npos,
+            "ByCity backup should contain SF (new)");
+        UNIT_ASSERT_C(byCityBackup.find("Carol") != TString::npos,
+            "ByCity backup should contain Carol (new composite key)");
+    }
+
+    Y_UNIT_TEST(OmitIndexesIncrementalBackup) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with one global sync index
+        TShardedTableOptions opts;
+        opts.Columns({
+            {"key", "Uint32", true, false},
+            {"value", "Uint32", false, false}
+        });
+        opts.Indexes({
+            TShardedTableOptions::TIndex{"ByValue", {"value"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+        });
+        CreateShardedTable(server, edgeActor, "/Root", "Table", opts);
+
+        // Create backup collection with OmitIndexes: true
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MyCollection`
+              ( TABLE `/Root/Table`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              , OMIT_INDEXES = 'true'
+              );
+            )", false);
+
+        // Perform full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+
+        // Insert and modify data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES
+                (1, 100)
+              , (2, 200)
+              , (3, 300)
+              ;
+            )");
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES (2, 250);
+            )");
+
+        ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=3;)");
+
+        // Take incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
+
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Verify main table backup exists
+        auto mainTableBackup = KqpSimpleExec(runtime, R"(
+            SELECT key, value FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/Table`
+            ORDER BY key
+            )");
+
+        Cerr << "Main table backup (with OmitIndexes): " << mainTableBackup << Endl;
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 2") != TString::npos,
+            "Main table backup should exist with OmitIndexes flag");
+        UNIT_ASSERT_C(mainTableBackup.find("uint32_value: 250") != TString::npos,
+            "Main table backup should contain updated value");
+
+        // Verify index backup directory does NOT exist
+        // Attempt to query index backup table - should fail or return empty
+        bool indexBackupExists = true;
+        try {
+            auto indexBackup = KqpSimpleExec(runtime, R"(
+                SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByValue`
+                )");
+            // If we got here without exception, check if it's empty or doesn't exist
+            if (indexBackup.empty() || indexBackup.find("ERROR") != TString::npos || 
+                indexBackup.find("not found") != TString::npos || indexBackup.find("doesn't exist") != TString::npos) {
+                indexBackupExists = false;
+            }
+            Cerr << "Index backup query result (should not exist): " << indexBackup << Endl;
+        } catch (...) {
+            // Expected - index backup table should not exist
+            indexBackupExists = false;
+        }
+
+        UNIT_ASSERT_C(!indexBackupExists,
+            "Index backup should NOT exist when OmitIndexes flag is set");
+    }
+
 } // Y_UNIT_TEST_SUITE(IncrementalBackup)
 
 } // NKikimr
