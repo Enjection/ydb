@@ -85,7 +85,7 @@ This document outlines the implementation plan for supporting incremental backup
 
 ### Phase 2: Backup Collection Operations
 
-#### 2.1 Modify Full Backup Operation
+#### 2.1 Modify Full Backup Operation ✓ COMPLETED
 **File to modify:**
 - `/ydb/core/tx/schemeshard/schemeshard__operation_backup_backup_collection.cpp`
 
@@ -234,56 +234,79 @@ for (const auto& item : bc->Description.GetExplicitEntryList().GetEntries()) {
 
 ---
 
-### Phase 3: Testing Strategy
+### Phase 3: Testing Strategy (PARTIALLY COMPLETED)
 
-#### 3.1 Unit Tests
-**Files to create:**
-- `/ydb/core/tx/schemeshard/ut_backup_collection_index.cpp`
+#### 3.1 Unit Tests - Phase 2.1 Tests ✓ COMPLETED
+**Files modified:**
+- `/ydb/core/tx/schemeshard/ut_backup_collection/ut_backup_collection.cpp` (added 6 tests)
 
-**Test scenarios (ONLY for global sync indexes):**
+**Test scenarios for Phase 2.1 (Full Backup CDC Stream Creation):**
 
-1. **Single table, single index** at `/Root/db1/table1`:
+1. **SingleTableWithGlobalSyncIndex** ✓:
    - Table with one global sync covering index
+   - Full backup
+   - **VERIFIES**: CDC stream on index impl table
+   - **VERIFIES**: CDC stream names match pattern
+
+2. **SingleTableWithMultipleGlobalSyncIndexes** ✓:
+   - Table with 2 global sync indexes (covering and non-covering)
+   - Full backup
+   - **VERIFIES**: All index CDC streams created
+   - **VERIFIES**: All streams use same timestamp
+
+3. **MultipleTablesWithIndexes** ✓:
+   - 2 tables, each with 1 global sync index
+   - Full backup
+   - **VERIFIES**: Independent CDC streams per index
+   - **VERIFIES**: Correct isolation between tables
+
+4. **TableWithMixedIndexTypes** ✓:
+   - Table with global sync + async indexes
+   - **VERIFIES**: Only global sync indexes get CDC streams
+   - **VERIFIES**: Async indexes are skipped
+
+5. **IncrementalBackupWithIndexes** ✓:
+   - Table with 1 global sync index
    - Full backup + incremental backup
-   - Verify CDC stream on index impl table
-   - Verify backup table at `__ydb_backup_meta/indexes/table1/index1`
+   - **VERIFIES**: CDC streams created on main table and index ✓
+   - **VERIFIES**: Main table backup table created ✓
+   - **NOT VERIFIED**: Index backup table (Phase 2.2 - has TODO comment for later)
 
-2. **Single table, multiple indexes** at `/Root/db1/table1`:
-   - Table with 2-3 global sync indexes (mix of covering and non-covering)
-   - Different key types (int, string, etc.)
-   - Full backup + incremental backup
-   - Verify all index CDC streams created
-   - Verify all backup tables in correct paths
+6. **OmitIndexesFlag** ✓:
+   - Table with global sync index
+   - IncrementalBackupConfig with `OmitIndexes: true`
+   - **VERIFIES**: Main table gets CDC stream
+   - **VERIFIES**: Index does NOT get CDC stream (flag respected)
 
-3. **Multiple tables with indexes** at shallow path (`/Root/db1/`):
-   - 2 tables, each with 1-2 global sync indexes
-   - Full backup + incremental backup
-   - Verify independent CDC streams per index
-   - Verify correct separation in backup structure
+**What's tested (Phase 2.1 only):**
+- ✅ CDC streams created on correct source tables
+- ✅ CDC streams on index implementation tables
+- ✅ Only global sync indexes get CDC streams
+- ✅ CDC stream naming follows pattern
+- ✅ Multiple indexes handled correctly
+- ✅ `OmitIndexes` flag is respected (no CDC on indexes when true)
+- ✅ Incremental backup disabled = no CDC on indexes
 
-4. **Table with indexes at deep path** (`/Root/db1/folder1/folder2/table1`):
-   - Table with 1-2 global sync indexes
-   - Full backup + incremental backup
-   - Verify path handling with `TrySplitPathByDb()`
-   - Verify backup path: `__ydb_backup_meta/indexes/folder1/folder2/table1/index1`
-
-5. **Mixed index types**:
-   - Table with global sync + non-global-sync indexes (async, vector, etc.)
-   - Verify only global sync indexes get CDC streams
-   - Verify non-global-sync indexes are skipped
-
-**Key verifications:**
-- CDC streams created on correct source tables
-- Service directory `__ydb_backup_meta/indexes` created on first incremental
-- Backup tables at correct paths
-- No errors during backup operations
+**What's NOT tested yet (requires Phase 2.2):**
+- ❌ Service directory `__ydb_backup_meta/indexes` creation
+- ❌ Backup tables created at `__ydb_backup_meta/indexes/{table}/{index}`
+- ❌ Incremental backup operation for indexes
 
 ---
 
 ## Implementation Priority Order
 
-1. **Phase 2**: Modify backup collection operations (3-5 days)
-2. **Phase 3**: Testing (1 week)
+1. **Phase 2.1**: Modify full backup operation ✅ COMPLETED
+   - CDC stream creation for indexes implemented
+   - Code passes linting
+
+2. **Phase 2.2**: Modify incremental backup operation ⏳ PENDING
+   - Backup table creation for indexes
+   - Service directory structure creation
+
+3. **Phase 3**: Testing ⚠️ PARTIALLY COMPLETED
+   - Phase 2.1 tests completed (6 tests should pass)
+   - Phase 2.2 test coverage added as TODO comments in test code
 
 **Out of scope:**
 - Restore operations
@@ -423,12 +446,18 @@ auto& relativePath = paths.second;
 
 ## Success Criteria
 
-- [ ] Full backups create CDC streams on global sync index impl tables
+**Phase 2.1 (Full Backup) - COMPLETED:**
+- [x] Full backups create CDC streams on global sync index impl tables
+- [x] CDC streams created for each global sync index in parallel with main table
+- [x] Non-global-sync indexes are skipped
+- [x] Unit tests written for CDC stream creation
+- [x] All code passes linting
+- [ ] Tests pass when executed (requires build)
+
+**Phase 2.2 (Incremental Backup) - NOT YET IMPLEMENTED:**
 - [ ] Incremental backups create backup tables in `__ydb_backup_meta/indexes/{table_path}/{index_name}`
 - [ ] Service directory created only when incremental backup is performed
-- [ ] CDC streams created for each global sync index in parallel with main table
-- [ ] Non-global-sync indexes are skipped
-- [ ] All unit tests pass
+- [ ] Tests for incremental backup functionality (1 test written but will fail until implemented)
 - [ ] Performance acceptable with multiple indexes
 
 ---
