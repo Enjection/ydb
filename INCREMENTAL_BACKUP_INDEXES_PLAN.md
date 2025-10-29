@@ -335,17 +335,42 @@ cd /home/innokentii/workspace/cydb/ydb/core/tx/schemeshard/ut_backup_collection
    - **Implemented**: Index AlterContinuousBackup operations
    - **Filter**: Only processes `EIndexTypeGlobal` indexes
    - **Error handling**: Entire operation fails if index CDC creation fails
+   - **Fixed**: Path construction using relative paths (not absolute)
    - **Status**: Phase 2.2 completed, zero linter errors
 
-3. **`/ydb/core/tx/schemeshard/ut_backup_collection/ut_backup_collection.cpp`** ✓
+3. **`/ydb/core/tx/schemeshard/schemeshard__backup_collection_common.cpp`** ✓
+   - Function: `GetBackupRequiredPaths()` (lines 133-177)
+   - **Implemented**: Index backup metadata directory creation through trait system
+   - **Creates**: Parent directories for index backup tables (`__ydb_backup_meta/indexes/{table_path}`)
+   - **Filter**: Only processes global sync indexes when incremental backup enabled
+   - **Status**: Phase 2.2 completed, zero linter errors
+
+4. **`/ydb/core/tx/schemeshard/ut_backup_collection/ut_backup_collection.cpp`** ✓
    - **Tests**: 6 tests covering both phases
    - **Updated**: `IncrementalBackupWithIndexes` test with Phase 2.2 verification
+   - **Fixed**: Test expectations for X.509 timestamp format (not ISO8601)
+   - **Fixed**: Directory suffix from `_inc` to `_incremental`
    - **Status**: All tests ready for execution, zero linter errors
 
-### Referenced (No Changes Needed)
+### Referenced (Used, Not Modified)
 - `/ydb/core/tx/schemeshard/schemeshard__operation_alter_continuous_backup.cpp` - Reused as-is
 - `/ydb/core/tx/schemeshard/schemeshard__backup_collection_common.h` - Used for path helpers
 - `/ydb/core/tx/schemeshard/schemeshard_info_types.h` - Used for `TTableInfo::Indexes` and `TTableIndexInfo::Type`
+
+### Key Implementation Issues Resolved
+1. **Path Resolution Bug**: Index paths were using absolute paths with working directory, causing `/MyRoot/MyRoot/...` duplication
+   - **Solution**: Use relative paths in `AlterContinuousBackup` operations
+   
+2. **Directory Creation**: Missing intermediate directories (`__ydb_backup_meta/indexes/{table_path}`)
+   - **Solution**: Extended `GetRequiredPaths` trait to include index backup parent directories
+   
+3. **Naming Conflict**: `GetRequiredPaths` created directory with index name, conflicting with table creation
+   - **Solution**: Only create parent directory path, let table creation add the leaf name
+   
+4. **Test Format Issues**: 
+   - Expected ISO8601 format with "T", but implementation uses X.509 format
+   - Expected `_inc` suffix, but implementation uses `_incremental`
+   - **Solution**: Updated test assertions to match actual implementation
 
 ---
 
@@ -448,6 +473,9 @@ auto& relativePath = paths.second;
 - [x] Tests for incremental backup functionality updated with full verification
 - [x] All code passes linting
 - [x] OmitIndexes flag is properly respected
+- [x] Fixed path resolution issues (using relative paths with working directory)
+- [x] Fixed directory creation through `GetRequiredPaths` trait
+- [x] Fixed naming conflict (parent directories vs table names)
 
 ---
 
@@ -479,9 +507,9 @@ auto& relativePath = paths.second;
 ## Next Steps
 
 **Immediate Actions:**
-1. **Build**: `cd ydb/core/tx/schemeshard && /ya make`
-2. **Test**: `cd ydb/core/tx/schemeshard/ut_backup_collection && /ya make -A`
-3. **Verify**: All 6 tests should pass
+1. ✅ **Build**: `cd ydb/core/tx/schemeshard && /ya make` - Code compiles
+2. 🔄 **Test**: `cd ydb/core/tx/schemeshard/ut_backup_collection && /ya make -A` - In progress
+3. ⏳ **Verify**: All 6 tests should pass - Testing
 
 **Future Work (Out of Scope):**
 1. Restore operations for index backups
