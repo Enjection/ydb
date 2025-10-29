@@ -2218,14 +2218,17 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             NLs::IsTable,
         });
 
-        // NOTE: Index backup table verification removed - Phase 2.2 not yet implemented
-        // TODO: After Phase 2.2 implementation, verify:
-        // - __ydb_backup_meta/indexes/TableForIncremental/ValueIndex exists
-        // - It is a table with correct schema
+        // Verify index backup table exists in __ydb_backup_meta/indexes/TableForIncremental/ValueIndex
+        TString indexBackupPath = "/MyRoot/.backups/collections/" DEFAULT_NAME_1 "/" + incrBackupDir + 
+            "/__ydb_backup_meta/indexes/TableForIncremental/ValueIndex";
+        TestDescribeResult(DescribePath(runtime, indexBackupPath), {
+            NLs::PathExist,
+            NLs::IsTable,
+        });
 
         Cerr << "SUCCESS: Full backup created CDC streams for both main table and index" << Endl;
-        Cerr << "         Incremental backup created backup table for main table" << Endl;
-        Cerr << "NOTE:    Index backup table creation not verified (Phase 2.2 pending)" << Endl;
+        Cerr << "         Incremental backup created backup tables for both main table and index" << Endl;
+        Cerr << "         Index backup table verified at: " << indexBackupPath << Endl;
     }
 
     Y_UNIT_TEST(OmitIndexesFlag) {
