@@ -1793,8 +1793,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
 
         // Verify CDC stream names match pattern and use same timestamp
         UNIT_ASSERT_VALUES_EQUAL(mainTableCdcName, indexCdcName);
-        UNIT_ASSERT_C(mainTableCdcName.Contains("T") && mainTableCdcName.Contains("Z"), 
-            "CDC stream name should have ISO8601 timestamp format");
+        UNIT_ASSERT_C(mainTableCdcName.Contains("Z") && mainTableCdcName.EndsWith("_continuousBackupImpl"), 
+            "CDC stream name should have X.509 timestamp format (YYYYMMDDHHMMSSZ_continuousBackupImpl)");
     }
 
     Y_UNIT_TEST(SingleTableWithMultipleGlobalSyncIndexes) {
@@ -2198,12 +2198,13 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             NLs::ChildrenCount(2), // full + incremental
         });
 
-        // Find the incremental backup directory (should end with "_inc")
+        // Find the incremental backup directory (should end with "_incremental")
         auto collectionDesc = DescribePath(runtime, "/MyRoot/.backups/collections/" DEFAULT_NAME_1, true, true);
         TString incrBackupDir;
         for (size_t i = 0; i < collectionDesc.GetPathDescription().ChildrenSize(); ++i) {
             const auto& child = collectionDesc.GetPathDescription().GetChildren(i);
-            if (child.GetName().EndsWith("_inc")) {
+            Cerr << "Child: " << child.GetName() << " PathState: " << child.GetPathState() << Endl;
+            if (child.GetName().EndsWith("_incremental")) {
                 incrBackupDir = child.GetName();
                 break;
             }
