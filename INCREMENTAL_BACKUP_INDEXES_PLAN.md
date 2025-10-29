@@ -279,15 +279,28 @@ cd /home/innokentii/workspace/cydb/ydb/core/tx/schemeshard/ut_backup_collection
 1. **Phase 2.1**: Modify full backup operation ✅ COMPLETED
    - CDC stream creation for indexes implemented
    - Code passes linting
+   - Tests passing
 
 2. **Phase 2.2**: Modify incremental backup operation ✅ COMPLETED
    - Backup table creation for indexes implemented
    - Service directory structure creation implemented
    - OmitIndexes flag support added
+   - Path resolution issues fixed
+   - Directory creation through GetRequiredPaths trait
+   - Tests passing
 
 3. **Phase 3**: Testing ✅ COMPLETED
-   - Phase 2.1 tests completed (6 tests)
+   - Phase 2.1 tests completed (6 tests total)
    - Phase 2.2 test verification fully enabled in `IncrementalBackupWithIndexes` test
+   - All tests passing successfully
+
+4. **Phase 4**: Data Verification Tests 🔄 NEXT PHASE
+   - Datashard-level tests for index backup data correctness
+   - Verify tombstones for deletions
+   - Verify covering index behavior
+   - Verify multi-index scenarios
+   - End-to-end restore verification
+   - See detailed plan in "Future Work" section
 
 **Out of scope:**
 - Restore operations
@@ -459,13 +472,13 @@ auto& relativePath = paths.second;
 
 ## Success Criteria
 
-**Phase 2.1 (Full Backup) - COMPLETED:**
+**Phase 2.1 (Full Backup) - ✅ COMPLETED:**
 - [x] Full backups create CDC streams on global sync index impl tables
 - [x] CDC streams created for each global sync index in parallel with main table
 - [x] Non-global-sync indexes are skipped
 - [x] Unit tests written for CDC stream creation
 - [x] All code passes linting
-- [ ] Tests pass when executed (requires build)
+- [x] Tests pass when executed - All 6 tests passing
 
 **Phase 2.2 (Incremental Backup) - ✅ COMPLETED:**
 - [x] Incremental backups create backup tables in `__ydb_backup_meta/indexes/{table_path}/{index_name}`
@@ -508,11 +521,75 @@ auto& relativePath = paths.second;
 
 **Immediate Actions:**
 1. ✅ **Build**: `cd ydb/core/tx/schemeshard && /ya make` - Code compiles
-2. 🔄 **Test**: `cd ydb/core/tx/schemeshard/ut_backup_collection && /ya make -A` - In progress
-3. ⏳ **Verify**: All 6 tests should pass - Testing
+2. ✅ **Test**: `cd ydb/core/tx/schemeshard/ut_backup_collection && /ya make -A` - All tests passing
+3. ✅ **Verify**: All 6 tests passed successfully
 
-**Future Work (Out of Scope):**
-1. Restore operations for index backups
-2. Handle index schema changes (add/remove/alter between backups)
-3. Support for other index types (async, vector, etc.)
-4. Performance testing with many indexes (>10 per table)
+**Future Work:**
+
+### Phase 4: Data Verification Tests (NEXT PHASE) 🔄
+**Goal**: Verify that index backup tables contain correct data, including tombstones and covering columns
+
+**Test file**: `/ydb/core/tx/datashard/datashard_ut_incremental_backup.cpp`
+
+**Tests to implement:**
+
+1. **IncrementalBackupWithIndexes** - Basic index backup data verification
+   - Create table with secondary index
+   - Insert initial data
+   - Perform updates, deletes, inserts
+   - Take incremental backup
+   - **Verify**: Main table backup contains correct data with tombstones
+   - **Verify**: Index backup table at `__ydb_backup_meta/indexes/{table}/{index}` contains correct data
+   - **Verify**: Deleted entries appear as tombstones in index backup
+   - **Verify**: Updated entries show new values in index backup
+   - **Verify**: New entries appear in index backup
+
+2. **IncrementalBackupWithCoveringIndex** - Covering index verification
+   - Create table with covering index
+   - Insert initial data with covered and non-covered columns
+   - Update covered columns (should appear in index backup)
+   - Update non-covered columns (should NOT appear in index backup)
+   - Delete rows (tombstones in index backup)
+   - Take incremental backup
+   - **Verify**: Covering index backup includes covered column data
+   - **Verify**: Changes to non-covered columns don't appear in index backup
+   - **Verify**: Tombstones for deleted rows
+
+3. **IncrementalBackupMultipleIndexes** - Complex multi-index scenario
+   - Create table with multiple indexes (simple, covering, composite)
+   - Perform complex operations affecting different indexes differently
+   - Take incremental backup
+   - **Verify**: Each index backup contains only relevant changes
+   - **Verify**: Simple index (ByName): name changes and tombstones
+   - **Verify**: Covering index (ByAge): age changes, salary updates in covered column, tombstones
+   - **Verify**: Composite index (ByCity): multi-column key changes, tombstones
+   - **Verify**: Updates to non-indexed columns don't appear in wrong index backups
+
+4. **RestoreWithIndexesFromIncrementalBackup** - End-to-end restore verification
+   - Create table with covering index
+   - Insert and modify data
+   - Take full + incremental backup
+   - Save expected state (main table and index view)
+   - Drop table
+   - Restore from backup
+   - **Verify**: Restored main table matches expected state
+   - **Verify**: Restored index matches expected state
+   - **Verify**: Index queries work correctly on restored data
+
+**Key verification points:**
+- Index backup tables exist at correct paths
+- Tombstones for deletions (metadata indicates deletion)
+- Updates to indexed columns captured correctly
+- Covering indexes include covered column data
+- Composite indexes handle multi-column keys
+- Non-indexed column updates don't pollute index backups
+- Restore reconstructs both table and index data correctly
+
+**Implementation status**: 📝 Not started (next phase)
+
+---
+
+**Out of Scope:**
+1. Handle index schema changes (add/remove/alter between backups)
+2. Support for other index types (async, vector, etc.)
+3. Performance testing with many indexes (>10 per table)
