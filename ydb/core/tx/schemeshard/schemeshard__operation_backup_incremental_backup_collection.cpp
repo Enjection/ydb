@@ -258,8 +258,8 @@ TVector<ISubOperation::TPtr> CreateBackupIncrementalBackupCollection(TOperationI
                 Y_ABORT_UNLESS(indexPath.Base()->GetChildren().size() == 1);
                 auto [implTableName, implTablePathId] = *indexPath.Base()->GetChildren().begin();
 
-                // Build full path to index impl table (SOURCE table in main database)
-                TString indexImplTablePath = JoinPath({item.GetPath(), childName, implTableName});
+                // Build relative path to index impl table (relative to working dir)
+                TString indexImplTableRelPath = JoinPath({relativeItemPath, childName, implTableName});
 
                 // Create AlterContinuousBackup for index impl table
                 NKikimrSchemeOp::TModifyScheme modifyScheme;
@@ -268,7 +268,7 @@ TVector<ISubOperation::TPtr> CreateBackupIncrementalBackupCollection(TOperationI
                 modifyScheme.SetInternal(true);
 
                 auto& cb = *modifyScheme.MutableAlterContinuousBackup();
-                cb.SetTableName(indexImplTablePath);  // Source: /Root/db1/table1/index1/indexImplTable
+                cb.SetTableName(indexImplTableRelPath);  // Relative path: table1/index1/indexImplTable
 
                 auto& ib = *cb.MutableTakeIncrementalBackup();
                 // Destination: {backup_collection}/{timestamp}_inc/__ydb_backup_meta/indexes/{table_path}/{index_name}
