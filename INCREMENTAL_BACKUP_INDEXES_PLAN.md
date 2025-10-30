@@ -666,6 +666,7 @@ cd ydb/core/tx/datashard && /ya make -A
 - All 4 tests implemented (326 lines of test code)
 - Zero linter errors
 - Tests use standard YDB test infrastructure (CreateShardedTable, ExecSQL, KqpSimpleExec)
+- **Fix applied**: Added 100ms SimulateSleep after each DML operation to allow index table writes to propagate in simulated runtime before incremental backup
 - **KQP Layer Support Added**:
   - Added `omit_indexes` to supported settings in KQP type annotation
   - Added `OmitIndexes` field to `TBackupCollectionSettings` structure
