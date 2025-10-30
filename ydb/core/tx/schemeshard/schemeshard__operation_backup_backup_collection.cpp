@@ -190,7 +190,7 @@ TVector<ISubOperation::TPtr> CreateBackupBackupCollection(TOperationId opId, con
                 
                 // Create CDC stream on index impl table
                 NKikimrSchemeOp::TCreateCdcStream createCdcStreamOp;
-                createCdcStreamOp.SetTableName(indexTablePath.PathString());
+                createCdcStreamOp.SetTableName(implTableName);  // Use relative name only
                 auto& streamDescription = *createCdcStreamOp.MutableStreamDescription();
                 streamDescription.SetName(streamName);  // Same stream name as main table
                 streamDescription.SetMode(NKikimrSchemeOp::ECdcStreamModeUpdate);
