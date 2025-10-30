@@ -2867,6 +2867,13 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (3, 'Carol', 28u, 'SF', 5500u);
             )");
 
+        // Debug: Verify index tables have data before backup
+        auto byNameIndexData = KqpSimpleExec(runtime, R"(
+            SELECT name, key FROM `/Root/Table/ByName/indexImplTable`
+            ORDER BY name
+            )");
+        Cerr << "ByName index table data BEFORE incremental backup: " << byNameIndexData << Endl;
+
         // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
