@@ -212,14 +212,19 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
     }
 
     TString FindIncrementalBackupDir(TTestActorRuntime& runtime, const TActorId& sender, const TString& collectionPath) {
-        auto listDesc = Ls(runtime, sender, collectionPath);
-        const auto& collectionEntry = listDesc->ResultSet.at(0);
-        UNIT_ASSERT(collectionEntry.ListNodeEntry);
+        auto request = MakeHolder<TEvTxUserProxy::TEvNavigate>();
+        request->Record.MutableDescribePath()->SetPath(collectionPath);
+        request->Record.MutableDescribePath()->MutableOptions()->SetReturnChildren(true);
+        runtime.Send(new IEventHandle(MakeTxProxyID(), sender, request.Release()));
+        auto reply = runtime.GrabEdgeEventRethrow<NSchemeShard::TEvSchemeShard::TEvDescribeSchemeResult>(sender);
         
-        const auto& children = collectionEntry.ListNodeEntry->Children;
-        for (const auto& child : children) {
-            if (child.Name.EndsWith("_incremental")) {
-                return child.Name;
+        UNIT_ASSERT_EQUAL(reply->Get()->GetRecord().GetStatus(), NKikimrScheme::EStatus::StatusSuccess);
+        
+        const auto& pathDescription = reply->Get()->GetRecord().GetPathDescription();
+        for (ui32 i = 0; i < pathDescription.ChildrenSize(); ++i) {
+            const auto& child = pathDescription.GetChildren(i);
+            if (child.GetName().EndsWith("_incremental")) {
+                return child.GetName();
             }
         }
         return "";
