@@ -2583,6 +2583,14 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Wait for CDC streams to be fully activated on all tables (including index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
+        // Debug: Verify CDC streams are created on both main table and index table
+        Cerr << "CDC_DEBUG: Checking CDC streams after full backup..." << Endl;
+        auto mainTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table", true, true);
+        Cerr << "CDC_DEBUG: Main table children: " << mainTableCdcCheck << Endl;
+        
+        auto indexTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table/ByValue/indexImplTable", true, true);
+        Cerr << "CDC_DEBUG: Index impl table children: " << indexTableCdcCheck << Endl;
+
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, value) VALUES
@@ -2610,7 +2618,10 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             SELECT value, key FROM `/Root/Table/ByValue/indexImplTable`
             ORDER BY value
             )");
-        Cerr << "Index table data BEFORE incremental backup: " << indexDataBeforeBackup << Endl;
+        Cerr << "CDC_DEBUG: Index table data BEFORE incremental backup: " << indexDataBeforeBackup << Endl;
+        
+        // Debug: Check which tables are in datashard TableInfos
+        Cerr << "CDC_DEBUG: About to wait for CDC to capture changes..." << Endl;
 
         // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
@@ -2654,7 +2665,14 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             ORDER BY value
             )");
 
-        Cerr << "Index backup: " << indexBackup << Endl;
+        Cerr << "CDC_DEBUG: Index backup result: " << indexBackup << Endl;
+        
+        // Debug: Try to understand why index backup is empty by checking CDC stream state
+        auto mainCdcStreamName = FindIncrementalBackupDir(runtime, edgeActor, "/Root/Table");
+        Cerr << "CDC_DEBUG: Main table CDC stream name: " << mainCdcStreamName << Endl;
+        
+        auto indexCdcStreamName = FindIncrementalBackupDir(runtime, edgeActor, "/Root/Table/ByValue/indexImplTable");
+        Cerr << "CDC_DEBUG: Index table CDC stream name: " << indexCdcStreamName << Endl;
         
         // Index should contain changes:
         // - (200, 2) - old value deleted due to update
@@ -2873,13 +2891,6 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             ORDER BY name
             )");
         Cerr << "ByName index table data BEFORE incremental backup: " << byNameIndexData << Endl;
-
-        // Debug: Check if CDC stream on index table has captured changes
-        auto indexCdcRecords = GetRecords(runtime, edgeActor, "/Root/Table/ByName/indexImplTable/19700101000002Z_continuousBackupImpl", 0);
-        Cerr << "CDC records on ByName index (count=" << indexCdcRecords.size() << ")" << Endl;
-        for (const auto& [key, data] : indexCdcRecords) {
-            Cerr << "  CDC record key: " << key << Endl;
-        }
 
         // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));

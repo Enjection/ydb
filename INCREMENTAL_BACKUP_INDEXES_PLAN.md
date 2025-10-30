@@ -51,11 +51,13 @@ This document outlines the implementation plan for supporting incremental backup
 
 ## Implementation Status
 
-**All phases completed:**
+**Phases completed:**
 - ✅ Phase 1: Understanding Current Architecture
-- ✅ Phase 2: Backup Collection Operations (CDC streams & incremental backup)
-- ✅ Phase 3: Testing (6 schemeshard-level tests)
-- ✅ Phase 4: Data Verification Tests (4 datashard-level tests)
+- ✅ Phase 2: Backup Collection Operations (CDC streams & incremental backup) 
+- ✅ Phase 3: Testing (6 schemeshard-level tests - ALL PASSING)
+- ⚠️ Phase 4: Data Verification Tests (4 datashard-level tests - BLOCKED)
+
+**BLOCKING ISSUE**: CDC change capture doesn't work on index implementation tables at datashard level (see Phase 4 details below)
 
 **Files modified:**
 - `/ydb/core/tx/schemeshard/schemeshard__operation_backup_backup_collection.cpp` (CDC creation)
@@ -64,14 +66,20 @@ This document outlines the implementation plan for supporting incremental backup
 - `/ydb/core/tx/schemeshard/ut_backup_collection/ut_backup_collection.cpp` (6 tests)
 - `/ydb/core/tx/datashard/datashard_ut_incremental_backup.cpp` (4 tests)
 
-**Test execution required by user:**
+**Test execution status:**
 ```bash
-# Phase 2 & 3 tests (already passing)
+# Phase 2 & 3 tests - ✅ ALL PASSING
 cd ydb/core/tx/schemeshard/ut_backup_collection && /ya make -A
 
-# Phase 4 tests (need to be run)
+# Phase 4 tests - ⚠️ FAILING (blocked by CDC bug on index tables)
 cd ydb/core/tx/datashard && /ya make -A
 ```
+
+**Next steps to unblock**:
+1. Investigate datashard CDC implementation to understand why index table changes aren't captured
+2. Check if index tables need special CDC sender activation
+3. Verify CDC stream configuration is properly applied to index datashards
+4. Consider if this is a fundamental limitation requiring datashard-level changes
 
 ---
 
@@ -320,7 +328,7 @@ cd /home/innokentii/workspace/cydb/ydb/core/tx/schemeshard/ut_backup_collection
    - Phase 2.2 test verification fully enabled in `IncrementalBackupWithIndexes` test
    - All tests passing successfully
 
-4. **Phase 4**: Data Verification Tests ✅ COMPLETED
+4. **Phase 4**: Data Verification Tests ⚠️ IMPLEMENTED - BLOCKED
    - Datashard-level tests for index backup data correctness implemented
    - 4 comprehensive tests covering all scenarios:
      * Basic index backup with tombstones
@@ -328,7 +336,8 @@ cd /home/innokentii/workspace/cydb/ydb/core/tx/schemeshard/ut_backup_collection
      * Multiple indexes with different types
      * OmitIndexes flag verification
    - All tests pass linting
-   - See detailed implementation in "Future Work" section
+   - **BLOCKER**: CDC streams on index implementation tables don't capture change records
+   - See detailed implementation and blocking issue in Phase 4 section below
 
 **Out of scope:**
 - Restore operations
@@ -662,7 +671,7 @@ cd ydb/core/tx/datashard && /ya make -A
 - ✅ Non-indexed column updates don't appear in index backups (salary test)
 - ✅ OmitIndexes flag properly prevents index backup creation
 
-**Implementation status**: ✅ COMPLETED
+**Implementation status**: ⚠️ IMPLEMENTED - BLOCKED BY POTENTIAL BUG
 - All 4 tests implemented (~420 lines of test code)
 - Zero linter errors
 - Tests use standard YDB test infrastructure (CreateShardedTable, ExecSQL, KqpSimpleExec, Navigate/DescribePath)
@@ -672,7 +681,21 @@ cd ydb/core/tx/datashard && /ya make -A
   - Added 1-second sleep BEFORE incremental backup to allow CDC streams to capture all changes
   - Increased post-backup wait to 10 seconds for backup operation completion and CDC offload
   - Dynamic incremental backup directory discovery using `FindIncrementalBackupDir()` helper function with DescribePath + ReturnChildren (handles timestamp-dependent directory names)
-  - Debug query added to first test to verify index table has data before backup
+  - Debug query added to verify index tables have data before backup
+
+**ISSUE DISCOVERED**:
+- Index implementation tables receive writes correctly ✅
+- CDC streams are created on index tables (verified in Phase 2/3 tests) ✅  
+- **BUT**: CDC streams on index tables don't capture change records ❌
+- Index backup tables remain empty even though index tables have data
+- Diagnostic shows: Index table has current state (Bob, Carol) but CDC stream has 0 records
+- **Root cause**: CDC change capture may not be implemented/enabled for index implementation tables at datashard level
+- **No existing tests**: Found zero tests in codebase that use CDC streams on index implementation tables
+- **Possible solutions**:
+  1. This is a real bug/limitation in YDB that needs fixing at datashard CDC layer
+  2. Index tables require special CDC activation that we haven't discovered
+  3. Index CDC streams need different configuration than main table CDC streams
+
 - **KQP Layer Support Added**:
   - Added `omit_indexes` to supported settings in KQP type annotation
   - Added `OmitIndexes` field to `TBackupCollectionSettings` structure
