@@ -2585,11 +2585,11 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         // Debug: Verify CDC streams are created on both main table and index table
         Cerr << "CDC_DEBUG: Checking CDC streams after full backup..." << Endl;
-        auto mainTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table", true, true);
-        Cerr << "CDC_DEBUG: Main table children: " << mainTableCdcCheck << Endl;
+        auto mainTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table");
+        Cerr << "CDC_DEBUG: Main table Navigate result Status=" << mainTableCdcCheck->ResultSet.size() << " entries" << Endl;
         
-        auto indexTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table/ByValue/indexImplTable", true, true);
-        Cerr << "CDC_DEBUG: Index impl table children: " << indexTableCdcCheck << Endl;
+        auto indexTableCdcCheck = Navigate(runtime, edgeActor, "/Root/Table/ByValue/indexImplTable");
+        Cerr << "CDC_DEBUG: Index impl table Navigate result Status=" << indexTableCdcCheck->ResultSet.size() << " entries" << Endl;
 
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
