@@ -663,10 +663,13 @@ cd ydb/core/tx/datashard && /ya make -A
 - ✅ OmitIndexes flag properly prevents index backup creation
 
 **Implementation status**: ✅ COMPLETED
-- All 4 tests implemented (326 lines of test code)
+- All 4 tests implemented (~380 lines of test code)
 - Zero linter errors
-- Tests use standard YDB test infrastructure (CreateShardedTable, ExecSQL, KqpSimpleExec)
-- **Fix applied**: Added 1-second sleep before incremental backup to allow CDC streams (including on index tables) to capture all changes
+- Tests use standard YDB test infrastructure (CreateShardedTable, ExecSQL, KqpSimpleExec, Ls)
+- **Fixes applied**:
+  - Added 1-second sleep before incremental backup to allow CDC streams (including index tables) to capture all changes
+  - Increased post-backup wait to 10 seconds for backup operation completion and CDC offload
+  - Dynamic incremental backup directory discovery using `Ls()` helper function (handles timestamp-dependent directory names)
 - **KQP Layer Support Added**:
   - Added `omit_indexes` to supported settings in KQP type annotation
   - Added `OmitIndexes` field to `TBackupCollectionSettings` structure

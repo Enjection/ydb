@@ -211,6 +211,20 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         return proto;
     }
 
+    TString FindIncrementalBackupDir(TTestActorRuntime& runtime, const TActorId& sender, const TString& collectionPath) {
+        auto listDesc = Ls(runtime, sender, collectionPath);
+        const auto& collectionEntry = listDesc->ResultSet.at(0);
+        UNIT_ASSERT(collectionEntry.ListNodeEntry);
+        
+        const auto& children = collectionEntry.ListNodeEntry->Children;
+        for (const auto& child : children) {
+            if (child.Name.EndsWith("_incremental")) {
+                return child.Name;
+            }
+        }
+        return "";
+    }
+
     NKikimrChangeExchange::TChangeRecord MakeUpsertPartial(ui32 key, ui32 value, const TVector<ui32>& tags = {2}) {
         auto keyCell = TCell::Make<ui32>(key);
         auto valueCell = TCell::Make<ui32>(value);
@@ -2582,17 +2596,24 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             UPSERT INTO `/Root/Table` (key, value) VALUES (4, 400);
             )");
 
-        // Wait for CDC streams to capture changes (including on index tables)
+        // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(5));
+        // Wait for backup operation to complete and CDC offload (including index tables)
+        SimulateSleep(server, TDuration::Seconds(10));
+
+        // Find the incremental backup directory (timestamp-dependent)
+        TString incrBackupDir = FindIncrementalBackupDir(runtime, edgeActor, "/Root/.backups/collections/MyCollection");
+        UNIT_ASSERT_C(!incrBackupDir.empty(), "Could not find incremental backup directory");
+        Cerr << "Found incremental backup directory: " << incrBackupDir << Endl;
 
         // Verify main table backup contains correct data
-        auto mainTableBackup = KqpSimpleExec(runtime, R"(
-            SELECT key, value FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/Table`
+        TString mainTablePath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/Table";
+        auto mainTableBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT key, value FROM `)" << mainTablePath << R"(`
             ORDER BY key
             )");
 
@@ -2611,8 +2632,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             "Main table backup should contain new value 400");
 
         // Verify index backup table exists and contains correct data
-        auto indexBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByValue`
+        TString indexBackupPath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/__ydb_backup_meta/indexes/Table/ByValue";
+        auto indexBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << indexBackupPath << R"(`
             ORDER BY value
             )");
 
@@ -2702,23 +2724,31 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Delete row
         ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=2;)");
 
-        // Wait for CDC streams to capture changes (including on index tables)
+        // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(5));
+        // Wait for backup operation to complete and CDC offload (including index tables)
+        SimulateSleep(server, TDuration::Seconds(10));
+
+        // Find the incremental backup directory (timestamp-dependent)
+        TString incrBackupDir = FindIncrementalBackupDir(runtime, edgeActor, "/Root/.backups/collections/MyCollection");
+        UNIT_ASSERT_C(!incrBackupDir.empty(), "Could not find incremental backup directory");
+        Cerr << "Found incremental backup directory: " << incrBackupDir << Endl;
 
         // Debug: Check main table backup first
-        auto mainBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/Table`
+        TString mainTablePath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/Table";
+        auto mainBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << mainTablePath << R"(`
             )");
         Cerr << "Main table backup: " << mainBackup << Endl;
 
         // Verify index backup table exists and contains covered column data
-        auto indexBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByAge`
+        TString indexBackupPath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/__ydb_backup_meta/indexes/Table/ByAge";
+        auto indexBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << indexBackupPath << R"(`
             )");
 
         Cerr << "Index backup with covering: " << indexBackup << Endl;
@@ -2813,17 +2843,24 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (3, 'Carol', 28u, 'SF', 5500u);
             )");
 
-        // Wait for CDC streams to capture changes (including on index tables)
+        // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(5));
+        // Wait for backup operation to complete and CDC offload (including index tables)
+        SimulateSleep(server, TDuration::Seconds(10));
+
+        // Find the incremental backup directory (timestamp-dependent)
+        TString incrBackupDir = FindIncrementalBackupDir(runtime, edgeActor, "/Root/.backups/collections/MyCollection");
+        UNIT_ASSERT_C(!incrBackupDir.empty(), "Could not find incremental backup directory");
+        Cerr << "Found incremental backup directory: " << incrBackupDir << Endl;
 
         // Verify ByName index backup
-        auto byNameBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByName`
+        TString byNamePath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/__ydb_backup_meta/indexes/Table/ByName";
+        auto byNameBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << byNamePath << R"(`
             )");
         Cerr << "ByName index backup: " << byNameBackup << Endl;
         UNIT_ASSERT_C(byNameBackup.find("Alice") != TString::npos,
@@ -2834,8 +2871,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             "ByName backup should contain Carol (new)");
 
         // Verify ByAge index backup (covering index with salary)
-        auto byAgeBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByAge`
+        TString byAgePath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/__ydb_backup_meta/indexes/Table/ByAge";
+        auto byAgeBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << byAgePath << R"(`
             )");
         Cerr << "ByAge index backup: " << byAgeBackup << Endl;
         UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 30") != TString::npos,
@@ -2849,8 +2887,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             "ByAge backup should contain covered salary 5500");
 
         // Verify ByCity index backup (composite key)
-        auto byCityBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByCity`
+        TString byCityPath = TStringBuilder() << "/Root/.backups/collections/MyCollection/" << incrBackupDir << "/__ydb_backup_meta/indexes/Table/ByCity";
+        auto byCityBackup = KqpSimpleExec(runtime, TStringBuilder() << R"(
+            SELECT * FROM `)" << byCityPath << R"(`
             )");
         Cerr << "ByCity index backup: " << byCityBackup << Endl;
         UNIT_ASSERT_C(byCityBackup.find("NYC") != TString::npos,
