@@ -393,6 +393,32 @@ cd /home/innokentii/workspace/cydb/ydb/core/tx/schemeshard/ut_backup_collection
    - **Fixed**: Directory suffix from `_inc` to `_incremental`
    - **Status**: All tests ready for execution, zero linter errors
 
+### Phase 4: KQP Layer Support (COMPLETED)
+5. **`/ydb/core/kqp/provider/yql_kikimr_type_ann.cpp`** ✓
+   - Function: `HandleCreateBackupCollection()` (line 2448)
+   - **Added**: `"omit_indexes"` to `supportedSettings` list
+   - **Status**: Completed, allows SQL syntax recognition
+
+6. **`/ydb/core/kqp/provider/yql_kikimr_gateway.h`** ✓
+   - Struct: `TBackupCollectionSettings` (line 1054)
+   - **Added**: `bool OmitIndexes = false;` field
+   - **Status**: Completed, stores setting value
+
+7. **`/ydb/core/kqp/provider/yql_kikimr_exec.cpp`** ✓
+   - Function: `ParseBackupCollectionSettings()` (lines 1015-1034)
+   - **Added**: Parser for `omit_indexes` setting (validates true/false)
+   - **Status**: Completed, parses SQL setting value
+
+8. **`/ydb/core/kqp/host/kqp_gateway_proxy.cpp`** ✓
+   - Function: CreateBackupCollection handler (line 1370)
+   - **Modified**: Set `OmitIndexes` in protobuf `IncrementalBackupConfig`
+   - **Status**: Completed, transfers setting to schemeshard
+
+9. **`/ydb/core/tx/datashard/datashard_ut_incremental_backup.cpp`** ✓
+   - **Added**: 4 comprehensive data verification tests (326 lines)
+   - **Tests**: IncrementalBackupWithIndexes, WithCoveringIndex, MultipleIndexes, OmitIndexesIncrementalBackup
+   - **Status**: All tests implemented, ready for execution
+
 ### Referenced (Used, Not Modified)
 - `/ydb/core/tx/schemeshard/schemeshard__operation_alter_continuous_backup.cpp` - Reused as-is
 - `/ydb/core/tx/schemeshard/schemeshard__backup_collection_common.h` - Used for path helpers
@@ -640,7 +666,17 @@ cd ydb/core/tx/datashard && /ya make -A
 - All 4 tests implemented (326 lines of test code)
 - Zero linter errors
 - Tests use standard YDB test infrastructure (CreateShardedTable, ExecSQL, KqpSimpleExec)
-- Ready for execution by user
+- **KQP Layer Support Added**:
+  - Added `omit_indexes` to supported settings in KQP type annotation
+  - Added `OmitIndexes` field to `TBackupCollectionSettings` structure
+  - Added parsing for `omit_indexes` setting in KQP executor
+  - Added protobuf serialization in gateway proxy
+- Files modified:
+  - `/ydb/core/kqp/provider/yql_kikimr_type_ann.cpp` - Added to supported settings list
+  - `/ydb/core/kqp/provider/yql_kikimr_gateway.h` - Added `OmitIndexes` field
+  - `/ydb/core/kqp/provider/yql_kikimr_exec.cpp` - Added setting parser
+  - `/ydb/core/kqp/host/kqp_gateway_proxy.cpp` - Added protobuf serialization
+- Ready for execution
 
 ---
 

@@ -2585,7 +2585,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(1));
+        SimulateSleep(server, TDuration::Seconds(5));
 
         // Verify main table backup contains correct data
         auto mainTableBackup = KqpSimpleExec(runtime, R"(
@@ -2609,7 +2609,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         // Verify index backup table exists and contains correct data
         auto indexBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByValue`
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByValue`
             ORDER BY value
             )");
 
@@ -2702,11 +2702,17 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(1));
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Debug: Check main table backup first
+        auto mainBackup = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/Table`
+            )");
+        Cerr << "Main table backup: " << mainBackup << Endl;
 
         // Verify index backup table exists and contains covered column data
         auto indexBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByAge`
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByAge`
             )");
 
         Cerr << "Index backup with covering: " << indexBackup << Endl;
@@ -2804,11 +2810,11 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(1));
+        SimulateSleep(server, TDuration::Seconds(5));
 
         // Verify ByName index backup
         auto byNameBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByName`
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByName`
             )");
         Cerr << "ByName index backup: " << byNameBackup << Endl;
         UNIT_ASSERT_C(byNameBackup.find("Alice") != TString::npos,
@@ -2820,7 +2826,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         // Verify ByAge index backup (covering index with salary)
         auto byAgeBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByAge`
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByAge`
             )");
         Cerr << "ByAge index backup: " << byAgeBackup << Endl;
         UNIT_ASSERT_C(byAgeBackup.find("uint32_value: 30") != TString::npos,
@@ -2835,7 +2841,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         // Verify ByCity index backup (composite key)
         auto byCityBackup = KqpSimpleExec(runtime, R"(
-            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByCity`
+            SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByCity`
             )");
         Cerr << "ByCity index backup: " << byCityBackup << Endl;
         UNIT_ASSERT_C(byCityBackup.find("NYC") != TString::npos,
@@ -2910,7 +2916,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
 
-        SimulateSleep(server, TDuration::Seconds(1));
+        SimulateSleep(server, TDuration::Seconds(5));
 
         // Verify main table backup exists
         auto mainTableBackup = KqpSimpleExec(runtime, R"(
@@ -2929,7 +2935,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         bool indexBackupExists = true;
         try {
             auto indexBackup = KqpSimpleExec(runtime, R"(
-                SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Root/Table/ByValue`
+                SELECT * FROM `/Root/.backups/collections/MyCollection/19700101000002Z_incremental/__ydb_backup_meta/indexes/Table/ByValue`
                 )");
             // If we got here without exception, check if it's empty or doesn't exist
             if (indexBackup.empty() || indexBackup.find("ERROR") != TString::npos || 
