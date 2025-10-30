@@ -2874,6 +2874,13 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             )");
         Cerr << "ByName index table data BEFORE incremental backup: " << byNameIndexData << Endl;
 
+        // Debug: Check if CDC stream on index table has captured changes
+        auto indexCdcRecords = GetRecords(runtime, edgeActor, "/Root/Table/ByName/indexImplTable/19700101000002Z_continuousBackupImpl", 0);
+        Cerr << "CDC records on ByName index (count=" << indexCdcRecords.size() << ")" << Endl;
+        for (const auto& [key, data] : indexCdcRecords) {
+            Cerr << "  CDC record key: " << key << Endl;
+        }
+
         // Wait for CDC streams to capture all changes (including on index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
