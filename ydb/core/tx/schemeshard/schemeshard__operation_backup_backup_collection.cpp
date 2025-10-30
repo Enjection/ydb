@@ -2,6 +2,8 @@
 #include "schemeshard__op_traits.h"
 #include "schemeshard__operation_common.h"
 #include "schemeshard__operation_create_cdc_stream.h"
+#include "schemeshard__operation_part.h"
+#include "schemeshard_utils.h"
 #include "schemeshard_impl.h"
 
 
@@ -188,15 +190,22 @@ TVector<ISubOperation::TPtr> CreateBackupBackupCollection(TOperationId opId, con
                 
                 // Create CDC stream on index impl table
                 NKikimrSchemeOp::TCreateCdcStream createCdcStreamOp;
-                createCdcStreamOp.SetTableName(implTableName);  // Use relative name, not full path
+                createCdcStreamOp.SetTableName(indexTablePath.PathString());
                 auto& streamDescription = *createCdcStreamOp.MutableStreamDescription();
                 streamDescription.SetName(streamName);  // Same stream name as main table
                 streamDescription.SetMode(NKikimrSchemeOp::ECdcStreamModeUpdate);
                 streamDescription.SetFormat(NKikimrSchemeOp::ECdcStreamFormatProto);
                 
-                // Use DoCreateStream (not DoCreateStreamImpl) to ensure datashard gets notified
-                // workingDirPath = index path, tablePath = index impl table path
-                NCdc::DoCreateStream(result, createCdcStreamOp, opId, indexPath, indexTablePath, false, false);
+                // Create CDC stream metadata (schemeshard side)
+                NCdc::DoCreateStreamImpl(result, createCdcStreamOp, opId, indexTablePath, false, false);
+                
+                // Create AtTable operation to notify datashard (without schema change)
+                {
+                    auto outTx = TransactionTemplate(indexPath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpCreateCdcStreamAtTable);
+                    auto& cdcOp = *outTx.MutableCreateCdcStream();
+                    cdcOp.CopyFrom(createCdcStreamOp);
+                    result.push_back(CreateNewCdcStreamAtTable(NextPartId(opId, result), outTx, false));
+                }
                 
                 // Create PQ part for index CDC stream
                 TVector<TString> boundaries;
