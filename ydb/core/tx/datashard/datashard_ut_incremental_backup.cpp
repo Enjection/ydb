@@ -2856,8 +2856,12 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Perform full backup (creates CDC streams on main table and index tables)
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
         
-        // Wait for CDC streams to be fully activated on all tables (including index tables)
-        SimulateSleep(server, TDuration::Seconds(1));
+        // Wait for SchemeBoard updates to propagate to KQP metadata cache.
+        // CDC stream creation increments table schema versions (v1 -> v2), which is published
+        // to SchemeBoard asynchronously. KQP needs time to refresh its metadata cache before
+        // we can query the tables (main + indexes). Without this wait, KQP will fail with
+        // "schema version mismatch during metadata loading" error.
+        SimulateSleep(server, TDuration::Seconds(5));
 
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
