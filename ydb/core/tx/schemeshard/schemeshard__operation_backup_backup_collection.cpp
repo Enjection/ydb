@@ -194,7 +194,9 @@ TVector<ISubOperation::TPtr> CreateBackupBackupCollection(TOperationId opId, con
                 streamDescription.SetMode(NKikimrSchemeOp::ECdcStreamModeUpdate);
                 streamDescription.SetFormat(NKikimrSchemeOp::ECdcStreamFormatProto);
                 
-                NCdc::DoCreateStreamImpl(result, createCdcStreamOp, opId, indexTablePath, false, false);
+                // Use DoCreateStream (not DoCreateStreamImpl) to ensure datashard gets notified
+                // workingDirPath = index path, tablePath = index impl table path
+                NCdc::DoCreateStream(result, createCdcStreamOp, opId, indexPath, indexTablePath, false, false);
                 
                 // Create PQ part for index CDC stream
                 TVector<TString> boundaries;
