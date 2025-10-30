@@ -230,6 +230,44 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         return "";
     }
 
+    struct TCdcMetadata {
+        bool IsDelete;
+        TVector<ui32> UpdatedColumns;
+        TVector<ui32> ErasedColumns;
+    };
+
+    TCdcMetadata ParseCdcMetadata(const TString& bytesValue) {
+        TCdcMetadata result;
+        result.IsDelete = false;
+        
+        // The bytes contain protobuf-encoded CDC metadata
+        // For Update mode CDC:
+        // - Updates have \020\000 (indicating value columns present)
+        // - Deletes have \020\001 (indicating erase operation)
+        
+        if (bytesValue.find("\020\001") != TString::npos) {
+            result.IsDelete = true;
+        }
+        
+        // Parse column tags from the metadata
+        // Format: \010<tag>\020<flags>
+        for (size_t i = 0; i < bytesValue.size(); ++i) {
+            if (bytesValue[i] == '\010' && i + 1 < bytesValue.size()) {
+                ui32 tag = static_cast<ui8>(bytesValue[i + 1]);
+                if (i + 2 < bytesValue.size() && bytesValue[i + 2] == '\020') {
+                    ui8 flags = i + 3 < bytesValue.size() ? static_cast<ui8>(bytesValue[i + 3]) : 0;
+                    if (flags & 1) {
+                        result.ErasedColumns.push_back(tag);
+                    } else {
+                        result.UpdatedColumns.push_back(tag);
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
     NKikimrChangeExchange::TChangeRecord MakeUpsertPartial(ui32 key, ui32 value, const TVector<ui32>& tags = {2}) {
         auto keyCell = TCell::Make<ui32>(key);
         auto valueCell = TCell::Make<ui32>(value);
@@ -2667,13 +2705,6 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         Cerr << "CDC_DEBUG: Index backup result: " << indexBackup << Endl;
         
-        // Debug: Try to understand why index backup is empty by checking CDC stream state
-        auto mainCdcStreamName = FindIncrementalBackupDir(runtime, edgeActor, "/Root/Table");
-        Cerr << "CDC_DEBUG: Main table CDC stream name: " << mainCdcStreamName << Endl;
-        
-        auto indexCdcStreamName = FindIncrementalBackupDir(runtime, edgeActor, "/Root/Table/ByValue/indexImplTable");
-        Cerr << "CDC_DEBUG: Index table CDC stream name: " << indexCdcStreamName << Endl;
-        
         // Index should contain changes:
         // - (200, 2) - old value deleted due to update
         // - (250, 2) - new value from update
@@ -2736,12 +2767,22 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         // Wait for CDC streams to be fully activated on all tables (including index tables)
         SimulateSleep(server, TDuration::Seconds(1));
 
+        // Debug: Capture index implementation table state after full backup (should be empty)
+        auto indexImplTableInitial = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/Table/ByAge/indexImplTable`
+            )");
+
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES
                 (1, 'Alice', 30u, 5000u)
               , (2, 'Bob', 25u, 4000u)
               ;
+            )");
+
+        // Debug: Capture index implementation table after initial insert
+        auto indexImplTableAfterInsert = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/Table/ByAge/indexImplTable`
             )");
 
         // Update covered column: name changes (should appear in index)
@@ -2789,24 +2830,84 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             SELECT * FROM `)" << indexBackupPath << R"(`
             )");
 
-        Cerr << "Index backup with covering: " << indexBackup << Endl;
+        // Debug: Check actual index implementation table
+        auto indexImplTableFinal = KqpSimpleExec(runtime, R"(
+            SELECT * FROM `/Root/Table/ByAge/indexImplTable`
+            )");
+
+        Cerr << "=== DEBUG: Index Tables State ===" << Endl;
+        Cerr << "1. After full backup (should be empty): " << indexImplTableInitial << Endl;
+        Cerr << "2. After initial insert (Alice, Bob): " << indexImplTableAfterInsert << Endl;
+        Cerr << "3. Final state (physical table): " << indexImplTableFinal << Endl;
+        Cerr << "4. Incremental backup (CDC captured): " << indexBackup << Endl;
+        Cerr << "=================================" << Endl;
         
-        // Index should contain:
-        // - Entry for (30, 1) with name changes (Alice -> Alice2)
-        // - Tombstone for old (25, 2) 
-        // - Entry for (26, 2) 
-        // - Tombstone for (26, 2) after deletion
+        // Incremental backup should contain (with CDC compaction):
+        // - INSERT for (30, 1) with "Alice2" (final state after name update)
+        // - Tombstone (DELETE) for (25, 2) - Bob's old age entry, compacted with initial INSERT
+        // - Tombstone (DELETE) for (26, 2) - Bob's new age entry, compacted with INSERT from age change
+        // 
+        // Note: Bob's name won't appear because:
+        // - Initial INSERT (25, 2, "Bob") was compacted with DELETE (25, 2) → just tombstone
+        // - Age change INSERT (26, 2, "Bob") was compacted with DELETE (26, 2) → just tombstone
+        //
         // The salary change should not create a separate index entry since salary is not indexed or covered
         
         UNIT_ASSERT_C(indexBackup.find("uint32_value: 30") != TString::npos,
             "Index backup should contain age 30");
         UNIT_ASSERT_C(indexBackup.find("Alice") != TString::npos,
-            "Index backup should contain covered column name changes");
-        UNIT_ASSERT_C(indexBackup.find("uint32_value: 25") != TString::npos || 
-                      indexBackup.find("uint32_value: 26") != TString::npos,
-            "Index backup should contain age changes (25 or 26)");
-        UNIT_ASSERT_C(indexBackup.find("Bob") != TString::npos,
-            "Index backup should contain covered column Bob");
+            "Index backup should contain Alice2 from covering column name update");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 25") != TString::npos,
+            "Index backup should contain tombstone for age 25");
+        UNIT_ASSERT_C(indexBackup.find("uint32_value: 26") != TString::npos,
+            "Index backup should contain tombstone for age 26");
+        
+        // Verify tombstones have NULL for covering column (correct behavior for DELETEs)
+        // and INSERT has the actual covering column value
+        UNIT_ASSERT_C(indexBackup.find("null_flag_value: NULL_VALUE") != TString::npos,
+            "Index backup tombstones should have NULL for covering columns");
+
+        // Parse and verify CDC metadata
+        // The backup contains 3 records, let's verify their metadata
+        size_t pos = 0;
+        int deleteCount = 0;
+        int insertCount = 0;
+        
+        while ((pos = indexBackup.find("bytes_value: \"", pos)) != TString::npos) {
+            pos += 14; // Skip 'bytes_value: "'
+            size_t endPos = indexBackup.find("\"", pos);
+            if (endPos == TString::npos) break;
+            
+            TString metadataStr = indexBackup.substr(pos, endPos - pos);
+            // Unescape the string
+            TString unescaped;
+            for (size_t i = 0; i < metadataStr.size(); ++i) {
+                if (metadataStr[i] == '\\' && i + 3 < metadataStr.size()) {
+                    // Octal escape \nnn
+                    ui8 val = ((metadataStr[i+1] - '0') << 6) | 
+                             ((metadataStr[i+2] - '0') << 3) | 
+                             (metadataStr[i+3] - '0');
+                    unescaped += static_cast<char>(val);
+                    i += 3;
+                } else {
+                    unescaped += metadataStr[i];
+                }
+            }
+            
+            auto metadata = ParseCdcMetadata(unescaped);
+            if (metadata.IsDelete) {
+                deleteCount++;
+            } else {
+                insertCount++;
+            }
+            
+            pos = endPos + 1;
+        }
+        
+        Cerr << "CDC metadata: " << deleteCount << " DELETEs, " << insertCount << " INSERTs" << Endl;
+        
+        UNIT_ASSERT_EQUAL_C(deleteCount, 2, "Should have 2 DELETE operations (tombstones for age 25 and 26)");
+        UNIT_ASSERT_EQUAL_C(insertCount, 1, "Should have 1 INSERT operation (for Alice2)");
     }
 
     Y_UNIT_TEST(IncrementalBackupMultipleIndexes) {
