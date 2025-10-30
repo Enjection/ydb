@@ -2577,8 +2577,11 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               );
             )", false);
 
-        // Perform full backup
+        // Perform full backup (creates CDC streams on main table and index tables)
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+        
+        // Wait for CDC streams to be fully activated on all tables (including index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
@@ -2709,8 +2712,11 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               );
             )", false);
 
-        // Perform full backup
+        // Perform full backup (creates CDC streams on main table and index tables)
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+        
+        // Wait for CDC streams to be fully activated on all tables (including index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
@@ -2829,8 +2835,11 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               );
             )", false);
 
-        // Perform full backup
+        // Perform full backup (creates CDC streams on main table and index tables)
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection`;)", false);
+        
+        // Wait for CDC streams to be fully activated on all tables (including index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Insert initial data
         ExecSQL(server, edgeActor, R"(
