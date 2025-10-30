@@ -2568,23 +2568,22 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               , (3, 300)
               ;
             )");
-        runtime.DispatchEvents();
 
         // Update row: (2, 200) -> (2, 250)
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, value) VALUES (2, 250);
             )");
-        runtime.DispatchEvents();
 
         // Delete row: (3, 300)
         ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=3;)");
-        runtime.DispatchEvents();
 
         // Insert new row: (4, 400)
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, value) VALUES (4, 400);
             )");
-        runtime.DispatchEvents();
+
+        // Wait for CDC streams to capture changes (including on index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
@@ -2684,29 +2683,27 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               , (2, 'Bob', 25u, 4000u)
               ;
             )");
-        runtime.DispatchEvents();
 
         // Update covered column: name changes (should appear in index)
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (1, 'Alice2', 30u, 5000u);
             )");
-        runtime.DispatchEvents();
 
         // Update non-covered column: salary changes (should NOT appear in index backup as a separate change)
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (1, 'Alice2', 30u, 6000u);
             )");
-        runtime.DispatchEvents();
 
         // Update indexed column: age changes (creates tombstone for old + new entry)
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, salary) VALUES (2, 'Bob', 26u, 4000u);
             )");
-        runtime.DispatchEvents();
 
         // Delete row
         ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=2;)");
-        runtime.DispatchEvents();
+
+        // Wait for CDC streams to capture changes (including on index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
@@ -2797,29 +2794,27 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               , (2, 'Bob', 25u, 'LA', 4000u)
               ;
             )");
-        runtime.DispatchEvents();
 
         // Update name: affects ByName and ByCity
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (1, 'Alice2', 30u, 'NYC', 5000u);
             )");
-        runtime.DispatchEvents();
 
         // Update age: affects ByAge
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (2, 'Bob', 26u, 'LA', 4000u);
             )");
-        runtime.DispatchEvents();
 
         // Delete: affects all indexes
         ExecSQL(server, edgeActor, R"(DELETE FROM `/Root/Table` WHERE key=1;)");
-        runtime.DispatchEvents();
 
         // Insert new: affects all indexes
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table` (key, name, age, city, salary) VALUES (3, 'Carol', 28u, 'SF', 5500u);
             )");
-        runtime.DispatchEvents();
+
+        // Wait for CDC streams to capture changes (including on index tables)
+        SimulateSleep(server, TDuration::Seconds(1));
 
         // Take incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MyCollection` INCREMENTAL;)", false);
