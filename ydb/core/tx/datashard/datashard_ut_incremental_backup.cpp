@@ -2546,6 +2546,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             .SetEnableChangefeedInitialScan(true)
             .SetEnableBackupService(true)
             .SetEnableRealSystemViewPaths(false)
+            .SetEnableDataColumnForIndexTable(true)
         );
 
         auto& runtime = *server->GetRuntime();
@@ -2675,6 +2676,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             .SetEnableChangefeedInitialScan(true)
             .SetEnableBackupService(true)
             .SetEnableRealSystemViewPaths(false)
+            .SetEnableDataColumnForIndexTable(true)
         );
 
         auto& runtime = *server->GetRuntime();
@@ -2791,6 +2793,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             .SetEnableChangefeedInitialScan(true)
             .SetEnableBackupService(true)
             .SetEnableRealSystemViewPaths(false)
+            .SetEnableDataColumnForIndexTable(true)
         );
 
         auto& runtime = *server->GetRuntime();
@@ -2924,6 +2927,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             .SetEnableChangefeedInitialScan(true)
             .SetEnableBackupService(true)
             .SetEnableRealSystemViewPaths(false)
+            .SetEnableDataColumnForIndexTable(true)
         );
 
         auto& runtime = *server->GetRuntime();
