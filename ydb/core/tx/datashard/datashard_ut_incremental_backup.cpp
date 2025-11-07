@@ -3011,6 +3011,512 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
 
         UNIT_ASSERT_C(!indexBackupExists, "Index backup should NOT exist when OmitIndexes flag is set");
     }
+    Y_UNIT_TEST(BasicIndexIncrementalRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with one global index
+        CreateShardedTable(server, edgeActor, "/Root", "TableWithIndex",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"indexed_col", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"value_index", {"indexed_col"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Insert data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/TableWithIndex` (key, value, indexed_col) VALUES
+              (1, 10, 100),
+              (2, 20, 200),
+              (3, 30, 300);
+        )");
+
+        // Create backup collection
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `IndexTestCollection`
+              ( TABLE `/Root/TableWithIndex`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Create full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `IndexTestCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/TableWithIndex` (key, value, indexed_col) VALUES
+              (4, 40, 400),
+              (2, 25, 250);
+        )");
+
+        // Create incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `IndexTestCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Capture expected state
+        auto expectedTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value, indexed_col FROM `/Root/TableWithIndex` ORDER BY key
+        )");
+
+        auto expectedIndex = KqpSimpleExec(runtime, R"(
+            SELECT indexed_col FROM `/Root/TableWithIndex` VIEW value_index WHERE indexed_col > 0 ORDER BY indexed_col
+        )");
+
+        // Drop table (this also drops index)
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/TableWithIndex`;)", false);
+
+        // Restore from backups
+        ExecSQL(server, edgeActor, R"(RESTORE `IndexTestCollection`;)", false);
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Verify table data
+        auto actualTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value, indexed_col FROM `/Root/TableWithIndex` ORDER BY key
+        )");
+        UNIT_ASSERT_VALUES_EQUAL(expectedTable, actualTable);
+
+        // Verify index works and has correct data
+        auto actualIndex = KqpSimpleExec(runtime, R"(
+            SELECT indexed_col FROM `/Root/TableWithIndex` VIEW value_index WHERE indexed_col > 0 ORDER BY indexed_col
+        )");
+        UNIT_ASSERT_VALUES_EQUAL(expectedIndex, actualIndex);
+
+        // Verify we can query using the index
+        auto indexQuery = KqpSimpleExec(runtime, R"(
+            SELECT key, indexed_col FROM `/Root/TableWithIndex` VIEW value_index WHERE indexed_col = 250
+        )");
+        UNIT_ASSERT_C(indexQuery.find("uint32_value: 2") != TString::npos, "Should find key=2");
+        UNIT_ASSERT_C(indexQuery.find("uint32_value: 250") != TString::npos, "Should find indexed_col=250");
+    }
+
+    Y_UNIT_TEST(MultipleIndexesIncrementalRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with multiple global indexes
+        CreateShardedTable(server, edgeActor, "/Root", "MultiIndexTable",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value1", "Uint32", false, false},
+                    {"value2", "Uint32", false, false},
+                    {"value3", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"index1", {"value1"}, {}, NKikimrSchemeOp::EIndexTypeGlobal},
+                    {"index2", {"value2"}, {}, NKikimrSchemeOp::EIndexTypeGlobal},
+                    {"index3", {"value3"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Insert data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/MultiIndexTable` (key, value1, value2, value3) VALUES
+              (1, 11, 21, 31),
+              (2, 12, 22, 32),
+              (3, 13, 23, 33);
+        )");
+
+        // Create backup collection
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MultiIndexCollection`
+              ( TABLE `/Root/MultiIndexTable`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Create full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiIndexCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/MultiIndexTable` (key, value1, value2, value3) VALUES
+              (4, 14, 24, 34);
+        )");
+
+        // Create incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiIndexCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Capture expected state for all indexes
+        auto expectedTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value1, value2, value3 FROM `/Root/MultiIndexTable` ORDER BY key
+        )");
+
+        // Drop and restore
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/MultiIndexTable`;)", false);
+        ExecSQL(server, edgeActor, R"(RESTORE `MultiIndexCollection`;)", false);
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Verify table data
+        auto actualTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value1, value2, value3 FROM `/Root/MultiIndexTable` ORDER BY key
+        )");
+        UNIT_ASSERT_VALUES_EQUAL(expectedTable, actualTable);
+
+        // Verify all indexes work
+        auto index1Query = KqpSimpleExec(runtime, R"(
+            SELECT key FROM `/Root/MultiIndexTable` VIEW index1 WHERE value1 = 14
+        )");
+        UNIT_ASSERT_C(index1Query.find("uint32_value: 4") != TString::npos, "Index1 should work");
+
+        auto index2Query = KqpSimpleExec(runtime, R"(
+            SELECT key FROM `/Root/MultiIndexTable` VIEW index2 WHERE value2 = 24
+        )");
+        UNIT_ASSERT_C(index2Query.find("uint32_value: 4") != TString::npos, "Index2 should work");
+
+        auto index3Query = KqpSimpleExec(runtime, R"(
+            SELECT key FROM `/Root/MultiIndexTable` VIEW index3 WHERE value3 = 34
+        )");
+        UNIT_ASSERT_C(index3Query.find("uint32_value: 4") != TString::npos, "Index3 should work");
+    }
+
+    Y_UNIT_TEST(IndexDataVerificationIncrementalRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with index
+        CreateShardedTable(server, edgeActor, "/Root", "DataVerifyTable",
+            TShardedTableOptions()
+                .Shards(2)
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"name", "Utf8", false, false},
+                    {"age", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"age_index", {"age"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Insert data across shards
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/DataVerifyTable` (key, name, age) VALUES
+              (1, 'Alice', 25),
+              (2, 'Bob', 30),
+              (11, 'Charlie', 35),
+              (12, 'David', 40);
+        )");
+
+        // Create backup collection
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `DataVerifyCollection`
+              ( TABLE `/Root/DataVerifyTable`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `DataVerifyCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify: update existing records and add new ones
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/DataVerifyTable` (key, name, age) VALUES
+              (2, 'Bob', 31),    -- update in shard 1
+              (12, 'David', 41), -- update in shard 2
+              (3, 'Eve', 28),    -- new in shard 1
+              (13, 'Frank', 45); -- new in shard 2
+        )");
+
+        // Delete some records
+        ExecSQL(server, edgeActor, R"(
+            DELETE FROM `/Root/DataVerifyTable` WHERE key IN (1, 11);
+        )");
+
+        // Incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `DataVerifyCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Verify index has correct data BEFORE restore
+        auto beforeRestore = KqpSimpleExec(runtime, R"(
+            SELECT key, name, age FROM `/Root/DataVerifyTable` VIEW age_index WHERE age >= 30 ORDER BY age
+        )");
+
+        // Drop and restore
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/DataVerifyTable`;)", false);
+        ExecSQL(server, edgeActor, R"(RESTORE `DataVerifyCollection`;)", false);
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Verify index has correct data AFTER restore
+        auto afterRestore = KqpSimpleExec(runtime, R"(
+            SELECT key, name, age FROM `/Root/DataVerifyTable` VIEW age_index WHERE age >= 30 ORDER BY age
+        )");
+
+        UNIT_ASSERT_VALUES_EQUAL(beforeRestore, afterRestore);
+
+        // Verify specific queries
+        UNIT_ASSERT_C(afterRestore.find("text_value: \"Bob\"") != TString::npos, "Bob should be present");
+        UNIT_ASSERT_C(afterRestore.find("uint32_value: 31") != TString::npos, "Age 31 should be present");
+        UNIT_ASSERT_C(afterRestore.find("text_value: \"Alice\"") == TString::npos, "Alice should be deleted");
+        UNIT_ASSERT_C(afterRestore.find("text_value: \"Frank\"") != TString::npos, "Frank should be present");
+        UNIT_ASSERT_C(afterRestore.find("uint32_value: 45") != TString::npos, "Age 45 should be present");
+    }
+
+    Y_UNIT_TEST(MultipleIncrementalBackupsWithIndexes) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create table with index
+        CreateShardedTable(server, edgeActor, "/Root", "SequenceTable",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"value", "Uint32", false, false},
+                    {"indexed", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"idx", {"indexed"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Initial data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/SequenceTable` (key, value, indexed) VALUES
+              (1, 10, 100),
+              (2, 20, 200);
+        )");
+
+        // Create backup collection
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `SequenceCollection`
+              ( TABLE `/Root/SequenceTable`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `SequenceCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // First incremental: add data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/SequenceTable` (key, value, indexed) VALUES (3, 30, 300);
+        )");
+        ExecSQL(server, edgeActor, R"(BACKUP `SequenceCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Second incremental: update data
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/SequenceTable` (key, value, indexed) VALUES (2, 25, 250);
+        )");
+        ExecSQL(server, edgeActor, R"(BACKUP `SequenceCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Third incremental: delete and add
+        ExecSQL(server, edgeActor, R"(
+            DELETE FROM `/Root/SequenceTable` WHERE key = 1;
+        )");
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/SequenceTable` (key, value, indexed) VALUES (4, 40, 400);
+        )");
+        ExecSQL(server, edgeActor, R"(BACKUP `SequenceCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Capture expected state
+        auto expectedTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value, indexed FROM `/Root/SequenceTable` ORDER BY key
+        )");
+
+        auto expectedIndex = KqpSimpleExec(runtime, R"(
+            SELECT indexed FROM `/Root/SequenceTable` VIEW idx WHERE indexed > 0 ORDER BY indexed
+        )");
+
+        // Drop and restore
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/SequenceTable`;)", false);
+        ExecSQL(server, edgeActor, R"(RESTORE `SequenceCollection`;)", false);
+        runtime.SimulateSleep(TDuration::Seconds(15));
+
+        // Verify
+        auto actualTable = KqpSimpleExec(runtime, R"(
+            SELECT key, value, indexed FROM `/Root/SequenceTable` ORDER BY key
+        )");
+        UNIT_ASSERT_VALUES_EQUAL(expectedTable, actualTable);
+
+        auto actualIndex = KqpSimpleExec(runtime, R"(
+            SELECT indexed FROM `/Root/SequenceTable` VIEW idx WHERE indexed > 0 ORDER BY indexed
+        )");
+        UNIT_ASSERT_VALUES_EQUAL(expectedIndex, actualIndex);
+
+        // Verify final state: key 1 deleted, key 2 updated, keys 3 and 4 added
+        UNIT_ASSERT_C(actualTable.find("uint32_value: 1") == TString::npos, "Key 1 should be deleted");
+        UNIT_ASSERT_C(actualTable.find("uint32_value: 25") != TString::npos, "Key 2 should have value 25");
+        UNIT_ASSERT_C(actualTable.find("uint32_value: 30") != TString::npos, "Key 3 should exist");
+        UNIT_ASSERT_C(actualTable.find("uint32_value: 40") != TString::npos, "Key 4 should exist");
+    }
+
+    Y_UNIT_TEST(MultipleTablesWithIndexesIncrementalRestore) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+
+        // Create first table with index
+        CreateShardedTable(server, edgeActor, "/Root", "Table1",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"val1", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"idx1", {"val1"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Create second table with different index
+        CreateShardedTable(server, edgeActor, "/Root", "Table2",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"val2", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"idx2", {"val2"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Insert data into both tables
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, val1) VALUES (1, 100), (2, 200);
+            UPSERT INTO `/Root/Table2` (key, val2) VALUES (1, 1000), (2, 2000);
+        )");
+
+        // Create backup collection with both tables
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MultiTableCollection`
+              ( TABLE `/Root/Table1`
+              , TABLE `/Root/Table2`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify both tables
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, val1) VALUES (3, 300);
+            UPSERT INTO `/Root/Table2` (key, val2) VALUES (3, 3000);
+        )");
+
+        // Incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Capture expected states
+        auto expected1 = KqpSimpleExec(runtime, R"(
+            SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+        )");
+        auto expected2 = KqpSimpleExec(runtime, R"(
+            SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+        )");
+
+        // Drop both tables
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table1`;)", false);
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
+
+        // Restore
+        ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Verify both tables and indexes
+        auto actual1 = KqpSimpleExec(runtime, R"(
+            SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+        )");
+        auto actual2 = KqpSimpleExec(runtime, R"(
+            SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+        )");
+
+        UNIT_ASSERT_VALUES_EQUAL(expected1, actual1);
+        UNIT_ASSERT_VALUES_EQUAL(expected2, actual2);
+
+        // Verify indexes work
+        auto idx1Query = KqpSimpleExec(runtime, R"(
+            SELECT key FROM `/Root/Table1` VIEW idx1 WHERE val1 = 300
+        )");
+        UNIT_ASSERT_C(idx1Query.find("uint32_value: 3") != TString::npos, "Index idx1 should work");
+
+        auto idx2Query = KqpSimpleExec(runtime, R"(
+            SELECT key FROM `/Root/Table2` VIEW idx2 WHERE val2 = 3000
+        )");
+        UNIT_ASSERT_C(idx2Query.find("uint32_value: 3") != TString::npos, "Index idx2 should work");
+    }
+
 
 } // Y_UNIT_TEST_SUITE(IncrementalBackup)
 
