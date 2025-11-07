@@ -604,6 +604,11 @@ bool CreateRestoreMultipleIncrementalBackups(
 
     // If restoring an index impl table, add AlterTableIndex operation to sync schema versions
     // (similar to CDC stream pattern - see schemeshard__operation_create_cdc_stream.cpp)
+    LOG_N("CreateRestoreMultipleIncrementalBackups: checking if index impl table"
+        << ": dst path# " << dstTablePath.PathString()
+        << ", parent path# " << dstTablePath.Parent().PathString()
+        << ", isTableIndex# " << dstTablePath.Parent().IsTableIndex());
+
     if (dstTablePath.Parent().IsTableIndex()) {
         auto indexPath = dstTablePath.Parent();
         auto tablePath = indexPath.Parent();
