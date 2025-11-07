@@ -607,15 +607,16 @@ bool CreateRestoreMultipleIncrementalBackups(
     LOG_N("CreateRestoreMultipleIncrementalBackups: checking if index impl table"
         << ": dst path# " << dstTablePath.PathString()
         << ", parent path# " << dstTablePath.Parent().PathString()
-        << ", isTableIndex# " << dstTablePath.Parent().IsTableIndex());
+        << ", isInsideTableIndexPath# " << dstTablePath.IsInsideTableIndexPath());
 
-    if (dstTablePath.Parent().IsTableIndex()) {
+    if (dstTablePath.IsInsideTableIndexPath()) {
         auto indexPath = dstTablePath.Parent();
         auto tablePath = indexPath.Parent();
 
         LOG_N("Adding AlterTableIndex for index impl table restore"
             << ": index path# " << indexPath.PathString()
-            << ", impl table# " << dstTablePath.PathString());
+            << ", impl table# " << dstTablePath.PathString()
+            << ", table path# " << tablePath.PathString());
 
         auto alterTx = TransactionTemplate(tablePath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpAlterTableIndex);
         alterTx.MutableAlterTableIndex()->SetName(indexPath.LeafName());
