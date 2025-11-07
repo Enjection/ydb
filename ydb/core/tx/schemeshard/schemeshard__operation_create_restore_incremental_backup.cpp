@@ -602,6 +602,22 @@ bool CreateRestoreMultipleIncrementalBackups(
         result.push_back(CreateRestoreIncrementalBackupAtTable(NextPartId(opId, result), outTx));
     }
 
+    // If restoring an index impl table, add AlterTableIndex operation to sync schema versions
+    // (similar to CDC stream pattern - see schemeshard__operation_create_cdc_stream.cpp)
+    if (dstTablePath.Parent().IsTableIndex()) {
+        auto indexPath = dstTablePath.Parent();
+        auto tablePath = indexPath.Parent();
+
+        LOG_N("Adding AlterTableIndex for index impl table restore"
+            << ": index path# " << indexPath.PathString()
+            << ", impl table# " << dstTablePath.PathString());
+
+        auto alterTx = TransactionTemplate(tablePath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpAlterTableIndex);
+        alterTx.MutableAlterTableIndex()->SetName(indexPath.LeafName());
+        alterTx.MutableAlterTableIndex()->SetState(NKikimrSchemeOp::EIndexStateReady);
+        result.push_back(CreateAlterTableIndex(NextPartId(opId, result), alterTx));
+    }
+
     return true;
 }
 
