@@ -3107,6 +3107,22 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         )");
         UNIT_ASSERT_C(indexQuery.find("uint32_value: 2") != TString::npos, "Should find key=2");
         UNIT_ASSERT_C(indexQuery.find("uint32_value: 250") != TString::npos, "Should find indexed_col=250");
+
+        // Verify index implementation table was restored correctly
+        auto indexImplTable = KqpSimpleExec(runtime, R"(
+            SELECT indexed_col, key FROM `/Root/TableWithIndex/value_index/indexImplTable` ORDER BY indexed_col
+        )");
+        // Should have 4 rows after incremental: (100,1), (250,2), (300,3), (400,4)
+        UNIT_ASSERT_C(indexImplTable.find("uint32_value: 100") != TString::npos, "Index table should have indexed_col=100");
+        UNIT_ASSERT_C(indexImplTable.find("uint32_value: 250") != TString::npos, "Index table should have indexed_col=250");
+        UNIT_ASSERT_C(indexImplTable.find("uint32_value: 300") != TString::npos, "Index table should have indexed_col=300");
+        UNIT_ASSERT_C(indexImplTable.find("uint32_value: 400") != TString::npos, "Index table should have indexed_col=400");
+
+        // Count rows in index impl table
+        auto indexRowCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/TableWithIndex/value_index/indexImplTable`
+        )");
+        UNIT_ASSERT_C(indexRowCount.find("uint64_value: 4") != TString::npos, "Index table should have 4 rows");
     }
 
     Y_UNIT_TEST(MultipleIndexesIncrementalRestore) {
@@ -3204,6 +3220,29 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             SELECT key FROM `/Root/MultiIndexTable` VIEW index3 WHERE value3 = 34
         )");
         UNIT_ASSERT_C(index3Query.find("uint32_value: 4") != TString::npos, "Index3 should work");
+
+        // Verify all index implementation tables were restored
+        auto index1ImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/MultiIndexTable/index1/indexImplTable`
+        )");
+        UNIT_ASSERT_C(index1ImplCount.find("uint64_value: 4") != TString::npos, "Index1 impl table should have 4 rows");
+
+        auto index2ImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/MultiIndexTable/index2/indexImplTable`
+        )");
+        UNIT_ASSERT_C(index2ImplCount.find("uint64_value: 4") != TString::npos, "Index2 impl table should have 4 rows");
+
+        auto index3ImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/MultiIndexTable/index3/indexImplTable`
+        )");
+        UNIT_ASSERT_C(index3ImplCount.find("uint64_value: 4") != TString::npos, "Index3 impl table should have 4 rows");
+
+        // Verify index3 impl table data (spot check)
+        auto index3ImplData = KqpSimpleExec(runtime, R"(
+            SELECT value3, key FROM `/Root/MultiIndexTable/index3/indexImplTable` WHERE value3 = 34
+        )");
+        UNIT_ASSERT_C(index3ImplData.find("uint32_value: 34") != TString::npos, "Index3 impl should have value3=34");
+        UNIT_ASSERT_C(index3ImplData.find("uint32_value: 4") != TString::npos, "Index3 impl should have key=4");
     }
 
     Y_UNIT_TEST(IndexDataVerificationIncrementalRestore) {
@@ -3300,6 +3339,24 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         UNIT_ASSERT_C(afterRestore.find("text_value: \"Alice\"") == TString::npos, "Alice should be deleted");
         UNIT_ASSERT_C(afterRestore.find("text_value: \"Frank\"") != TString::npos, "Frank should be present");
         UNIT_ASSERT_C(afterRestore.find("uint32_value: 45") != TString::npos, "Age 45 should be present");
+
+        // Verify index implementation table has correct data
+        auto indexImplData = KqpSimpleExec(runtime, R"(
+            SELECT age, key, name FROM `/Root/DataVerifyTable/age_index/indexImplTable` ORDER BY age
+        )");
+        // Should have: (28, 3, Eve), (31, 2, Bob), (41, 12, David), (45, 13, Frank)
+        // Deleted: (25, 1, Alice), (35, 11, Charlie)
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 28") != TString::npos, "Index should have age=28");
+        UNIT_ASSERT_C(indexImplData.find("text_value: \"Eve\"") != TString::npos, "Index should have Eve");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 31") != TString::npos, "Index should have age=31");
+        UNIT_ASSERT_C(indexImplData.find("text_value: \"Bob\"") != TString::npos, "Index should have Bob");
+        UNIT_ASSERT_C(indexImplData.find("text_value: \"Alice\"") == TString::npos, "Index should NOT have Alice");
+        UNIT_ASSERT_C(indexImplData.find("text_value: \"Charlie\"") == TString::npos, "Index should NOT have Charlie");
+
+        auto indexImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/DataVerifyTable/age_index/indexImplTable`
+        )");
+        UNIT_ASSERT_C(indexImplCount.find("uint64_value: 4") != TString::npos, "Index impl table should have 4 rows");
     }
 
     Y_UNIT_TEST(MultipleIncrementalBackupsWithIndexes) {
@@ -3406,6 +3463,23 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         UNIT_ASSERT_C(actualTable.find("uint32_value: 25") != TString::npos, "Key 2 should have value 25");
         UNIT_ASSERT_C(actualTable.find("uint32_value: 30") != TString::npos, "Key 3 should exist");
         UNIT_ASSERT_C(actualTable.find("uint32_value: 40") != TString::npos, "Key 4 should exist");
+
+        // Verify index implementation table reflects all 3 incremental changes
+        auto indexImplData = KqpSimpleExec(runtime, R"(
+            SELECT indexed, key FROM `/Root/SequenceTable/idx/indexImplTable` ORDER BY indexed
+        )");
+        // Final state should be: (250, 2), (300, 3), (400, 4)
+        // Deleted: (100, 1), (200, 2->old value)
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 100") == TString::npos, "Index should NOT have indexed=100 (deleted)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 200") == TString::npos, "Index should NOT have indexed=200 (updated)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 250") != TString::npos, "Index should have indexed=250 (updated value)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 300") != TString::npos, "Index should have indexed=300 (added)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 400") != TString::npos, "Index should have indexed=400 (added)");
+
+        auto indexImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/SequenceTable/idx/indexImplTable`
+        )");
+        UNIT_ASSERT_C(indexImplCount.find("uint64_value: 3") != TString::npos, "Index impl table should have 3 rows");
     }
 
     Y_UNIT_TEST(MultipleTablesWithIndexesIncrementalRestore) {
@@ -3515,6 +3589,30 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
             SELECT key FROM `/Root/Table2` VIEW idx2 WHERE val2 = 3000
         )");
         UNIT_ASSERT_C(idx2Query.find("uint32_value: 3") != TString::npos, "Index idx2 should work");
+
+        // Verify both index implementation tables were restored
+        auto idx1ImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/Table1/idx1/indexImplTable`
+        )");
+        UNIT_ASSERT_C(idx1ImplCount.find("uint64_value: 3") != TString::npos, "Table1 index impl should have 3 rows");
+
+        auto idx2ImplCount = KqpSimpleExec(runtime, R"(
+            SELECT COUNT(*) FROM `/Root/Table2/idx2/indexImplTable`
+        )");
+        UNIT_ASSERT_C(idx2ImplCount.find("uint64_value: 3") != TString::npos, "Table2 index impl should have 3 rows");
+
+        // Verify index impl tables have correct data
+        auto idx1ImplData = KqpSimpleExec(runtime, R"(
+            SELECT val1, key FROM `/Root/Table1/idx1/indexImplTable` WHERE val1 = 300
+        )");
+        UNIT_ASSERT_C(idx1ImplData.find("uint32_value: 300") != TString::npos, "Table1 index should have val1=300");
+        UNIT_ASSERT_C(idx1ImplData.find("uint32_value: 3") != TString::npos, "Table1 index should have key=3");
+
+        auto idx2ImplData = KqpSimpleExec(runtime, R"(
+            SELECT val2, key FROM `/Root/Table2/idx2/indexImplTable` WHERE val2 = 3000
+        )");
+        UNIT_ASSERT_C(idx2ImplData.find("uint32_value: 3000") != TString::npos, "Table2 index should have val2=3000");
+        UNIT_ASSERT_C(idx2ImplData.find("uint32_value: 3") != TString::npos, "Table2 index should have key=3");
     }
 
 
