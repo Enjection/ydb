@@ -857,6 +857,39 @@ void TSchemeShard::CreateSingleIndexRestoreOperation(
     // Send the request (parallel with table operations)
     LOG_I("Sending index restore operation for: " << dstIndexImplPath);
     Send(SelfId(), indexRequest.Release());
+
+    // Create AlterTableIndex operation to sync index metadata version with impl table
+    // This prevents schema version mismatch between index and its impl table
+    // (similar to CDC stream pattern - see schemeshard__operation_create_cdc_stream.cpp)
+    {
+        auto alterIndexRequest = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
+        auto& alterIndexRecord = alterIndexRequest->Record;
+
+        TTxId alterIndexTxId = GetCachedTxId(ctx);
+        alterIndexRecord.SetTxId(ui64(alterIndexTxId));
+
+        auto& alterIndexTx = *alterIndexRecord.AddTransaction();
+        alterIndexTx.SetOperationType(NKikimrSchemeOp::ESchemeOpAlterTableIndex);
+        alterIndexTx.SetInternal(true);
+        alterIndexTx.SetWorkingDir(targetTablePath);
+
+        auto& alterIndex = *alterIndexTx.MutableAlterTableIndex();
+        alterIndex.SetName(indexName);
+        alterIndex.SetState(NKikimrSchemeOp::EIndexStateReady);
+
+        // Track this AlterTableIndex operation
+        TOperationId alterIndexOpId(alterIndexTxId, 0);
+        IncrementalRestoreOperationToState[alterIndexOpId] = operationId;
+        TxIdToIncrementalRestore[alterIndexTxId] = operationId;
+
+        if (stateIt != IncrementalRestoreStates.end()) {
+            stateIt->second.InProgressOperations.insert(alterIndexOpId);
+            LOG_I("Tracking AlterTableIndex operation " << alterIndexOpId << " for schema version sync");
+        }
+
+        LOG_I("Sending AlterTableIndex operation for: " << targetTablePath << "/" << indexName);
+        Send(SelfId(), alterIndexRequest.Release());
+    }
 }
 
 // Notification function for operation completion
