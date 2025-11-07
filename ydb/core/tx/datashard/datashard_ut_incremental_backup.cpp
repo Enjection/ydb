@@ -3498,6 +3498,7 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         SetupLogging(runtime);
         InitRoot(server, edgeActor);
 
+        Cerr << "===== STEP 1: Creating Table1 with idx1 =====" << Endl;
         // Create first table with index
         CreateShardedTable(server, edgeActor, "/Root", "Table1",
             TShardedTableOptions()
@@ -3508,7 +3509,9 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
                 .Indexes({
                     {"idx1", {"val1"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
                 }));
+        Cerr << "===== Table1 created successfully =====" << Endl;
 
+        Cerr << "===== STEP 2: Creating Table2 with idx2 =====" << Endl;
         // Create second table with different index
         CreateShardedTable(server, edgeActor, "/Root", "Table2",
             TShardedTableOptions()
@@ -3519,13 +3522,17 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
                 .Indexes({
                     {"idx2", {"val2"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
                 }));
+        Cerr << "===== Table2 created successfully =====" << Endl;
 
+        Cerr << "===== STEP 3: Inserting initial data =====" << Endl;
         // Insert data into both tables
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table1` (key, val1) VALUES (1, 100), (2, 200);
             UPSERT INTO `/Root/Table2` (key, val2) VALUES (1, 1000), (2, 2000);
         )");
+        Cerr << "===== Initial data inserted successfully =====" << Endl;
 
+        Cerr << "===== STEP 4: Creating backup collection =====" << Endl;
         // Create backup collection with both tables
         ExecSQL(server, edgeActor, R"(
             CREATE BACKUP COLLECTION `MultiTableCollection`
@@ -3537,82 +3544,125 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
               , INCREMENTAL_BACKUP_ENABLED = 'true'
               );
         )", false);
+        Cerr << "===== Backup collection created successfully =====" << Endl;
 
+        Cerr << "===== STEP 5: Performing full backup =====" << Endl;
         // Full backup
         ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection`;)", false);
         SimulateSleep(server, TDuration::Seconds(1));
+        Cerr << "===== Full backup completed successfully =====" << Endl;
 
+        Cerr << "===== STEP 6: Modifying data =====" << Endl;
         // Modify both tables
         ExecSQL(server, edgeActor, R"(
             UPSERT INTO `/Root/Table1` (key, val1) VALUES (3, 300);
             UPSERT INTO `/Root/Table2` (key, val2) VALUES (3, 3000);
         )");
+        Cerr << "===== Data modified successfully =====" << Endl;
 
+        Cerr << "===== STEP 7: Performing incremental backup =====" << Endl;
         // Incremental backup
         ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection` INCREMENTAL;)", false);
         SimulateSleep(server, TDuration::Seconds(5));
+        Cerr << "===== Incremental backup completed successfully =====" << Endl;
 
+        Cerr << "===== STEP 8: Querying Table1 to capture expected state =====" << Endl;
         // Capture expected states
         auto expected1 = KqpSimpleExec(runtime, R"(
             SELECT key, val1 FROM `/Root/Table1` ORDER BY key
         )");
+        Cerr << "===== Table1 query successful =====" << Endl;
+        
+        Cerr << "===== STEP 9: Querying Table2 to capture expected state =====" << Endl;
         auto expected2 = KqpSimpleExec(runtime, R"(
             SELECT key, val2 FROM `/Root/Table2` ORDER BY key
         )");
+        Cerr << "===== Table2 query successful =====" << Endl;
 
+        Cerr << "===== STEP 10: Dropping Table1 =====" << Endl;
         // Drop both tables
         ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table1`;)", false);
+        Cerr << "===== Table1 dropped successfully =====" << Endl;
+        
+        Cerr << "===== STEP 11: Dropping Table2 =====" << Endl;
         ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
+        Cerr << "===== Table2 dropped successfully =====" << Endl;
 
+        Cerr << "===== STEP 12: Restoring from backup =====" << Endl;
         // Restore
         ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
         runtime.SimulateSleep(TDuration::Seconds(10));
+        Cerr << "===== Restore completed successfully =====" << Endl;
 
+        Cerr << "===== STEP 13: Verifying Table1 data =====" << Endl;
         // Verify both tables and indexes
         auto actual1 = KqpSimpleExec(runtime, R"(
             SELECT key, val1 FROM `/Root/Table1` ORDER BY key
         )");
+        Cerr << "===== Table1 verification query successful =====" << Endl;
+        
+        Cerr << "===== STEP 14: Verifying Table2 data =====" << Endl;
         auto actual2 = KqpSimpleExec(runtime, R"(
             SELECT key, val2 FROM `/Root/Table2` ORDER BY key
         )");
+        Cerr << "===== Table2 verification query successful =====" << Endl;
 
+        Cerr << "===== STEP 15: Checking data equality for Table1 =====" << Endl;
         UNIT_ASSERT_VALUES_EQUAL(expected1, actual1);
+        Cerr << "===== Table1 data matches expected =====" << Endl;
+        
+        Cerr << "===== STEP 16: Checking data equality for Table2 =====" << Endl;
         UNIT_ASSERT_VALUES_EQUAL(expected2, actual2);
+        Cerr << "===== Table2 data matches expected =====" << Endl;
 
+        Cerr << "===== STEP 17: Verifying idx1 works =====" << Endl;
         // Verify indexes work
         auto idx1Query = KqpSimpleExec(runtime, R"(
             SELECT key FROM `/Root/Table1` VIEW idx1 WHERE val1 = 300
         )");
         UNIT_ASSERT_C(idx1Query.find("uint32_value: 3") != TString::npos, "Index idx1 should work");
+        Cerr << "===== idx1 verification successful =====" << Endl;
 
+        Cerr << "===== STEP 18: Verifying idx2 works =====" << Endl;
         auto idx2Query = KqpSimpleExec(runtime, R"(
             SELECT key FROM `/Root/Table2` VIEW idx2 WHERE val2 = 3000
         )");
         UNIT_ASSERT_C(idx2Query.find("uint32_value: 3") != TString::npos, "Index idx2 should work");
+        Cerr << "===== idx2 verification successful =====" << Endl;
 
+        Cerr << "===== STEP 19: Verifying Table1 index impl table =====" << Endl;
         // Verify both index implementation tables were restored
         auto idx1ImplCount = KqpSimpleExec(runtime, R"(
             SELECT COUNT(*) FROM `/Root/Table1/idx1/indexImplTable`
         )");
         UNIT_ASSERT_C(idx1ImplCount.find("uint64_value: 3") != TString::npos, "Table1 index impl should have 3 rows");
+        Cerr << "===== Table1 index impl table verification successful =====" << Endl;
 
+        Cerr << "===== STEP 20: Verifying Table2 index impl table =====" << Endl;
         auto idx2ImplCount = KqpSimpleExec(runtime, R"(
             SELECT COUNT(*) FROM `/Root/Table2/idx2/indexImplTable`
         )");
         UNIT_ASSERT_C(idx2ImplCount.find("uint64_value: 3") != TString::npos, "Table2 index impl should have 3 rows");
+        Cerr << "===== Table2 index impl table verification successful =====" << Endl;
 
+        Cerr << "===== STEP 21: Verifying Table1 index impl table data =====" << Endl;
         // Verify index impl tables have correct data
         auto idx1ImplData = KqpSimpleExec(runtime, R"(
             SELECT val1, key FROM `/Root/Table1/idx1/indexImplTable` WHERE val1 = 300
         )");
         UNIT_ASSERT_C(idx1ImplData.find("uint32_value: 300") != TString::npos, "Table1 index should have val1=300");
         UNIT_ASSERT_C(idx1ImplData.find("uint32_value: 3") != TString::npos, "Table1 index should have key=3");
+        Cerr << "===== Table1 index impl table data verification successful =====" << Endl;
 
+        Cerr << "===== STEP 22: Verifying Table2 index impl table data =====" << Endl;
         auto idx2ImplData = KqpSimpleExec(runtime, R"(
             SELECT val2, key FROM `/Root/Table2/idx2/indexImplTable` WHERE val2 = 3000
         )");
         UNIT_ASSERT_C(idx2ImplData.find("uint32_value: 3000") != TString::npos, "Table2 index should have val2=3000");
         UNIT_ASSERT_C(idx2ImplData.find("uint32_value: 3") != TString::npos, "Table2 index should have key=3");
+        Cerr << "===== Table2 index impl table data verification successful =====" << Endl;
+        
+        Cerr << "===== TEST COMPLETED SUCCESSFULLY =====" << Endl;
     }
 
 

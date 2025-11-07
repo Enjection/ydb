@@ -681,7 +681,7 @@ void TSchemeShard::DiscoverIndexesRecursive(
 }
 
 void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
-    const TPathId& backupCollectionPathId,
+    const TPathId& /*backupCollectionPathId*/,
     ui64 operationId,
     const TString& backupName,
     const TPath& bcPath,

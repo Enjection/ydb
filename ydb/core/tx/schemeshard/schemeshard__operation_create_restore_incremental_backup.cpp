@@ -251,6 +251,46 @@ public:
             Y_ABORT_UNLESS(context.SS->PathsById.contains(txState->TargetPathId));
             auto targetPath = context.SS->PathsById.at(txState->TargetPathId);
             
+            // If we restored an index implementation table, sync the parent index's schema version
+            auto dstTablePath = TPath::Init(txState->TargetPathId, context.SS);
+            
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "[" << context.SS->SelfTabletId() << "] " << DebugHint()
+                << " Checking if restored path is index impl table"
+                << ": path# " << dstTablePath.PathString()
+                << ", isResolved# " << dstTablePath.IsResolved()
+                << ", isInsideTableIndexPath# " << dstTablePath.IsInsideTableIndexPath(false));
+            
+            if (dstTablePath.IsInsideTableIndexPath(false)) {
+                auto indexPath = dstTablePath.Parent();
+                auto tablePath = indexPath.Parent();
+
+                LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "[" << context.SS->SelfTabletId() << "] " << DebugHint()
+                    << " Syncing index schema version after restore"
+                    << ": index# " << indexPath.PathString()
+                    << ", impl table# " << dstTablePath.PathString()
+                    << ", table# " << tablePath.PathString());
+
+                // Create AlterTableIndex operation to sync schema versions
+                auto request = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
+                auto& record = request->Record;
+
+                auto txId = context.SS->GetCachedTxId(context.Ctx);
+                record.SetTxId(ui64(txId));
+
+                auto& alterTx = *record.AddTransaction();
+                alterTx.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterTableIndex);
+                alterTx.SetWorkingDir(tablePath.PathString());
+                alterTx.SetInternal(true);
+                
+                auto alterIndex = alterTx.MutableAlterTableIndex();
+                alterIndex->SetName(indexPath.LeafName());
+                alterIndex->SetState(NKikimrSchemeOp::EIndexStateReady);
+
+                context.Ctx.Send(context.SS->SelfId(), request.Release());
+            }
+            
             context.SS->ClearDescribePathCaches(targetPath);
             context.OnComplete.PublishToSchemeBoard(OperationId, txState->TargetPathId);
             context.OnComplete.ReleasePathState(OperationId, txState->TargetPathId, TPathElement::EPathState::EPathStateNoChanges);
@@ -602,27 +642,8 @@ bool CreateRestoreMultipleIncrementalBackups(
         result.push_back(CreateRestoreIncrementalBackupAtTable(NextPartId(opId, result), outTx));
     }
 
-    // If restoring an index impl table, add AlterTableIndex operation to sync schema versions
-    // (similar to CDC stream pattern - see schemeshard__operation_create_cdc_stream.cpp)
-    LOG_N("CreateRestoreMultipleIncrementalBackups: checking if index impl table"
-        << ": dst path# " << dstTablePath.PathString()
-        << ", parent path# " << dstTablePath.Parent().PathString()
-        << ", isInsideTableIndexPath# " << dstTablePath.IsInsideTableIndexPath());
-
-    if (dstTablePath.IsInsideTableIndexPath()) {
-        auto indexPath = dstTablePath.Parent();
-        auto tablePath = indexPath.Parent();
-
-        LOG_N("Adding AlterTableIndex for index impl table restore"
-            << ": index path# " << indexPath.PathString()
-            << ", impl table# " << dstTablePath.PathString()
-            << ", table path# " << tablePath.PathString());
-
-        auto alterTx = TransactionTemplate(tablePath.PathString(), NKikimrSchemeOp::EOperationType::ESchemeOpAlterTableIndex);
-        alterTx.MutableAlterTableIndex()->SetName(indexPath.LeafName());
-        alterTx.MutableAlterTableIndex()->SetState(NKikimrSchemeOp::EIndexStateReady);
-        result.push_back(CreateAlterTableIndex(NextPartId(opId, result), alterTx));
-    }
+    // Note: AlterTableIndex for schema version sync is now handled in TDone::ProgressState
+    // after the restore completes, not here (where it would use stale schema versions)
 
     return true;
 }
