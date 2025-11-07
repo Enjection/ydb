@@ -622,14 +622,62 @@ TString TSchemeShard::FindTargetTablePath(
         // Item path is like /Root/db/table1, we need to extract the relative part
         TString itemPath = item.GetPath();
 
-        // Find the last path component(s) to match with relativeTablePath
-        // relativeTablePath might be "table1" or "folder/table1"
-        if (itemPath.EndsWith(relativeTablePath) || itemPath.EndsWith("/" + relativeTablePath)) {
+        // Only accept exact matches or suffixes preceded by path separator
+        // to avoid false matches (e.g. "/Root/FooBar" should not match "Bar")
+        if (itemPath == relativeTablePath || itemPath.EndsWith("/" + relativeTablePath)) {
             return itemPath;
         }
     }
 
     return {};
+}
+
+void TSchemeShard::DiscoverIndexesRecursive(
+    ui64 operationId,
+    const TString& backupName,
+    const TPath& bcPath,
+    const TBackupCollectionInfo::TPtr& backupCollectionInfo,
+    const TPath& currentPath,
+    const TString& accumulatedRelativePath,
+    const TActorContext& ctx) {
+
+    // Try to find target table for current accumulated path
+    TString targetTablePath = FindTargetTablePath(backupCollectionInfo, accumulatedRelativePath);
+
+    if (!targetTablePath.empty()) {
+        // Found target table, children are indexes
+        LOG_I("Found table mapping: " << accumulatedRelativePath << " -> " << targetTablePath);
+
+        for (const auto& [indexName, indexDirPathId] : currentPath.Base()->GetChildren()) {
+            CreateSingleIndexRestoreOperation(
+                operationId,
+                backupName,
+                bcPath,
+                accumulatedRelativePath,
+                indexName,
+                targetTablePath,
+                ctx
+            );
+        }
+    } else {
+        // Not a table yet, descend into children to build up the path
+        for (const auto& [childName, childPathId] : currentPath.Base()->GetChildren()) {
+            auto childPath = TPath::Init(childPathId, this);
+            TString newRelativePath = accumulatedRelativePath.empty()
+                ? childName
+                : accumulatedRelativePath + "/" + childName;
+
+            DiscoverIndexesRecursive(
+                operationId,
+                backupName,
+                bcPath,
+                backupCollectionInfo,
+                childPath,
+                newRelativePath,
+                ctx
+            );
+        }
+    }
 }
 
 void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
@@ -663,32 +711,16 @@ void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
 
     LOG_I("Discovering indexes for restore at: " << indexMetaBasePath);
 
-    // Iterate through table directories under indexes/
-    for (const auto& [relativeTablePath, tableMetaDirPathId] : indexMetaPath.Base()->GetChildren()) {
-        auto tableMetaDirPath = TPath::Init(tableMetaDirPathId, this);
-
-        // Find corresponding target table
-        TString targetTablePath = FindTargetTablePath(backupCollectionInfo, relativeTablePath);
-        if (targetTablePath.empty()) {
-            LOG_W("Could not find target table for relative path: " << relativeTablePath);
-            continue;
-        }
-
-        LOG_I("Found table mapping: " << relativeTablePath << " -> " << targetTablePath);
-
-        // For each index under this table
-        for (const auto& [indexName, indexDirPathId] : tableMetaDirPath.Base()->GetChildren()) {
-            CreateSingleIndexRestoreOperation(
-                operationId,
-                backupName,
-                bcPath,
-                relativeTablePath,
-                indexName,
-                targetTablePath,
-                ctx
-            );
-        }
-    }
+    // Start recursive discovery from the indexes root with empty accumulated path
+    DiscoverIndexesRecursive(
+        operationId,
+        backupName,
+        bcPath,
+        backupCollectionInfo,
+        indexMetaPath,
+        "", // Start with empty accumulated path
+        ctx
+    );
 }
 
 void TSchemeShard::CreateSingleIndexRestoreOperation(

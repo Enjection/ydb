@@ -1202,6 +1202,15 @@ public:
         const TBackupCollectionInfo::TPtr& backupCollectionInfo,
         const TActorContext& ctx);
 
+    void DiscoverIndexesRecursive(
+        ui64 operationId,
+        const TString& backupName,
+        const TPath& bcPath,
+        const TBackupCollectionInfo::TPtr& backupCollectionInfo,
+        const TPath& currentPath,
+        const TString& accumulatedRelativePath,
+        const TActorContext& ctx);
+
     void CreateSingleIndexRestoreOperation(
         ui64 operationId,
         const TString& backupName,
