@@ -249,6 +249,7 @@ private:
     const NKikimrConfig::TAppConfig BaseConfig;
     NKikimrConfig::TAppConfig CurrentConfig;
     const TString StartupConfigYaml;
+    const TString StartupStorageYaml;
     NKikimrConfig::TAppConfig CandidateStartupConfig;
     bool StartupConfigProcessError = false;
     bool StartupConfigProcessDiff = false;
@@ -285,6 +286,7 @@ TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInf
         , BaseConfig(initInfo.InitialConfig)
         , CurrentConfig(initInfo.InitialConfig)
         , StartupConfigYaml(initInfo.StartupConfigYaml)
+        , StartupStorageYaml(initInfo.StartupStorageYaml)
         , CandidateStartupConfig(initInfo.InitialConfig)
         , DebugInfo(initInfo.DebugInfo)
         , RecordedInitialConfiguratorDeps(std::move(initInfo.RecordedInitialConfiguratorDeps))
@@ -818,19 +820,16 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
 
 class TConfigurationResult
     : public IConfigurationResult
+    , public IStorageConfigResult
 {
 public:
-    // TODO make ref
+    // IConfigurationResult interface
     const NKikimrConfig::TAppConfig& GetConfig() const override {
         return Config;
     }
 
     bool HasMainYamlConfig() const override {
         return !MainYamlConfig.empty();
-    }
-
-    const TString& GetMainYamlConfig() const override {
-        return MainYamlConfig;
     }
 
     TMap<ui64, TString> GetVolatileYamlConfigs() const override {
@@ -845,10 +844,26 @@ public:
         return DatabaseYamlConfig;
     }
 
+    // IStorageConfigResult interface
+    const TString& GetStorageYamlConfig() const override {
+        return StorageYamlConfig;
+    }
+
+    const TString& GetSourceAddress() const override {
+        return SourceAddress;
+    }
+
+    // Shared method for both interfaces
+    const TString& GetMainYamlConfig() const override {
+        return MainYamlConfig;
+    }
+
     NKikimrConfig::TAppConfig Config;
     TString MainYamlConfig;
     TMap<ui64, TString> VolatileYamlConfigs;
     TString DatabaseYamlConfig;
+    TString StorageYamlConfig;
+    TString SourceAddress;
 };
 
 void TConfigsDispatcher::UpdateCandidateStartupConfig(TEvConsole::TEvConfigSubscriptionNotification::TPtr &ev)
@@ -864,16 +879,35 @@ try {
 
     auto &rec = ev->Get()->Record;
 
-    auto dcClient = std::make_unique<TDynConfigClientMock>();
+    // Prepare config result for replay (implements both IConfigurationResult and IStorageConfigResult)
     auto configs = std::make_shared<TConfigurationResult>();
-    dcClient->SavedResult = configs;
     configs->Config = rec.GetRawConsoleConfig();
     configs->MainYamlConfig = rec.GetMainYamlConfig();
     if (rec.HasDatabaseYamlConfig()) {
         configs->DatabaseYamlConfig = rec.GetDatabaseYamlConfig();
     }
     // TODO volatile
-    RecordedInitialConfiguratorDeps->DynConfigClient = std::move(dcClient);
+
+    // Check if config was loaded from seed nodes and use appropriate client mock
+    bool useSeedNodes = false;
+    if (auto it = Labels.find("config_source"); it != Labels.end() && it->second == "seed_nodes") {
+        useSeedNodes = true;
+    }
+
+    if (useSeedNodes) {
+        // For seed-nodes scenario, use ConfigClient to match initialization path
+        // Set StorageYamlConfig from the startup config (received during initialization)
+        configs->StorageYamlConfig = StartupStorageYaml;
+        auto configClient = std::make_unique<TConfigClientMock>();
+        configClient->SavedResult = configs;
+        RecordedInitialConfiguratorDeps->ConfigClient = std::move(configClient);
+    } else {
+        // For regular dynamic config, use DynConfigClient
+        auto dcClient = std::make_unique<TDynConfigClientMock>();
+        dcClient->SavedResult = configs;
+        RecordedInitialConfiguratorDeps->DynConfigClient = std::move(dcClient);
+    }
+
     auto deps = RecordedInitialConfiguratorDeps->GetDeps();
     NConfig::TInitialConfigurator initCfg(deps);
 
