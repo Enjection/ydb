@@ -156,15 +156,35 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
         }
     }
 
-    // For index impl tables: synchronize with parent table version
-    // This applies to ALL operations on impl tables, not just continuous backup
-    if (isIndexImplTable && grandParentPathId && context.SS->Tables.contains(grandParentPathId)) {
+    // Enhanced continuous backup detection for impl tables
+    // Check if the parent table has any continuous backup CDC streams
+    bool isPartOfContinuousBackup = isContinuousBackupStream;
+    if (isIndexImplTable && grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
+        auto grandParentPath = context.SS->PathsById.at(grandParentPathId);
+        for (const auto& [childName, childPathId] : grandParentPath->GetChildren()) {
+            auto childPath = context.SS->PathsById.at(childPathId);
+            // Check if this is a CDC stream with continuous backup suffix
+            if (childPath->IsCdcStream() && childName.EndsWith("_continuousBackupImpl")) {
+                isPartOfContinuousBackup = true;
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Detected continuous backup via parent table CDC stream"
+                                       << ", implTablePathId: " << pathId
+                                       << ", parentTablePathId: " << grandParentPathId
+                                       << ", cdcStreamName: " << childName
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+                break;
+            }
+        }
+    }
+
+    // For index impl tables in continuous backup: synchronize with parent table version
+    // For regular CDC operations: increment normally
+    if (isPartOfContinuousBackup && isIndexImplTable && grandParentPathId && context.SS->Tables.contains(grandParentPathId)) {
         auto parentTable = context.SS->Tables.at(grandParentPathId);
         ui64 currentImplVersion = table->AlterVersion;
         ui64 currentParentVersion = parentTable->AlterVersion;
 
-        // Impl table should stay synchronized with parent table
-        // If behind or equal, sync to parent version
+        // Impl table should stay synchronized with parent table during continuous backup
         if (currentImplVersion <= currentParentVersion) {
             table->AlterVersion = currentParentVersion;
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
@@ -174,10 +194,9 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                                    << ", oldImplVersion: " << currentImplVersion
                                    << ", parentVersion: " << currentParentVersion
                                    << ", newImplVersion: " << table->AlterVersion
-                                   << ", continuous backup: " << (isContinuousBackupStream ? "yes" : "no")
                                    << ", at schemeshard: " << context.SS->SelfTabletId());
         } else {
-            // Impl version is ahead (shouldn't happen, but handle gracefully)
+            // Impl version is ahead
             table->AlterVersion += 1;
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         DebugHint() << " WARNING: Impl table version ahead of parent, incrementing"
@@ -189,7 +208,6 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
         }
 
         // ALWAYS sync parent index entity version to match impl table
-        // This is critical to avoid version mismatches
         if (context.SS->Indexes.contains(parentPathId)) {
             auto index = context.SS->Indexes.at(parentPathId);
             index->AlterVersion = table->AlterVersion;
@@ -216,6 +234,7 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                                << ", pathId: " << pathId
                                << ", newVersion: " << table->AlterVersion
                                << ", isIndexImpl: " << (isIndexImplTable ? "yes" : "no")
+                               << ", isContinuousBackup: " << (isPartOfContinuousBackup ? "yes" : "no")
                                << ", at schemeshard: " << context.SS->SelfTabletId());
     }
 
