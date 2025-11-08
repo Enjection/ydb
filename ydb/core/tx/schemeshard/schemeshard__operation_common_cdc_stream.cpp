@@ -177,6 +177,27 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                                        << ", parentVersion: " << currentParentVersion
                                        << ", newImplVersion: " << table->AlterVersion
                                        << ", at schemeshard: " << context.SS->SelfTabletId());
+
+                // Also sync parent index entity version to match
+                if (context.SS->Indexes.contains(parentPathId)) {
+                    auto index = context.SS->Indexes.at(parentPathId);
+                    index->AlterVersion = table->AlterVersion;
+
+                    // Persist the index version update
+                    db.Table<Schema::TableIndex>().Key(parentPathId.LocalPathId).Update(
+                        NIceDb::TUpdate<Schema::TableIndex::AlterVersion>(index->AlterVersion)
+                    );
+
+                    auto parentPath = context.SS->PathsById.at(parentPathId);
+                    context.SS->ClearDescribePathCaches(parentPath);
+                    context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                DebugHint() << " Also synced parent index entity version"
+                                           << ", indexPathId: " << parentPathId
+                                           << ", newVersion: " << index->AlterVersion
+                                           << ", at schemeshard: " << context.SS->SelfTabletId());
+                }
             } else {
                 // Impl version is ahead (shouldn't happen, but handle gracefully)
                 table->AlterVersion += 1;
@@ -208,6 +229,7 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
 
     // For parent tables with indexes in continuous backup:
     // Sync the index entity version to match the parent table
+    // Note: impl table version is synced during impl table's own CDC operation
     if (isContinuousBackupStream && !isIndexImplTable) {
         for (const auto& [childName, childPathId] : path->GetChildren()) {
             auto childPath = context.SS->PathsById.at(childPathId);
