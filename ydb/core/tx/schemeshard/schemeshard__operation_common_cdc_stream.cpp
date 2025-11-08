@@ -157,18 +157,37 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     }
 
     // For index impl tables in continuous backup:
-    // Match the parent table's current version instead of incrementing
+    // Synchronize with parent table version (catch up if behind, stay if equal, increment if ahead)
     if (isContinuousBackupStream && isIndexImplTable && grandParentPathId) {
         if (context.SS->Tables.contains(grandParentPathId)) {
             auto parentTable = context.SS->Tables.at(grandParentPathId);
-            table->AlterVersion = parentTable->AlterVersion;
+            ui64 currentImplVersion = table->AlterVersion;
+            ui64 currentParentVersion = parentTable->AlterVersion;
 
-            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                        DebugHint() << " Set index impl table version to match parent table"
-                                   << ", implTablePathId: " << pathId
-                                   << ", parentTablePathId: " << grandParentPathId
-                                   << ", version: " << table->AlterVersion
-                                   << ", at schemeshard: " << context.SS->SelfTabletId());
+            // Impl table should never be ahead of parent table
+            // If behind or equal, sync to parent version
+            // This handles interleaved operations correctly
+            if (currentImplVersion <= currentParentVersion) {
+                table->AlterVersion = currentParentVersion;
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Synchronized index impl table version to parent table"
+                                       << ", implTablePathId: " << pathId
+                                       << ", parentTablePathId: " << grandParentPathId
+                                       << ", oldImplVersion: " << currentImplVersion
+                                       << ", parentVersion: " << currentParentVersion
+                                       << ", newImplVersion: " << table->AlterVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+            } else {
+                // Impl version is ahead (shouldn't happen, but handle gracefully)
+                table->AlterVersion += 1;
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " WARNING: Impl table version ahead of parent, incrementing"
+                                       << ", implTablePathId: " << pathId
+                                       << ", implVersion: " << currentImplVersion
+                                       << ", parentVersion: " << currentParentVersion
+                                       << ", newImplVersion: " << table->AlterVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+            }
         } else {
             // Fallback: just increment normally
             table->AlterVersion += 1;
