@@ -582,6 +582,11 @@ TKikimrRunner::TKikimrRunner(std::shared_ptr<TModuleFactories> factories)
     , PollerThreads(MakeIntrusive<NInterconnect::TPollerThreads>())
     , ProcessMemoryInfoProvider(MakeIntrusive<NMemory::TProcessMemoryInfoProvider>())
 {
+    // Initialize startup metrics
+    auto startupCounters = Counters->GetSubgroup("component", "startup");
+    StartupDurationMs = startupCounters->GetHistogram(
+        "StartupDurationMs",
+        NMonitoring::ExponentialHistogram(15, 2, 32));
 }
 
 TKikimrRunner::~TKikimrRunner() {
@@ -2045,6 +2050,8 @@ TIntrusivePtr<TServiceInitializersList> TKikimrRunner::CreateServiceInitializers
 }
 
 void TKikimrRunner::KikimrStart() {
+    THPTimer startupTimer;
+
     for (auto plugin: Plugins) {
         plugin->Start();
     }
@@ -2074,6 +2081,11 @@ void TKikimrRunner::KikimrStart() {
 
     EnableActorCallstack();
     ThreadSigmask(SIG_UNBLOCK);
+
+    // Record startup duration
+    if (StartupDurationMs) {
+        StartupDurationMs->Collect(startupTimer.Passed() * 1000.0);
+    }
 }
 
 void TKikimrRunner::KikimrStop(bool graceful) {

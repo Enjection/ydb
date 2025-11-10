@@ -31,6 +31,7 @@ class TConfigsManager::TTxReplaceYamlConfigBase
             , DryRun(ev->Get()->Record.GetRequest().dry_run())
             , IngressDatabase(ev->Get()->Record.HasIngressDatabase() ? TMaybe<TString>{ev->Get()->Record.GetIngressDatabase()} : TMaybe<TString>{})
             , SkipAuditLog(ev->Get()->Record.GetSkipAuditLog() ? true : false)
+            , StartTime(TInstant::Now())
     {
     }
 
@@ -92,6 +93,7 @@ protected:
     TMaybe<TString> IngressDatabase;
     bool WarnDatabaseBypass = false;
     bool SkipAuditLog = false;
+    TInstant StartTime;
 };
 
 class TConfigsManager::TTxReplaceMainYamlConfig
@@ -211,6 +213,12 @@ public:
                     /* reason = */ ErrorReason,
                     /* success = */ false);
             }
+        }
+
+        // Record config replace duration
+        if (Self->ReplaceMainYamlConfigDurationMs) {
+            auto duration = (TInstant::Now() - StartTime).MilliSeconds();
+            Self->ReplaceMainYamlConfigDurationMs->Collect(duration);
         }
 
         Self->TxProcessor->TxCompleted(this, ctx);
@@ -406,6 +414,12 @@ public:
                     /* reason = */ ErrorReason,
                     /* success = */ false);
             }
+        }
+
+        // Record config replace duration
+        if (Self->ReplaceDatabaseYamlConfigDurationMs) {
+            auto duration = (TInstant::Now() - StartTime).MilliSeconds();
+            Self->ReplaceDatabaseYamlConfigDurationMs->Collect(duration);
         }
 
         Self->TxProcessor->TxCompleted(this, ctx);

@@ -308,6 +308,16 @@ public:
         : Self(self)
         , Counters(counters)
     {
+        // Initialize config replace metrics
+        if (Counters) {
+            auto configCounters = Counters->GetSubgroup("component", "config_replace");
+            ReplaceMainYamlConfigDurationMs = configCounters->GetHistogram(
+                "ReplaceMainYamlConfigDurationMs",
+                NMonitoring::ExponentialHistogram(15, 2, 32));
+            ReplaceDatabaseYamlConfigDurationMs = configCounters->GetHistogram(
+                "ReplaceDatabaseYamlConfigDurationMs",
+                NMonitoring::ExponentialHistogram(15, 2, 32));
+        }
     }
 
     ~TConfigsManager()
@@ -326,6 +336,8 @@ public:
 private:
     TConsole &Self;
     ::NMonitoring::TDynamicCounterPtr Counters;
+    NMonitoring::THistogramPtr ReplaceMainYamlConfigDurationMs;
+    NMonitoring::THistogramPtr ReplaceDatabaseYamlConfigDurationMs;
     TConfigsConfig Config;
     TString DomainName;
     // All config items by id.

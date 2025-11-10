@@ -54,6 +54,7 @@ protected:
     TAutoPtr<TMon> Monitoring;
     ::NMonitoring::TDynamicCounterPtr Counters;
     NMonitoring::TIndexMonPage *ActorsMonPage = nullptr;
+    NMonitoring::THistogramPtr StartupDurationMs;
 
     bool EnabledGrpcService = false;
     bool GracefulShutdownSupported = false;
