@@ -399,3 +399,136 @@ For questions or issues:
 1. Review test plan: `PARALLEL_OPERATIONS_TESTING_PLAN.md`
 2. Check example implementations in test suites
 3. Add detailed logging to understand ordering behavior
+
+## Runtime Integration (Automatic Event Interception)
+
+The most powerful feature of the framework is automatic operation batching using event observers. This eliminates the need to manually track operations.
+
+### Basic Runtime Integration
+
+```cpp
+#include <ydb/core/tx/schemeshard/ut_helpers/operation_order_runtime.h>
+
+Y_UNIT_TEST(MyTest) {
+    TTestBasicRuntime runtime;
+    TTestEnv env(runtime);
+    ui64 txId = 100;
+
+    // Create runtime integration wrapper
+    TOperationOrderRuntime orderedRuntime(runtime);
+    
+    // Configure controller
+    TOperationOrderController controller;
+    controller.SetMode(TOperationOrderController::Random, 42);
+    orderedRuntime.SetOperationOrderController(&controller);
+
+    // Begin batching - installs event observer
+    orderedRuntime.BeginOperationBatch(4);
+
+    // Submit operations normally - they're automatically intercepted!
+    TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+    TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+    TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+    TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq4")");
+
+    // Flush (reorder and send)
+    orderedRuntime.FlushOperationBatch();
+
+    // Wait and verify
+    env.TestWaitNotification(runtime, {101, 102, 103, 104});
+}
+```
+
+### How It Works
+
+1. **BeginOperationBatch()** - Installs an event observer that intercepts `TEvPipeCache::TEvForward` events going to SchemeShard
+2. **Operation submission** - Normal test helper calls (TestCreateSequence, etc.) are automatically intercepted
+3. **FlushOperationBatch()** - Reorders the batched events and sends them to the runtime
+
+### RAII Batch Scope
+
+For automatic flushing, use `TOperationOrderBatchScope`:
+
+```cpp
+Y_UNIT_TEST(RAIIExample) {
+    TTestBasicRuntime runtime;
+    TTestEnv env(runtime);
+    
+    TOperationOrderRuntime orderedRuntime(runtime);
+    TOperationOrderController controller;
+    controller.SetMode(TOperationOrderController::Random, 42);
+    orderedRuntime.SetOperationOrderController(&controller);
+
+    {
+        // Batch scope - automatically flushes on exit
+        TOperationOrderBatchScope batch(orderedRuntime, 3);
+        
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+        
+    } // Automatic flush here!
+
+    env.TestWaitNotification(runtime, {101, 102, 103});
+}
+```
+
+### Multiple Batches
+
+You can create multiple batches with different orderings:
+
+```cpp
+Y_UNIT_TEST(MultipleBatches) {
+    TTestBasicRuntime runtime;
+    TTestEnv env(runtime);
+    
+    TOperationOrderRuntime orderedRuntime(runtime);
+    TOperationOrderController controller;
+    orderedRuntime.SetOperationOrderController(&controller);
+
+    // Batch 1: Random
+    controller.SetMode(TOperationOrderController::Random, 42);
+    {
+        TOperationOrderBatchScope batch(orderedRuntime, 2);
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+    }
+    env.TestWaitNotification(runtime, {101, 102});
+
+    // Batch 2: Default (no reordering)
+    controller.SetMode(TOperationOrderController::Default);
+    {
+        TOperationOrderBatchScope batch(orderedRuntime, 2);
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq4")");
+    }
+    env.TestWaitNotification(runtime, {103, 104});
+
+    // Batch 3: Specific order
+    controller.SetPredefinedOrder({1, 0});  // Reverse
+    controller.SetMode(TOperationOrderController::Deterministic);
+    {
+        TOperationOrderBatchScope batch(orderedRuntime, 2);
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq5")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq6")");
+    }
+    env.TestWaitNotification(runtime, {105, 106});
+}
+```
+
+### Advantages of Runtime Integration
+
+1. **Zero code changes** - Use existing test helpers without modification
+2. **Automatic interception** - Event observer catches all operations
+3. **Clean API** - RAII scopes for automatic management
+4. **Flexible** - Change ordering strategies between batches
+5. **Debuggable** - Built-in logging shows operation ordering
+
+### When to Use Runtime Integration vs. Macros
+
+| Approach | Use When |
+|----------|----------|
+| **Runtime Integration** | You want to add ordering to existing tests with minimal changes |
+| **Test Macros** | You're writing new tests from scratch |
+| **Manual Controller** | You need fine-grained control over operation submission |
+

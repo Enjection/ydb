@@ -10,6 +10,7 @@
 
 #include "operation_order_test_macros.h"
 #include "operation_order_controller.h"
+#include "operation_order_runtime.h"
 #include "helpers.h"
 
 #include <library/cpp/testing/unittest/registar.h>
@@ -257,5 +258,132 @@ Y_UNIT_TEST_SUITE(TOperationOrderExamples) {
         TestLs(runtime, "/MyRoot/seq1", false, NLs::PathExist);
         TestLs(runtime, "/MyRoot/Table2", false, NLs::PathExist);
         // Could add more detailed verification here
+    }
+}
+
+    /**
+     * Example 6: Using runtime integration with automatic event interception
+     * This shows the most powerful feature - automatic batching without manual tracking
+     */
+    Y_UNIT_TEST(RuntimeIntegrationExample) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_TRACE);
+
+        // Create runtime integration
+        TOperationOrderRuntime orderedRuntime(runtime);
+        TOperationOrderController controller;
+        controller.SetMode(TOperationOrderController::Random, 42);
+        orderedRuntime.SetOperationOrderController(&controller);
+
+        // Begin batching - this installs an event observer
+        orderedRuntime.BeginOperationBatch(4);
+
+        // Submit operations normally - they will be intercepted automatically!
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+        TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq4")");
+
+        // Flush the batched operations (will reorder and send)
+        orderedRuntime.FlushOperationBatch();
+
+        // Wait for all operations
+        TVector<ui64> txIds = {101, 102, 103, 104};
+        env.TestWaitNotification(runtime, txIds);
+
+        // Verify all created
+        for (ui64 i = 1; i <= 4; ++i) {
+            TestLs(runtime, Sprintf("/MyRoot/seq%lu", i), false, NLs::PathExist);
+        }
+    }
+
+    /**
+     * Example 7: Using RAII batch scope for clean automatic flushing
+     */
+    Y_UNIT_TEST(RAIIBatchScopeExample) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_TRACE);
+
+        TOperationOrderRuntime orderedRuntime(runtime);
+        TOperationOrderController controller;
+        controller.SetMode(TOperationOrderController::Random, 12345);
+        orderedRuntime.SetOperationOrderController(&controller);
+
+        TVector<ui64> txIds;
+
+        {
+            // RAII scope - batch will be flushed automatically on scope exit
+            TOperationOrderBatchScope batch(orderedRuntime, 3);
+
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+            txIds.push_back(txId);
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+            txIds.push_back(txId);
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+            txIds.push_back(txId);
+
+            // Operations are automatically flushed when scope exits
+        }
+
+        // Wait and verify
+        env.TestWaitNotification(runtime, txIds);
+
+        for (ui64 i = 1; i <= 3; ++i) {
+            TestLs(runtime, Sprintf("/MyRoot/seq%lu", i), false, NLs::PathExist);
+        }
+    }
+
+    /**
+     * Example 8: Multiple batches with different orderings
+     */
+    Y_UNIT_TEST(MultipleBatchesExample) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_TRACE);
+
+        TOperationOrderRuntime orderedRuntime(runtime);
+        TOperationOrderController controller;
+        orderedRuntime.SetOperationOrderController(&controller);
+
+        // Batch 1: Random order
+        controller.SetMode(TOperationOrderController::Random, 42);
+        {
+            TOperationOrderBatchScope batch(orderedRuntime, 2);
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq1")");
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq2")");
+        }
+        env.TestWaitNotification(runtime, {101, 102});
+
+        // Batch 2: Default order (no reordering)
+        controller.SetMode(TOperationOrderController::Default);
+        {
+            TOperationOrderBatchScope batch(orderedRuntime, 2);
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq3")");
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq4")");
+        }
+        env.TestWaitNotification(runtime, {103, 104});
+
+        // Batch 3: Specific order
+        controller.SetPredefinedOrder({1, 0});  // Reverse order
+        controller.SetMode(TOperationOrderController::Deterministic);
+        {
+            TOperationOrderBatchScope batch(orderedRuntime, 2);
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq5")");
+            TestCreateSequence(runtime, ++txId, "/MyRoot", R"(Name: "seq6")");
+        }
+        env.TestWaitNotification(runtime, {105, 106});
+
+        // Verify all created
+        for (ui64 i = 1; i <= 6; ++i) {
+            TestLs(runtime, Sprintf("/MyRoot/seq%lu", i), false, NLs::PathExist);
+        }
     }
 }
