@@ -482,21 +482,24 @@ Y_UNIT_TEST_WITH_SPECIFIC_ORDER(SplitMergeRaceCondition, 2, 0, 1, 3) {
   - Uses existing `GetTestParam` from `library/cpp/testing/common/env.h`
   - Helper wrappers provided in operation_order_test_macros.h
 
-### Phase 2: SchemeShard Integration ⚠️ DEFERRED
-- [ ] Add operation queue interception in SchemeShard
-  - **Status**: Not implemented in this phase
-  - **Reason**: Framework uses manual integration pattern for zero overhead
-  - **Future**: Can be added if automatic interception is needed
-- [ ] Implement test-mode operation batching
-  - **Status**: Manual batching via controller
-  - **Pattern**: Tests control operation submission order directly
-- [ ] Add hooks for operation reordering
-  - **Status**: Not needed for manual integration
+### Phase 2: SchemeShard Integration ✅ COMPLETED
+- [x] Add operation queue interception in SchemeShard
+  - **Status**: Implemented via event observers
+  - **File**: `ydb/core/tx/schemeshard/ut_helpers/operation_order_runtime.h`
+  - **Mechanism**: Intercepts TEvPipeCache::TEvForward events to SchemeShard
+- [x] Implement test-mode operation batching
+  - **Status**: Automatic batching via TOperationOrderRuntimeController
+  - **Pattern**: Event observer intercepts and batches operations automatically
+  - **API**: BeginOperationBatch() / FlushOperationBatch()
+- [x] Add hooks for operation reordering
+  - **Status**: Event observer hook installed during batching
+  - **Clean**: Observer removed after flush/cancel
 - [x] Ensure production code path unchanged
   - **Status**: Zero production code changes
-  - **Overhead**: Single if-check when controller is used in tests
-- [ ] Add runtime configuration for test mode
-  - **Status**: Test parameters control behavior via command line
+  - **Overhead**: Observer only active during test batching mode
+- [x] Add runtime configuration for test mode
+  - **Status**: TOperationOrderRuntime wrapper provides clean API
+  - **RAII**: TOperationOrderBatchScope for automatic management
 
 ### Phase 3: Test Helpers ✅ COMPLETED
 - [x] Create test helper macros (`Y_UNIT_TEST_WITH_ORDER_SHUFFLE`, etc.)
@@ -579,24 +582,36 @@ Y_UNIT_TEST_WITH_SPECIFIC_ORDER(SplitMergeRaceCondition, 2, 0, 1, 3) {
 
 ## Implementation Progress Summary
 
-**Current Status**: Framework Implementation Complete (Phases 1, 3, 5) ✅
+**Current Status**: Framework Fully Implemented (Phases 1, 2, 3, 5) ✅
 
 **Completed**:
 - ✅ Core infrastructure (TOperationOrderController)
+- ✅ Runtime integration (TOperationOrderRuntime) with automatic event interception
 - ✅ Test macros and helpers
-- ✅ Comprehensive documentation
+- ✅ Comprehensive documentation with examples
 - ✅ Zero production code impact
 
 **Remaining**:
 - ⏳ Test migration (Phase 4) - Ready to start
 - ⏳ Validation (Phase 6) - Pending test migration
-- ⚠️ Optional: Automatic SchemeShard integration (Phase 2) - Can be added if needed
+
+**Key Files**:
+- `ydb/core/tx/schemeshard/ut_helpers/operation_order_controller.h` - Core controller
+- `ydb/core/tx/schemeshard/ut_helpers/operation_order_runtime.h` - Runtime integration
+- `ydb/core/tx/schemeshard/ut_helpers/operation_order_test_macros.h` - Test macros
+- `ydb/core/tx/schemeshard/ut_helpers/operation_order_example_test.cpp` - 8 examples
+- `ydb/core/tx/schemeshard/ut_helpers/OPERATION_ORDER_CONTROLLER_USAGE.md` - Full guide
 
 **Next Steps**:
 1. Migrate existing tests to use the framework
 2. Validate sampling strategies work correctly
 3. Measure performance impact
 4. Add more tests as patterns are discovered
+
+**Three Ways to Use the Framework**:
+1. **Test Macros** - For new tests (Y_UNIT_TEST_ALL_ORDERS, etc.)
+2. **Runtime Integration** - For updating existing tests with minimal changes
+3. **Manual Controller** - For fine-grained control
 
 ## Specific Test Recommendations
 
