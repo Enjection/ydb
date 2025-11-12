@@ -124,8 +124,6 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     Y_ABORT_UNLESS(context.SS->Tables.contains(pathId));
     auto table = context.SS->Tables.at(pathId);
 
-    table->AlterVersion += 1;
-
     NIceDb::TNiceDb db(context.GetDB());
 
     bool isContinuousBackupStream = false;
@@ -147,31 +145,161 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     }
 
     // Check if this is an index implementation table
-    // If so, we need to sync the parent index version to match the impl table version
-    // Do this ONLY for continuous backup operations
+    bool isIndexImplTable = false;
     TPathId parentPathId = path->ParentPathId;
-    if (parentPathId && context.SS->PathsById.contains(parentPathId) && isContinuousBackupStream) {
+    TPathId grandParentPathId;
+    if (parentPathId && context.SS->PathsById.contains(parentPathId)) {
         auto parentPath = context.SS->PathsById.at(parentPathId);
         if (parentPath->IsTableIndex()) {
-            Y_ABORT_UNLESS(context.SS->Indexes.contains(parentPathId));
-            auto index = context.SS->Indexes.at(parentPathId);
-            
-            index->AlterVersion = table->AlterVersion;
-            
-            // Persist the index version update directly to database
-            db.Table<Schema::TableIndex>().Key(parentPathId.LocalPathId).Update(
-                NIceDb::TUpdate<Schema::TableIndex::AlterVersion>(index->AlterVersion)
-            );
-            
-            context.SS->ClearDescribePathCaches(parentPath);
-            context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+            isIndexImplTable = true;
+            grandParentPathId = parentPath->ParentPathId;
+        }
+    }
 
+    // Enhanced continuous backup detection for impl tables
+    // Check if the parent table has any continuous backup CDC streams
+    bool isPartOfContinuousBackup = isContinuousBackupStream;
+    if (isIndexImplTable && grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
+        auto grandParentPath = context.SS->PathsById.at(grandParentPathId);
+        for (const auto& [childName, childPathId] : grandParentPath->GetChildren()) {
+            auto childPath = context.SS->PathsById.at(childPathId);
+            // Check if this is a CDC stream with continuous backup suffix
+            if (childPath->IsCdcStream() && childName.EndsWith("_continuousBackupImpl")) {
+                isPartOfContinuousBackup = true;
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Detected continuous backup via parent table CDC stream"
+                                       << ", implTablePathId: " << pathId
+                                       << ", parentTablePathId: " << grandParentPathId
+                                       << ", cdcStreamName: " << childName
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+                break;
+            }
+        }
+    }
+
+    // For index impl tables in continuous backup: synchronize with parent table version
+    // For regular CDC operations: increment normally
+    if (isPartOfContinuousBackup && isIndexImplTable && grandParentPathId && context.SS->Tables.contains(grandParentPathId)) {
+        auto parentTable = context.SS->Tables.at(grandParentPathId);
+        ui64 currentImplVersion = table->AlterVersion;
+        ui64 currentParentVersion = parentTable->AlterVersion;
+
+        // Also check the index entity version to avoid race conditions
+        ui64 targetVersion = currentParentVersion;
+        if (context.SS->Indexes.contains(parentPathId)) {
+            auto index = context.SS->Indexes.at(parentPathId);
+            // Use the maximum of parent version and index entity version
+            // This handles cases where parent operation has already synced entity
+            targetVersion = Max(currentParentVersion, index->AlterVersion);
+        }
+
+        // Impl table should stay synchronized with the maximum version
+        if (currentImplVersion <= targetVersion) {
+            table->AlterVersion = targetVersion;
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                        DebugHint() << " Synced parent index version with impl table"
-                                   << ", indexPathId: " << parentPathId
-                                   << ", indexName: " << parentPath->Name
-                                   << ", newVersion: " << index->AlterVersion
+                        DebugHint() << " Synchronized index impl table version"
+                                   << ", implTablePathId: " << pathId
+                                   << ", parentTablePathId: " << grandParentPathId
+                                   << ", oldImplVersion: " << currentImplVersion
+                                   << ", parentVersion: " << currentParentVersion
+                                   << ", targetVersion: " << targetVersion
+                                   << ", newImplVersion: " << table->AlterVersion
                                    << ", at schemeshard: " << context.SS->SelfTabletId());
+        } else {
+            // Impl version is ahead
+            table->AlterVersion += 1;
+            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        DebugHint() << " WARNING: Impl table version ahead of parent, incrementing"
+                                   << ", implTablePathId: " << pathId
+                                   << ", implVersion: " << currentImplVersion
+                                   << ", parentVersion: " << currentParentVersion
+                                   << ", targetVersion: " << targetVersion
+                                   << ", newImplVersion: " << table->AlterVersion
+                                   << ", at schemeshard: " << context.SS->SelfTabletId());
+        }
+
+        // Sync parent index entity version to match impl table
+        // Only update if we're increasing the version (prevent downgrade due to race conditions)
+        if (context.SS->Indexes.contains(parentPathId)) {
+            auto index = context.SS->Indexes.at(parentPathId);
+            ui64 oldIndexVersion = index->AlterVersion;
+
+            if (table->AlterVersion > oldIndexVersion) {
+                index->AlterVersion = table->AlterVersion;
+
+                // Persist the index version update
+                db.Table<Schema::TableIndex>().Key(parentPathId.LocalPathId).Update(
+                    NIceDb::TUpdate<Schema::TableIndex::AlterVersion>(index->AlterVersion)
+                );
+
+                auto parentPath = context.SS->PathsById.at(parentPathId);
+                context.SS->ClearDescribePathCaches(parentPath);
+                context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Synced parent index entity version to match impl table"
+                                       << ", indexPathId: " << parentPathId
+                                       << ", oldIndexVersion: " << oldIndexVersion
+                                       << ", newVersion: " << index->AlterVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+            } else {
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Skipping index entity sync - already at higher version"
+                                       << ", indexPathId: " << parentPathId
+                                       << ", currentIndexVersion: " << oldIndexVersion
+                                       << ", implTableVersion: " << table->AlterVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+            }
+        }
+    } else {
+        table->AlterVersion += 1;
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    DebugHint() << " Incremented table version"
+                               << ", pathId: " << pathId
+                               << ", newVersion: " << table->AlterVersion
+                               << ", isIndexImpl: " << (isIndexImplTable ? "yes" : "no")
+                               << ", isContinuousBackup: " << (isPartOfContinuousBackup ? "yes" : "no")
+                               << ", at schemeshard: " << context.SS->SelfTabletId());
+    }
+
+    // For parent tables with indexes in continuous backup:
+    // Sync the index entity version to match the parent table
+    // Note: impl table version is synced during impl table's own CDC operation
+    if (isContinuousBackupStream && !isIndexImplTable) {
+        for (const auto& [childName, childPathId] : path->GetChildren()) {
+            auto childPath = context.SS->PathsById.at(childPathId);
+
+            // Skip non-index children (CDC streams, etc.)
+            if (!childPath->IsTableIndex()) {
+                continue;
+            }
+
+            // Skip deleted indexes
+            if (childPath->Dropped()) {
+                continue;
+            }
+
+            // Sync parent index version with parent table version
+            if (context.SS->Indexes.contains(childPathId)) {
+                auto index = context.SS->Indexes.at(childPathId);
+                index->AlterVersion = table->AlterVersion;
+
+                // Persist the index version update
+                db.Table<Schema::TableIndex>().Key(childPathId.LocalPathId).Update(
+                    NIceDb::TUpdate<Schema::TableIndex::AlterVersion>(index->AlterVersion)
+                );
+
+                context.SS->ClearDescribePathCaches(childPath);
+                context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            DebugHint() << " Synced parent index version with parent table"
+                                       << ", parentTable: " << path->Name
+                                       << ", indexName: " << childName
+                                       << ", indexPathId: " << childPathId
+                                       << ", newVersion: " << index->AlterVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+            }
         }
     }
 
