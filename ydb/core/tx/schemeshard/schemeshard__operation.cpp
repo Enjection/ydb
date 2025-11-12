@@ -108,6 +108,18 @@ bool TSchemeShard::ProcessOperationParts(
         context.IsAllowedPrivateTables = true;
     }
 
+    // Test mode support: batch parts for manual ordering
+    if (OperationOrderTestMode.IsEnabled() && OperationOrderTestMode.IsBatching()) {
+        // Add parts to batch instead of processing immediately
+        for (auto& part : parts) {
+            OperationOrderTestMode.AddToBatch(part, operation, txId, 0);
+        }
+
+        // Return success - parts will be processed when batch is flushed
+        response.Reset(new TProposeResponse(NKikimrScheme::StatusAccepted, ui64(txId), ui64(selfId)));
+        return true;
+    }
+
     for (auto& part : parts) {
         TString errStr;
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
@@ -1936,6 +1948,63 @@ ui64 TOperation::CountWaitPublication(TOperationId opId) const {
     }
 
     return it->second.size();
+}
+
+void TSchemeShard::BeginOperationBatch(ui32 expectedSize) {
+    OperationOrderTestMode.Enable();
+    OperationOrderTestMode.BeginBatch(expectedSize);
+}
+
+void TSchemeShard::FlushOperationBatch(TOperationContext& context) {
+    if (!OperationOrderTestMode.IsEnabled() || !OperationOrderTestMode.IsBatching()) {
+        return;
+    }
+
+    auto reorderedParts = OperationOrderTestMode.ReorderAndFlush();
+
+    // Process each batched part in the reordered sequence
+    for (auto& batchedPart : reorderedParts) {
+        auto selfId = SelfTabletId();
+        const TString owner = BUILTIN_ACL_ROOT; // Use root owner for test operations
+
+        TString errStr;
+        THolder<TProposeResponse> response;
+
+        if (!CheckInFlightLimit(batchedPart.Part->GetTransaction().GetOperationType(), errStr)) {
+            response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted,
+                                                 ui64(batchedPart.TxId), ui64(selfId)));
+            response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+        } else {
+            response = batchedPart.Part->Propose(owner, context);
+        }
+
+        Y_ABORT_UNLESS(response);
+
+        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                     "FlushOperationBatch: Process part"
+                         << ", opId: " << batchedPart.Operation->NextPartId()
+                         << ", propose status: " << NKikimrScheme::EStatus_Name(response->Record.GetStatus())
+                         << ", reason: " << response->Record.GetReason()
+                         << ", at schemeshard: " << selfId);
+
+        if (response->IsDone()) {
+            batchedPart.Operation->AddPart(batchedPart.Part);
+            context.OnComplete.DoneOperation(batchedPart.Part->GetOperationId());
+        } else if (response->IsConditionalAccepted()) {
+            batchedPart.Operation->AddPart(batchedPart.Part);
+            context.OnComplete.DoneOperation(batchedPart.Part->GetOperationId());
+        } else if (response->IsAccepted()) {
+            batchedPart.Operation->AddPart(batchedPart.Part);
+        } else {
+            // Part proposal failed
+            LOG_ERROR_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "FlushOperationBatch: Part proposal failed"
+                           << ", opId: " << batchedPart.Part->GetOperationId()
+                           << ", status: " << NKikimrScheme::EStatus_Name(response->Record.GetStatus())
+                           << ", reason: " << response->Record.GetReason()
+                           << ", at schemeshard: " << selfId);
+        }
+    }
 }
 
 }

@@ -11,6 +11,7 @@
 #include "schemeshard_domain_links.h"
 #include "schemeshard_export.h"
 #include "schemeshard_import.h"
+#include "schemeshard_operation_order_test_mode.h"
 #include "schemeshard_info_types.h"
 #include "schemeshard_login_helper.h"
 #include "schemeshard_path.h"
@@ -288,6 +289,9 @@ public:
     THashMap<TTxId, TOperation::TPtr> Operations;
     THashMap<TTxId, TPublicationInfo> Publications;
     THashMap<TOperationId, TTxState> TxInFlight;
+
+    // Test mode support for operation order testing
+    TOperationOrderTestMode OperationOrderTestMode;
     THashMap<TOperationId, NKikimrSchemeOp::TLongIncrementalRestoreOp> LongIncrementalRestoreOps;
 
     // Simplified state tracking for sequential incremental restore
@@ -421,6 +425,11 @@ public:
         THolder<TProposeResponse>& response,
         TOperationContext& context);
     void AbortOperationPropose(const TTxId txId, TOperationContext& context);
+
+    // Test mode operation ordering methods
+    void BeginOperationBatch(ui32 expectedSize = 0);
+    void FlushOperationBatch(TOperationContext& context);
+    TOperationOrderTestMode& GetOperationOrderTestMode() { return OperationOrderTestMode; }
 
     THolder<TEvDataShard::TEvProposeTransaction> MakeDataShardProposal(const TPathId& pathId, const TOperationId& opId,
         const TString& body, const TActorContext& ctx) const;
