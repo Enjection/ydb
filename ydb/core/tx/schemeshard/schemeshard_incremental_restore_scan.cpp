@@ -238,19 +238,12 @@ private:
     void CollectTargetTablePaths(TIncrementalRestoreState& state, 
                                NKikimrSchemeOp::TIncrementalRestoreFinalize& finalize) {
         Y_UNUSED(state);
-        auto opIt = Self->LongIncrementalRestoreOps.find(TOperationId(OperationId, 0));
-        if (opIt != Self->LongIncrementalRestoreOps.end()) {
-            const auto& op = opIt->second;
-            for (const auto& tablePath : op.GetTablePathList()) {
-                finalize.AddTargetTablePaths(tablePath);
-            }
-        } else {
-            // For simple operations, collect paths directly from affected paths
-            for (auto& [pathId, pathInfo] : Self->PathsById) {
-                if (pathInfo->PathState == NKikimrSchemeOp::EPathState::EPathStateIncomingIncrementalRestore) {
-                    TString pathString = TPath::Init(pathId, Self).PathString();
-                    finalize.AddTargetTablePaths(pathString);
-                }
+        // Always collect paths directly from affected paths to include index implementation tables
+        // The LongIncrementalRestoreOps only tracks main tables, not index impl tables
+        for (auto& [pathId, pathInfo] : Self->PathsById) {
+            if (pathInfo->PathState == NKikimrSchemeOp::EPathState::EPathStateIncomingIncrementalRestore) {
+                TString pathString = TPath::Init(pathId, Self).PathString();
+                finalize.AddTargetTablePaths(pathString);
             }
         }
     }
@@ -683,6 +676,17 @@ void TSchemeShard::CreateSingleIndexRestoreOperation(
                    "Index should have exactly one child (implementation table)");
     auto [implTableName, implTablePathId] = *indexPath.Base()->GetChildren().begin();
 
+    // Check if the index implementation table is in a state that allows restore
+    TPath implTablePath = TPath::Init(implTablePathId, this);
+    auto implTableState = implTablePath.Base()->PathState;
+    
+    // Only restore if the table is in an incoming restore state or doesn't exist yet
+    if (implTableState != NKikimrSchemeOp::EPathStateIncomingIncrementalRestore &&
+        implTableState != NKikimrSchemeOp::EPathStateNotExist) {
+        LOG_I("Skipping index restore for " << indexName << " - implementation table is not in restore state (state: " << implTableState << ")");
+        return;
+    }
+
     // Construct source path: {backup}/__ydb_backup_meta/indexes/{table}/{index}
     TString srcPath = JoinPath({
         bcPath.PathString(),
@@ -765,6 +769,8 @@ void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
     LOG_I("DiscoverAndCreateIndexRestoreOperations for backup: " << backupName
           << " operationId: " << operationId);
 
+    Y_UNUSED(backupCollectionPathId);
+
     // Check if indexes were backed up (OmitIndexes flag)
     if (backupCollectionInfo->Description.HasOmitIndexes() &&
         backupCollectionInfo->Description.GetOmitIndexes()) {
@@ -792,7 +798,7 @@ void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
     for (const auto& [tableDirName, tableDirPathId] : indexMetaPathObj.Base()->GetChildren()) {
         TPath tableDirPath = TPath::Init(tableDirPathId, this);
 
-        if (!tableDirPath.IsDirectory()) {
+        if (!tableDirPath->IsDirectory()) {
             continue;
         }
 
@@ -811,7 +817,8 @@ void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
         for (const auto& [indexName, indexPathId] : tableDirPath.Base()->GetChildren()) {
             TPath indexBackupPath = TPath::Init(indexPathId, this);
 
-            if (!indexBackupPath.IsDirectory()) {
+            // Index backups are stored as tables, not directories
+            if (!indexBackupPath->IsTable()) {
                 continue;
             }
 
