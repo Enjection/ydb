@@ -7,6 +7,7 @@
 #include "schemeshard__operation_change_path_state.h"
 #include "schemeshard__operation_common.h"
 #include "schemeshard__operation_states.h"
+#include "schemeshard_utils.h"
 
 #include <ydb/core/base/test_failure_injection.h>
 
@@ -20,6 +21,19 @@
 namespace NKikimr::NSchemeShard {
 
 using TTag = TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpRestoreBackupCollection>;
+
+// Index restore helper structures
+struct TDiscoveredIndex {
+    TString Name;
+    TPath SourcePath;  // Path to index data in backup
+};
+
+struct TIndexSchema {
+    TString Name;
+    TVector<TString> KeyColumns;
+    TVector<TString> DataColumns;
+    NKikimrSchemeOp::EIndexType Type;
+};
 
 namespace NOperation {
 
@@ -40,6 +54,178 @@ bool CreateLongIncrementalRestoreOp(
     TOperationId opId,
     const TPath& bcPath,
     TVector<ISubOperation::TPtr>& result);
+
+// Helper function to discover indexes from backup metadata
+TVector<TDiscoveredIndex> DiscoverIndexesFromBackup(
+    TSchemeShard* ss,
+    const TPath& backupPath,
+    const TString& tableName)
+{
+    TVector<TDiscoveredIndex> result;
+
+    // Path to index metadata: {backup}/__ydb_backup_meta/indexes/{tableName}/
+    TPath indexMetaPath = backupPath
+        .Child("__ydb_backup_meta")
+        .Child("indexes")
+        .Child(tableName);
+
+    if (!indexMetaPath.IsResolved()) {
+        // No indexes for this table
+        return result;
+    }
+
+    // Each subdirectory is an index
+    for (const auto& [indexName, indexPathId] : indexMetaPath.Base()->GetChildren()) {
+        TPath indexPath = TPath::Init(indexPathId, ss);
+        if (indexPath.Base()->IsTable()) {
+            TDiscoveredIndex index;
+            index.Name = indexName;
+            index.SourcePath = indexPath;
+            result.push_back(index);
+        }
+    }
+
+    return result;
+}
+
+// Helper function to infer index schema from backup implementation table
+TIndexSchema InferIndexSchema(
+    TSchemeShard* ss,
+    const TPath& indexBackupPath,
+    const TString& indexName)
+{
+    TIndexSchema result;
+    result.Name = indexName;
+    result.Type = NKikimrSchemeOp::EIndexTypeGlobal;  // Default
+
+    // The index backup path should point to the index implementation table
+    if (indexBackupPath.Base()->IsTable()) {
+        auto tableInfo = ss->Tables.FindPtr(indexBackupPath.Base()->PathId);
+        if (tableInfo && *tableInfo) {
+            const auto& columns = (*tableInfo)->Columns;
+
+            // Key columns are those in the primary key
+            for (ui32 keyId : (*tableInfo)->KeyColumnIds) {
+                auto it = columns.find(keyId);
+                if (it != columns.end()) {
+                    result.KeyColumns.push_back(it->second.Name);
+                }
+            }
+
+            // Data columns are non-key columns (except system columns)
+            THashSet<ui32> keyColumnIds((*tableInfo)->KeyColumnIds.begin(), (*tableInfo)->KeyColumnIds.end());
+            for (const auto& [colId, colInfo] : columns) {
+                if (!keyColumnIds.contains(colId) && colId < TTableInfo::ReserveUniqColumnIds) {
+                    result.DataColumns.push_back(colInfo.Name);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+// Helper function to create index creation operations
+void CreateIndexRestoreOperations(
+    TOperationId& opId,
+    const TVector<TDiscoveredIndex>& indexes,
+    TSchemeShard* ss,
+    const TString& targetTablePath,
+    const TString& fullBackupName,
+    TOperationContext& context,
+    TVector<ISubOperation::TPtr>& result)
+{
+    for (const auto& discoveredIndex : indexes) {
+        // Infer schema from backup
+        TIndexSchema indexSchema = InferIndexSchema(ss, discoveredIndex.SourcePath, discoveredIndex.Name);
+
+        if (indexSchema.KeyColumns.empty()) {
+            LOG_E("Failed to infer schema for index " << discoveredIndex.Name << " - no key columns found");
+            continue;
+        }
+
+        // Parse the target table path to get working dir and table name
+        TPath targetPath = TPath::Resolve(targetTablePath, ss);
+
+        // Create index creation transaction using TransactionTemplate
+        auto indexTx = TransactionTemplate(targetPath.Parent().PathString(),
+                                          NKikimrSchemeOp::ESchemeOpCreateTableIndex);
+        indexTx.SetInternal(true);
+
+        auto& createIndex = *indexTx.MutableCreateTableIndex();
+        createIndex.SetTableName(targetPath.LeafName());
+        createIndex.SetIndexName(indexSchema.Name);
+        createIndex.SetType(indexSchema.Type);
+
+        for (const auto& keyCol : indexSchema.KeyColumns) {
+            createIndex.AddKeyColumnNames(keyCol);
+        }
+
+        for (const auto& dataCol : indexSchema.DataColumns) {
+            createIndex.AddDataColumnNames(dataCol);
+        }
+
+        LOG_I("Creating index restore operation for index " << indexSchema.Name
+              << " on table " << targetTablePath
+              << " with " << indexSchema.KeyColumns.size() << " key columns");
+
+        // Add the create index operation
+        result.push_back(CreateNewTableIndex(NextPartId(opId, result), indexTx));
+    }
+}
+
+// Helper function to create index data copy operations
+void CreateIndexDataCopyOperations(
+    TOperationId& opId,
+    const TVector<TDiscoveredIndex>& indexes,
+    TSchemeShard* ss,
+    const TString& backupDir,
+    const TString& fullBackupName,
+    const TString& relativeTablePath,
+    const TString& targetTablePath,
+    TOperationContext& context,
+    TVector<ISubOperation::TPtr>& result)
+{
+    for (const auto& discoveredIndex : indexes) {
+        // Source: backup index data
+        TString srcIndexImplPath = JoinPath({
+            backupDir,
+            fullBackupName,
+            "__ydb_backup_meta",
+            "indexes",
+            relativeTablePath,
+            discoveredIndex.Name
+        });
+
+        // Destination: target table's index implementation table
+        TString dstIndexImplPath = JoinPath({
+            targetTablePath,
+            discoveredIndex.Name,
+            "indexImplTable"
+        });
+
+        // Create copy operation transaction
+        NKikimrSchemeOp::TModifyScheme copyIndexData;
+        copyIndexData.SetOperationType(NKikimrSchemeOp::ESchemeOpCreateConsistentCopyTables);
+        copyIndexData.SetInternal(true);
+
+        TPath targetPath = TPath::Resolve(targetTablePath, ss);
+        copyIndexData.SetWorkingDir(targetPath.Parent().PathString());
+
+        auto& cct = *copyIndexData.MutableCreateConsistentCopyTables();
+        auto& copyTable = *cct.AddCopyTableDescriptions();
+        copyTable.SetSrcPath(srcIndexImplPath);
+        copyTable.SetDstPath(dstIndexImplPath);
+        copyTable.SetOmitIndexes(true);  // Index impl tables don't have indexes
+        copyTable.SetOmitFollowers(false);
+
+        LOG_I("Creating index data copy operation from " << srcIndexImplPath
+              << " to " << dstIndexImplPath);
+
+        // Add the copy operation
+        CreateConsistentCopyTables(NextPartId(opId, result), copyIndexData, context, result);
+    }
+}
 
 class TDoneWithIncrementalRestore: public TDone {
 public:
@@ -430,6 +616,56 @@ TVector<ISubOperation::TPtr> CreateRestoreBackupCollection(TOperationId opId, co
     }
 
     CreateConsistentCopyTables(opId, consistentCopyTables, context, result);
+
+    // Restore indexes from backup
+    TPath fullBackupPath = bcPath.Child(lastFullBackupName);
+    for (const auto& item : bc->Description.GetExplicitEntryList().GetEntries()) {
+        std::pair<TString, TString> paths;
+        TString err;
+        if (!TrySplitPathByDb(item.GetPath(), bcPath.GetDomainPathString(), paths, err)) {
+            continue;  // Already checked above, skip on error
+        }
+        auto& relativeItemPath = paths.second;
+
+        // Extract just the table name from the relative path for index discovery
+        TString tableName = relativeItemPath;
+        // Remove leading slash if present
+        if (tableName.StartsWith("/")) {
+            tableName = tableName.substr(1);
+        }
+
+        // Discover indexes for this table from backup
+        auto indexes = DiscoverIndexesFromBackup(context.SS, fullBackupPath, relativeItemPath);
+
+        if (!indexes.empty()) {
+            LOG_I("Discovered " << indexes.size() << " indexes for table " << item.GetPath()
+                  << " in backup " << lastFullBackupName);
+
+            // Create index structure operations
+            CreateIndexRestoreOperations(
+                opId,
+                indexes,
+                context.SS,
+                item.GetPath(),
+                lastFullBackupName,
+                context,
+                result
+            );
+
+            // Create index data copy operations
+            CreateIndexDataCopyOperations(
+                opId,
+                indexes,
+                context.SS,
+                JoinPath({tx.GetWorkingDir(), tx.GetRestoreBackupCollection().GetName()}),
+                lastFullBackupName,
+                relativeItemPath,
+                item.GetPath(),
+                context,
+                result
+            );
+        }
+    }
 
     if (incrBackupNames) {
         // op id increased internally
