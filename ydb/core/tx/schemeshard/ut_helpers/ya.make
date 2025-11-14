@@ -2,6 +2,7 @@ LIBRARY()
 
 PEERDIR(
     library/cpp/testing/unittest
+    library/cpp/testing/common
     ydb/core/base
     ydb/core/blockstore/core
     ydb/core/cms/console
@@ -33,6 +34,9 @@ SRCS(
     helpers.h
     ls_checks.cpp
     ls_checks.h
+    operation_order_controller.h
+    operation_order_runtime.h
+    operation_order_test_macros.h
     shred_helpers.cpp
     test_env.cpp
     test_env.h
