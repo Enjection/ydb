@@ -596,6 +596,241 @@ void TSchemeShard::CreateIncrementalRestoreOperation(
     }
     
     LOG_I("Created separate restore operations for incremental backup: " << backupName);
+
+    // NEW: Discover and create index restore operations IN PARALLEL
+    DiscoverAndCreateIndexRestoreOperations(
+        backupCollectionPathId,
+        operationId,
+        backupName,
+        bcPath,
+        backupCollectionInfo,
+        ctx
+    );
+}
+
+// Helper function: Find target table path from backup collection info
+TString TSchemeShard::FindTargetTablePath(
+    const TBackupCollectionInfo::TPtr& backupCollectionInfo,
+    const TString& relativeTablePath) {
+
+    for (const auto& item : backupCollectionInfo->Description.GetExplicitEntryList().GetEntries()) {
+        // Extract relative path from the target path
+        TString targetPath = item.GetPath();
+
+        // Find the last component (table name) in both paths
+        size_t lastSlash = targetPath.find_last_of('/');
+        TString targetTableName = (lastSlash != TString::npos) ? targetPath.substr(lastSlash + 1) : targetPath;
+
+        size_t relLastSlash = relativeTablePath.find_last_of('/');
+        TString relTableName = (relLastSlash != TString::npos) ? relativeTablePath.substr(relLastSlash + 1) : relativeTablePath;
+
+        if (targetTableName == relTableName) {
+            return targetPath;
+        }
+    }
+
+    return {};
+}
+
+// Helper function: Create a restore operation for a single index
+void TSchemeShard::CreateSingleIndexRestoreOperation(
+    ui64 operationId,
+    const TString& backupName,
+    const TPath& bcPath,
+    const TString& relativeTablePath,
+    const TString& indexName,
+    const TString& targetTablePath,
+    const TActorContext& ctx) {
+
+    LOG_I("CreateSingleIndexRestoreOperation for index: " << indexName
+          << " table: " << targetTablePath
+          << " operationId: " << operationId);
+
+    // Validate target table exists
+    TPath targetPath = TPath::Resolve(targetTablePath, this);
+    if (!targetPath.IsResolved() || !targetPath.Base()->IsTable()) {
+        LOG_W("Target table not found or not a table: " << targetTablePath);
+        return;
+    }
+
+    // Find index on target table
+    TPathId indexPathId;
+    bool indexFound = false;
+    for (const auto& [childName, childPathId] : targetPath.Base()->GetChildren()) {
+        if (childName == indexName) {
+            auto childPath = PathsById.at(childPathId);
+            if (childPath->PathType == NKikimrSchemeOp::EPathTypeTableIndex) {
+                indexPathId = childPathId;
+                indexFound = true;
+                break;
+            }
+        }
+    }
+
+    if (!indexFound) {
+        LOG_W("Index " << indexName << " not found on target table: " << targetTablePath);
+        return;
+    }
+
+    // Get index implementation table (single child of index)
+    auto indexPath = TPath::Init(indexPathId, this);
+    if (indexPath.Base()->GetChildren().empty()) {
+        LOG_W("Index " << indexName << " has no implementation table");
+        return;
+    }
+
+    Y_ABORT_UNLESS(indexPath.Base()->GetChildren().size() == 1,
+                   "Index should have exactly one child (implementation table)");
+    auto [implTableName, implTablePathId] = *indexPath.Base()->GetChildren().begin();
+
+    // Construct source path: {backup}/__ydb_backup_meta/indexes/{table}/{index}
+    TString srcPath = JoinPath({
+        bcPath.PathString(),
+        backupName + "_incremental",
+        "__ydb_backup_meta",
+        "indexes",
+        relativeTablePath,
+        indexName
+    });
+
+    // Check if source path exists
+    TPath srcPathObj = TPath::Resolve(srcPath, this);
+    if (!srcPathObj.IsResolved()) {
+        LOG_W("Index backup path not found: " << srcPath);
+        return;
+    }
+
+    // Construct destination path: {table}/{index}/indexImplTable
+    TString dstPath = JoinPath({targetTablePath, indexName, implTableName});
+
+    LOG_I("Creating index restore operation: " << srcPath << " -> " << dstPath);
+
+    // Create restore operation
+    auto indexRequest = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
+    auto& indexRecord = indexRequest->Record;
+
+    TTxId indexTxId = GetCachedTxId(ctx);
+    indexRecord.SetTxId(ui64(indexTxId));
+
+    auto& indexTx = *indexRecord.AddTransaction();
+    indexTx.SetOperationType(NKikimrSchemeOp::ESchemeOpRestoreMultipleIncrementalBackups);
+    indexTx.SetInternal(true);
+    indexTx.SetWorkingDir(bcPath.PathString());
+
+    auto& indexRestore = *indexTx.MutableRestoreMultipleIncrementalBackups();
+    indexRestore.AddSrcTablePaths(srcPath);
+    indexRestore.SetDstTablePath(dstPath);
+
+    // Track operation
+    TOperationId indexRestoreOpId(indexTxId, 0);
+    IncrementalRestoreOperationToState[indexRestoreOpId] = operationId;
+    TxIdToIncrementalRestore[indexTxId] = operationId;
+
+    auto stateIt = IncrementalRestoreStates.find(operationId);
+    if (stateIt != IncrementalRestoreStates.end()) {
+        stateIt->second.InProgressOperations.insert(indexRestoreOpId);
+
+        auto& indexOpState = stateIt->second.TableOperations[indexRestoreOpId];
+        indexOpState.OperationId = indexRestoreOpId;
+
+        // Track expected shards for index implementation table
+        TPath implTablePath = TPath::Init(implTablePathId, this);
+        if (implTablePath.IsResolved() && implTablePath.Base()->IsTable()) {
+            auto tableInfo = Tables.FindPtr(implTablePathId);
+            if (tableInfo) {
+                for (const auto& [shardIdx, partitionIdx] : (*tableInfo)->GetShard2PartitionIdx()) {
+                    indexOpState.ExpectedShards.insert(shardIdx);
+                    stateIt->second.InvolvedShards.insert(shardIdx);
+                }
+                LOG_I("Index operation " << indexRestoreOpId << " expects " << indexOpState.ExpectedShards.size() << " shards");
+            }
+        }
+
+        LOG_I("Tracking index operation " << indexRestoreOpId << " for incremental restore " << operationId);
+    }
+
+    LOG_I("Sending MultiIncrementalRestore operation for index: " << dstPath);
+    Send(SelfId(), indexRequest.Release());
+}
+
+// Discover and create index restore operations
+void TSchemeShard::DiscoverAndCreateIndexRestoreOperations(
+    const TPathId& backupCollectionPathId,
+    ui64 operationId,
+    const TString& backupName,
+    const TPath& bcPath,
+    const TBackupCollectionInfo::TPtr& backupCollectionInfo,
+    const TActorContext& ctx) {
+
+    LOG_I("DiscoverAndCreateIndexRestoreOperations for backup: " << backupName
+          << " operationId: " << operationId);
+
+    // Check if indexes were backed up (OmitIndexes flag)
+    if (backupCollectionInfo->Description.HasOmitIndexes() &&
+        backupCollectionInfo->Description.GetOmitIndexes()) {
+        LOG_I("Indexes were omitted during backup (OmitIndexes=true), skipping index restore");
+        return;
+    }
+
+    // Resolve path to index metadata: {backup}/__ydb_backup_meta/indexes
+    TString indexMetaPath = JoinPath({
+        bcPath.PathString(),
+        backupName + "_incremental",
+        "__ydb_backup_meta",
+        "indexes"
+    });
+
+    TPath indexMetaPathObj = TPath::Resolve(indexMetaPath, this);
+    if (!indexMetaPathObj.IsResolved()) {
+        LOG_I("Index metadata directory not found (no indexes backed up): " << indexMetaPath);
+        return;
+    }
+
+    LOG_I("Found index metadata directory: " << indexMetaPath);
+
+    // Iterate through table directories under indexes/
+    for (const auto& [tableDirName, tableDirPathId] : indexMetaPathObj.Base()->GetChildren()) {
+        TPath tableDirPath = TPath::Init(tableDirPathId, this);
+
+        if (!tableDirPath.IsDirectory()) {
+            continue;
+        }
+
+        LOG_I("Processing index backups for table directory: " << tableDirName);
+
+        // Find corresponding target table path
+        TString targetTablePath = FindTargetTablePath(backupCollectionInfo, tableDirName);
+        if (targetTablePath.empty()) {
+            LOG_W("Could not find target table path for backup table: " << tableDirName);
+            continue;
+        }
+
+        LOG_I("Mapped backup table '" << tableDirName << "' to target: " << targetTablePath);
+
+        // Iterate through indexes in this table directory
+        for (const auto& [indexName, indexPathId] : tableDirPath.Base()->GetChildren()) {
+            TPath indexBackupPath = TPath::Init(indexPathId, this);
+
+            if (!indexBackupPath.IsDirectory()) {
+                continue;
+            }
+
+            LOG_I("Found index backup: " << indexName << " for table: " << tableDirName);
+
+            // Create restore operation for this index
+            CreateSingleIndexRestoreOperation(
+                operationId,
+                backupName,
+                bcPath,
+                tableDirName,
+                indexName,
+                targetTablePath,
+                ctx
+            );
+        }
+    }
+
+    LOG_I("Completed index discovery for incremental backup: " << backupName);
 }
 
 // Notification function for operation completion
