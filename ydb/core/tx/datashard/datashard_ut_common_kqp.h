@@ -183,6 +183,7 @@ namespace NKqpHelpers {
         return FormatResult(response);
     }
 
+<<<<<<< HEAD
     inline TString KqpSimpleExecSuccess(TTestActorRuntime& runtime, const TString& query, bool staleRo = false, const TString& database = {}, NYdb::NUt::TTestContext testCtx = NYdb::NUt::TTestContext()) {
         auto response = AwaitResponse(runtime, KqpSimpleSend(runtime, query, staleRo, database));
         CTX_UNIT_ASSERT_VALUES_EQUAL_C(response.operation().status(), Ydb::StatusIds::SUCCESS,
