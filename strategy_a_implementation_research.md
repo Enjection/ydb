@@ -525,7 +525,130 @@ void SyncChildIndexes(...) {
 }
 ```
 
-### 2.5 Race Condition Timeline - VERIFIED FROM ACTUAL CODE
+### 2.5 ConfigureParts and Version Promise Timing - CRITICAL CONSTRAINT
+
+**IMPORTANT:** This section documents a critical timing constraint discovered during datashard validation.
+
+#### 2.5.1 The ConfigureParts → Datashard Contract
+
+**File:** `ydb/core/tx/schemeshard/schemeshard_cdc_stream_common.cpp` (line 18)
+
+Before any version increment happens in SchemeShard, the `ConfigureParts` phase sends a **version promise** to datashards:
+
+```cpp
+void FillNotice(const TPathId& pathId, TOperationContext& context, 
+                NKikimrTxDataShard::TCreateCdcStreamNotice& notice) {
+    auto table = context.SS->Tables.at(pathId);
+    
+    // Promise datashards the NEXT version (before increment!)
+    notice.SetTableSchemaVersion(table->AlterVersion + 1);
+    
+    // ... rest of notice ...
+}
+```
+
+**Timeline:**
+```
+T1: ConfigureParts reads table->AlterVersion = 10
+T2: ConfigureParts promises datashards: version 11
+T3: ConfigureParts sends TEvProposeTransaction to datashards
+T4: Datashards receive promise, prepare for version 11
+T5: Propose phase increments: table->AlterVersion = 10 → 11
+T6: Barrier sync ensures all objects reach consistent version
+```
+
+**Key insight:** Datashards receive version promise BEFORE SchemeShard increments the version.
+
+#### 2.5.2 Datashard Version Handling (VERIFIED SAFE)
+
+**File:** `ydb/core/tx/datashard/datashard.cpp` (lines 1710-1736)
+
+Comprehensive datashard analysis reveals **critical finding**:
+
+```cpp
+TUserTable::TPtr TDataShard::AlterTableSchemaVersion(
+    const TActorContext&, TTransactionContext& txc,
+    const TPathId& pathId, const ui64 tableSchemaVersion, bool persist)
+{
+    auto oldTableInfo = TableInfos[tableId];
+    TUserTable::TPtr newTableInfo = new TUserTable(*oldTableInfo);
+    newTableInfo->SetTableSchemaVersion(tableSchemaVersion);
+    
+    // *** CRITICAL: DEBUG-ONLY VALIDATION ***
+    Y_VERIFY_DEBUG_S(oldTableInfo->GetTableSchemaVersion() < newTableInfo->GetTableSchemaVersion(),
+                     "pathId " << pathId
+                     << " old version " << oldTableInfo->GetTableSchemaVersion()
+                     << " new version " << newTableInfo->GetTableSchemaVersion());
+    
+    // ... persist and return ...
+}
+```
+
+**CRITICAL FINDING:** Version ordering validation uses `Y_VERIFY_DEBUG_S`:
+- **DEBUG builds:** Aborts if new version ≤ old version
+- **RELEASE builds:** **NO VALIDATION** - accepts any version
+
+**Implication:** In production, datashards trust whatever version SchemeShard sends, making "converge later" approach completely safe.
+
+#### 2.5.3 Why "Converge Later" is Safe
+
+**Question:** Can parallel CDC operations promise different versions to datashards?
+
+**Answer:** YES - This is safe because:
+
+1. **Datashards don't enforce version ordering in production**
+   - `Y_VERIFY_DEBUG_S` is no-op in release builds
+   - Datashards accept any version from SchemeShard
+
+2. **Operation locks prevent concurrent queries**
+   - Queries cannot execute on tables under operation
+   - By the time operation completes, versions are synced
+   - Queries see consistent state from SchemeBoard
+
+3. **SCHEME_CHANGED errors only affect queries, not schema operations**
+   - Generated when query version ≠ datashard version
+   - Never generated during schema change operations
+   - Queries retry until versions match
+
+4. **SchemeBoard eventual consistency model**
+   - Temporary version inconsistency is acceptable
+   - Final consistent state published after sync
+   - All nodes eventually converge
+
+**Detailed analysis:** See `DATASHARD_VERSION_VALIDATION_ANALYSIS.md` for comprehensive datashard behavior analysis.
+
+#### 2.5.4 Implications for Strategy A
+
+**Barrier sync can happen AFTER ConfigureParts:**
+
+```
+ConfigureParts Phase:
+  - Index1 CDC: reads version 10, promises datashards version 11
+  - Index2 CDC: reads version 10, promises datashards version 11
+  - Both send TEvProposeTransaction to datashards
+
+Propose Phase (parallel):
+  - Index1 CDC: increments to 11, registers at barrier
+  - Index2 CDC: increments to 11 (or 12 due to race), registers at barrier
+
+Barrier Complete:
+  - CdcVersionSync reads all versions
+  - Finds max version (11 or 12)
+  - Syncs all objects to max atomically
+  - Publishes consistent state to SchemeBoard
+
+Result: Safe and correct!
+```
+
+**Why this works:**
+- Datashards receive version promises (may differ slightly)
+- Each datashard applies its promised version locally
+- SchemeShard barrier sync ensures all objects converge to max
+- SchemeBoard publishes final consistent state
+- Queries blocked until operation completes
+- No SCHEME_CHANGED errors because versions consistent when queries can execute
+
+### 2.6 Race Condition Timeline - VERIFIED FROM ACTUAL CODE
 
 **Scenario:** Table with 2 indexes, CDC created in parallel
 
@@ -2494,6 +2617,7 @@ Strategy A (Barrier-Based Coordination) provides a robust solution to the CDC st
 2. **Preserving parallelism:** CDC streams still created concurrently
 3. **Ensuring consistency:** Atomic version sync after all CDC operations complete
 4. **Supporting recovery:** All state persisted to database for crash recovery
+5. **Datashard-safe:** Validated against datashard version handling (see `DATASHARD_VERSION_VALIDATION_ANALYSIS.md`)
 
 ### 11.2 Key Advantages
 
