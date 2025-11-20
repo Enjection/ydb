@@ -3490,17 +3490,18 @@ Y_UNIT_TEST_SUITE(IncrementalBackup) {
         UNIT_ASSERT_C(afterRestore.find("uint32_value: 45") != TString::npos, "Age 45 should be present");
 
         // Verify index implementation table has correct data
+        // Note: Index impl tables only contain index key columns (age, key), not data columns (name)
         auto indexImplData = KqpSimpleExec(runtime, R"(
-            SELECT age, key, name FROM `/Root/DataVerifyTable/age_index/indexImplTable` ORDER BY age
+            SELECT age, key FROM `/Root/DataVerifyTable/age_index/indexImplTable` ORDER BY age
         )");
-        // Should have: (28, 3, Eve), (31, 2, Bob), (41, 12, David), (45, 13, Frank)
-        // Deleted: (25, 1, Alice), (35, 11, Charlie)
+        // Should have: (28, 3), (31, 2), (41, 12), (45, 13)
+        // Deleted: (25, 1), (35, 11)
         UNIT_ASSERT_C(indexImplData.find("uint32_value: 28") != TString::npos, "Index should have age=28");
-        UNIT_ASSERT_C(indexImplData.find("text_value: \"Eve\"") != TString::npos, "Index should have Eve");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 3") != TString::npos, "Index should have key=3 (Eve's key)");
         UNIT_ASSERT_C(indexImplData.find("uint32_value: 31") != TString::npos, "Index should have age=31");
-        UNIT_ASSERT_C(indexImplData.find("text_value: \"Bob\"") != TString::npos, "Index should have Bob");
-        UNIT_ASSERT_C(indexImplData.find("text_value: \"Alice\"") == TString::npos, "Index should NOT have Alice");
-        UNIT_ASSERT_C(indexImplData.find("text_value: \"Charlie\"") == TString::npos, "Index should NOT have Charlie");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 2") != TString::npos, "Index should have key=2 (Bob's key)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 25") == TString::npos, "Index should NOT have age=25 (Alice deleted)");
+        UNIT_ASSERT_C(indexImplData.find("uint32_value: 35") == TString::npos, "Index should NOT have age=35 (Charlie deleted)");
 
         auto indexImplCount = KqpSimpleExec(runtime, R"(
             SELECT COUNT(*) FROM `/Root/DataVerifyTable/age_index/indexImplTable`
