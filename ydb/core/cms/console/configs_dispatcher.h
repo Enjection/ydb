@@ -1,5 +1,6 @@
 #pragma once
 #include "defs.h"
+#include "configs_dispatcher_observer.h"
 
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/core/config/init/init.h>

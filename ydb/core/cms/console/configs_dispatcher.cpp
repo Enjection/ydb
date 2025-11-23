@@ -186,8 +186,56 @@ public:
     void Handle(TEvConsole::TEvGetNodeLabelsRequest::TPtr &ev);
     void Handle(TEvConsole::TEvFetchStartupConfigRequest::TPtr &ev);
     void Handle(TEvConsole::TEvGetNodeConfigurationVersionRequest::TPtr &ev);
+    void Handle(TEvConfigsDispatcher::TEvGetStateRequest::TPtr &ev);
+    void Handle(TEvConfigsDispatcher::TEvGetStorageYamlRequest::TPtr &ev);
 
     void ReplyMonJson(TActorId mailbox);
+    
+    // Helper to determine config source from labels
+    EConfigSource DetermineConfigSource() const {
+        if (auto it = Labels.find("config_source"); it != Labels.end()) {
+            if (it->second == "seed_nodes") {
+                return EConfigSource::SeedNodes;
+            }
+            // Add other known sources here as needed
+        }
+        return EConfigSource::DynamicConfig;
+    }
+    
+    // Get current state snapshot for observability
+    TConfigsDispatcherState GetState() const {
+        TConfigsDispatcherState state;
+        
+        // Determine config source
+        auto configSource = DetermineConfigSource();
+        state.ConfigSource = configSource;
+        
+        if (auto it = Labels.find("config_source"); it != Labels.end()) {
+            state.ConfigSourceLabel = it->second;
+        }
+        
+        // Get configuration version
+        if (auto it = Labels.find("configuration_version"); it != Labels.end()) {
+            state.ConfigurationVersion = it->second;
+        }
+        
+        // Storage YAML info
+        state.HasStorageYaml = !StartupStorageYaml.empty();
+        state.StorageYamlSize = StartupStorageYaml.size();
+        
+        // Other state
+        state.YamlConfigEnabled = YamlConfigEnabled;
+        state.SubscriptionsCount = SubscriptionsByKinds.size();
+        
+        // Replay tracking
+        state.LastReplayUsedSeedNodesPath = LastReplayUsedSeedNodesPath;
+        state.LastReplayUsedDynamicConfigPath = LastReplayUsedDynamicConfigPath;
+        
+        // Labels
+        state.Labels = Labels;
+        
+        return state;
+    }
 
     STATEFN(StateInit)
     {
@@ -203,6 +251,9 @@ public:
             hFuncTraced(TEvConfigsDispatcher::TEvGetConfigRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvRemoveConfigSubscriptionRequest, Handle);
+            // Observability events
+            hFuncTraced(TEvConfigsDispatcher::TEvGetStateRequest, Handle);
+            hFuncTraced(TEvConfigsDispatcher::TEvGetStorageYamlRequest, Handle);
             // Resolve
             hFunc(TEvConsole::TEvGetNodeLabelsRequest, Handle);
             hFunc(TEvConsole::TEvFetchStartupConfigRequest, Handle);
@@ -228,6 +279,9 @@ public:
             hFuncTraced(TEvConfigsDispatcher::TEvRemoveConfigSubscriptionRequest, Handle);
             hFuncTraced(TEvConsole::TEvConfigNotificationResponse, Handle);
             IgnoreFunc(TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
+            // Observability events
+            hFuncTraced(TEvConfigsDispatcher::TEvGetStateRequest, Handle);
+            hFuncTraced(TEvConfigsDispatcher::TEvGetStorageYamlRequest, Handle);
             // Resolve
             hFunc(TEvConsole::TEvGetNodeLabelsRequest, Handle);
             hFunc(TEvConsole::TEvFetchStartupConfigRequest, Handle);
@@ -264,6 +318,10 @@ private:
     TVector<TActorId> HttpRequests;
     TActorId CommonSubscriptionClient;
     TDeque<TAutoPtr<IEventHandle>> EventsQueue;
+    
+    // Observability: Track which replay path was used
+    bool LastReplayUsedSeedNodesPath = false;
+    bool LastReplayUsedDynamicConfigPath = false;
 
     THashMap<TActorId, TSubscription::TPtr> SubscriptionsBySubscriber;
     THashMap<TDynBitMap, TSubscription::TPtr> SubscriptionsByKinds;
@@ -444,6 +502,21 @@ void TConfigsDispatcher::ReplyMonJson(TActorId mailbox) {
     response.InsertValue("yaml_config", MainYamlConfig);
     response.InsertValue("resolved_json_config", NJson::ReadJsonFastTree(ResolvedJsonConfig, true));
     response.InsertValue("current_json_config", NJson::ReadJsonFastTree(NProtobufJson::Proto2Json(CurrentConfig, NYamlConfig::GetProto2JsonConfig()), true));
+    
+    // Add observability fields
+    auto state = GetState();
+    if (auto it = Labels.find("config_source"); it != Labels.end()) {
+        response.InsertValue("config_source", it->second);
+    }
+    if (auto it = Labels.find("configuration_version"); it != Labels.end()) {
+        response.InsertValue("configuration_version", it->second);
+    }
+    response.InsertValue("has_storage_yaml", state.HasStorageYaml);
+    if (state.HasStorageYaml) {
+        response.InsertValue("storage_yaml_size", static_cast<i64>(state.StorageYamlSize));
+    }
+    response.InsertValue("last_replay_seed_nodes", state.LastReplayUsedSeedNodesPath);
+    response.InsertValue("last_replay_dynamic_config", state.LastReplayUsedDynamicConfigPath);
 
     if (DebugInfo) {
         // TODO: write custom json serializer for security fields
@@ -654,6 +727,20 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                                                     : s == &TThis::StateInit      ? "StateInit"
                                                                                   : "Unknown" ) << Endl;
                                 str << "YamlConfigEnabled: " << YamlConfigEnabled << Endl;
+                                
+                                // Configuration source and replay tracking
+                                str << Endl << "=== Configuration Source ===" << Endl;
+                                auto state = GetState();
+                                str << state.ToDebugString() << Endl;
+                                if (LastReplayUsedSeedNodesPath) {
+                                    str << "Last Replay Path: Seed Nodes (ConfigClient)" << Endl;
+                                } else if (LastReplayUsedDynamicConfigPath) {
+                                    str << "Last Replay Path: Dynamic Config (DynConfigClient)" << Endl;
+                                } else {
+                                    str << "Last Replay Path: Not yet executed" << Endl;
+                                }
+                                str << Endl;
+                                
                                 str << "Subscriptions: " << Endl;
                                 for (auto &[kinds, subscription] : SubscriptionsByKinds) {
                                     str << "- Kinds: " << KindsToString(kinds) << Endl
@@ -758,6 +845,34 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                                         }
                                     }
                                 }
+                            }
+                        }
+                        str << "<br />" << Endl;
+                        COLLAPSED_REF_CONTENT("storage-yaml-config", "Storage YAML Config (Seed Nodes)") {
+                            if (!StartupStorageYaml.empty()) {
+                                DIV() {
+                                    TAG(TH5) {
+                                        str << "Startup Storage Config (from seed nodes)" << Endl;
+                                    }
+                                    TAG_CLASS_STYLE(TDiv, "configs-dispatcher", "padding: 0 12px;") {
+                                        TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap fold-yaml-config yaml-btn-3"}, {"title", "fold"}}) {
+                                            DIV_CLASS("yaml-sticky-btn") { }
+                                        }
+                                        TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap unfold-yaml-config yaml-btn-2"}, {"title", "unfold"}}) {
+                                            DIV_CLASS("yaml-sticky-btn") { }
+                                        }
+                                        TAG_ATTRS(TDiv, {{"class", "yaml-sticky-btn-wrap copy-yaml-config yaml-btn-1"}, {"title", "copy"}}) {
+                                            DIV_CLASS("yaml-sticky-btn") { }
+                                        }
+                                        DIV_CLASS("yaml-config-item") {
+                                            str << StartupStorageYaml;
+                                        }
+                                    }
+                                }
+                            } else {
+                                str << "<div class=\"alert alert-info\" role=\"alert\">" << Endl;
+                                str << "No storage config available. This is normal for non-seed-nodes initialization." << Endl;
+                                str << "</div>" << Endl;
                             }
                         }
                         str << "<br />" << Endl;
@@ -888,24 +1003,36 @@ try {
     }
     // TODO volatile
 
-    // Check if config was loaded from seed nodes and use appropriate client mock
-    bool useSeedNodes = false;
-    if (auto it = Labels.find("config_source"); it != Labels.end() && it->second == "seed_nodes") {
-        useSeedNodes = true;
-    }
-
-    if (useSeedNodes) {
-        // For seed-nodes scenario, use ConfigClient to match initialization path
-        // Set StorageYamlConfig from the startup config (received during initialization)
-        configs->StorageYamlConfig = StartupStorageYaml;
-        auto configClient = std::make_unique<TConfigClientMock>();
-        configClient->SavedResult = configs;
-        RecordedInitialConfiguratorDeps->ConfigClient = std::move(configClient);
-    } else {
-        // For regular dynamic config, use DynConfigClient
-        auto dcClient = std::make_unique<TDynConfigClientMock>();
-        dcClient->SavedResult = configs;
-        RecordedInitialConfiguratorDeps->DynConfigClient = std::move(dcClient);
+    // Determine which initialization path was used and replay it correctly
+    auto configSource = DetermineConfigSource();
+    
+    // Reset replay tracking flags
+    LastReplayUsedSeedNodesPath = false;
+    LastReplayUsedDynamicConfigPath = false;
+    
+    switch (configSource) {
+        case EConfigSource::SeedNodes:
+            // For seed-nodes scenario, use ConfigClient to match initialization path
+            // Set StorageYamlConfig from the startup config (received during initialization)
+            configs->StorageYamlConfig = StartupStorageYaml;
+            {
+                auto configClient = std::make_unique<TConfigClientMock>();
+                configClient->SavedResult = configs;
+                RecordedInitialConfiguratorDeps->ConfigClient = std::move(configClient);
+            }
+            LastReplayUsedSeedNodesPath = true;
+            break;
+            
+        case EConfigSource::DynamicConfig:
+        case EConfigSource::Unknown:
+            // For regular dynamic config (or unknown), use DynConfigClient
+            {
+                auto dcClient = std::make_unique<TDynConfigClientMock>();
+                dcClient->SavedResult = configs;
+                RecordedInitialConfiguratorDeps->DynConfigClient = std::move(dcClient);
+            }
+            LastReplayUsedDynamicConfigPath = true;
+            break;
     }
 
     auto deps = RecordedInitialConfiguratorDeps->GetDeps();
@@ -1327,6 +1454,15 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvGetNodeConfigurationVersionReques
     response->Record.SetVersion(versionString);
 
     Send(ev->Sender, response.release());
+}
+
+void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvGetStateRequest::TPtr &ev) {
+    auto state = GetState();
+    Send(ev->Sender, new TEvConfigsDispatcher::TEvGetStateResponse(std::move(state)));
+}
+
+void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvGetStorageYamlRequest::TPtr &ev) {
+    Send(ev->Sender, new TEvConfigsDispatcher::TEvGetStorageYamlResponse(StartupStorageYaml));
 }
 
 IActor *CreateConfigsDispatcher(const TConfigsDispatcherInitInfo& initInfo) {
