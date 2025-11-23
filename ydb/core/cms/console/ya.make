@@ -116,5 +116,6 @@ RECURSE(
 )
 
 RECURSE_FOR_TESTS(
-    ut
+    ut_configs_dispatcher
+    ut_console
 )
