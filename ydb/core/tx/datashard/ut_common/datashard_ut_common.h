@@ -14,6 +14,8 @@
 #include <ydb/library/ut/ut.h>
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 
+#include <ydb/library/ut/ut.h>
+
 #include <library/cpp/testing/unittest/registar.h>
 
 
