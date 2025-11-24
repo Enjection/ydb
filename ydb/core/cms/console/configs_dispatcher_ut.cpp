@@ -1015,9 +1015,12 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         TActorId dispatcherId = runtime.Register(dispatcher);
         runtime.EnableScheduleForActor(dispatcherId, true);
         
-        // Let the dispatcher initialize
-        TDispatchOptions options;
-        runtime.DispatchEvents(options);
+        // Let the dispatcher bootstrap by dispatching one event cycle
+        {
+            TDispatchOptions options;
+            options.FinalEvents.emplace_back(TDispatchOptions::TFinalEventCondition(TEvConsole::EvConfigSubscriptionNotification));
+            runtime.DispatchEvents(options);
+        }
         
         // Query state using actor interface
         auto state = QueryState(runtime, dispatcherId);
@@ -1055,9 +1058,12 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         TActorId dispatcherId = runtime.Register(dispatcher);
         runtime.EnableScheduleForActor(dispatcherId, true);
         
-        // Let the dispatcher initialize
-        TDispatchOptions options;
-        runtime.DispatchEvents(options);
+        // Let the dispatcher bootstrap by dispatching one event cycle
+        {
+            TDispatchOptions options;
+            options.FinalEvents.emplace_back(TDispatchOptions::TFinalEventCondition(TEvConsole::EvConfigSubscriptionNotification));
+            runtime.DispatchEvents(options);
+        }
         
         // Query state using actor interface
         auto state = QueryState(runtime, dispatcherId);
@@ -1093,9 +1099,12 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         TActorId dispatcherId = runtime.Register(dispatcher);
         runtime.EnableScheduleForActor(dispatcherId, true);
         
-        // Let the dispatcher initialize
-        TDispatchOptions options;
-        runtime.DispatchEvents(options);
+        // Let the dispatcher bootstrap by dispatching one event cycle
+        {
+            TDispatchOptions options;
+            options.FinalEvents.emplace_back(TDispatchOptions::TFinalEventCondition(TEvConsole::EvConfigSubscriptionNotification));
+            runtime.DispatchEvents(options);
+        }
         
         // Query state using actor interface
         auto state = QueryState(runtime, dispatcherId);
