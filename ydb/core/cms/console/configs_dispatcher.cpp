@@ -191,22 +191,18 @@ public:
 
     void ReplyMonJson(TActorId mailbox);
     
-    // Helper to determine config source from labels
     EConfigSource DetermineConfigSource() const {
         if (auto it = Labels.find("config_source"); it != Labels.end()) {
             if (it->second == "seed_nodes") {
                 return EConfigSource::SeedNodes;
             }
-            // Add other known sources here as needed
         }
         return EConfigSource::DynamicConfig;
     }
     
-    // Get current state snapshot for observability
     TConfigsDispatcherState GetState() const {
         TConfigsDispatcherState state;
         
-        // Determine config source
         auto configSource = DetermineConfigSource();
         state.ConfigSource = configSource;
         
@@ -214,24 +210,16 @@ public:
             state.ConfigSourceLabel = it->second;
         }
         
-        // Get configuration version
         if (auto it = Labels.find("configuration_version"); it != Labels.end()) {
             state.ConfigurationVersion = it->second;
         }
         
-        // Storage YAML info
         state.HasStorageYaml = !StartupStorageYaml.empty();
         state.StorageYamlSize = StartupStorageYaml.size();
-        
-        // Other state
         state.YamlConfigEnabled = YamlConfigEnabled;
         state.SubscriptionsCount = SubscriptionsByKinds.size();
-        
-        // Replay tracking
         state.LastReplayUsedSeedNodesPath = LastReplayUsedSeedNodesPath;
         state.LastReplayUsedDynamicConfigPath = LastReplayUsedDynamicConfigPath;
-        
-        // Labels
         state.Labels = Labels;
         
         return state;
@@ -251,7 +239,6 @@ public:
             hFuncTraced(TEvConfigsDispatcher::TEvGetConfigRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvRemoveConfigSubscriptionRequest, Handle);
-            // Observability events
             hFuncTraced(TEvConfigsDispatcher::TEvGetStateRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvGetStorageYamlRequest, Handle);
             // Resolve
@@ -279,7 +266,6 @@ public:
             hFuncTraced(TEvConfigsDispatcher::TEvRemoveConfigSubscriptionRequest, Handle);
             hFuncTraced(TEvConsole::TEvConfigNotificationResponse, Handle);
             IgnoreFunc(TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
-            // Observability events
             hFuncTraced(TEvConfigsDispatcher::TEvGetStateRequest, Handle);
             hFuncTraced(TEvConfigsDispatcher::TEvGetStorageYamlRequest, Handle);
             // Resolve
@@ -503,7 +489,6 @@ void TConfigsDispatcher::ReplyMonJson(TActorId mailbox) {
     response.InsertValue("resolved_json_config", NJson::ReadJsonFastTree(ResolvedJsonConfig, true));
     response.InsertValue("current_json_config", NJson::ReadJsonFastTree(NProtobufJson::Proto2Json(CurrentConfig, NYamlConfig::GetProto2JsonConfig()), true));
     
-    // Add observability fields
     auto state = GetState();
     if (auto it = Labels.find("config_source"); it != Labels.end()) {
         response.InsertValue("config_source", it->second);
@@ -728,7 +713,6 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                                                                                   : "Unknown" ) << Endl;
                                 str << "YamlConfigEnabled: " << YamlConfigEnabled << Endl;
                                 
-                                // Configuration source and replay tracking
                                 str << Endl << "=== Configuration Source ===" << Endl;
                                 auto state = GetState();
                                 str << state.ToDebugString() << Endl;
@@ -938,7 +922,6 @@ class TConfigurationResult
     , public IStorageConfigResult
 {
 public:
-    // IConfigurationResult interface
     const NKikimrConfig::TAppConfig& GetConfig() const override {
         return Config;
     }
@@ -959,7 +942,6 @@ public:
         return DatabaseYamlConfig;
     }
 
-    // IStorageConfigResult interface
     const TString& GetStorageYamlConfig() const override {
         return StorageYamlConfig;
     }
@@ -968,7 +950,6 @@ public:
         return SourceAddress;
     }
 
-    // Shared method for both interfaces
     const TString& GetMainYamlConfig() const override {
         return MainYamlConfig;
     }
@@ -983,9 +964,7 @@ public:
 
 void TConfigsDispatcher::UpdateCandidateStartupConfig(TEvConsole::TEvConfigSubscriptionNotification::TPtr &ev)
 try {
-    BLOG_D("UpdateCandidateStartupConfig: enter");
     if (!RecordedInitialConfiguratorDeps) {
-        BLOG_D("UpdateCandidateStartupConfig: no RecordedInitialConfiguratorDeps, exiting early");
         CandidateStartupConfig = {};
         StartupConfigProcessError = true;
         StartupConfigProcessDiff = false;
@@ -994,10 +973,8 @@ try {
         return;
     }
 
-    BLOG_D("UpdateCandidateStartupConfig: preparing config result");
     auto &rec = ev->Get()->Record;
 
-    // Prepare config result for replay (implements both IConfigurationResult and IStorageConfigResult)
     auto configs = std::make_shared<TConfigurationResult>();
     configs->Config = rec.GetRawConsoleConfig();
     configs->MainYamlConfig = rec.GetMainYamlConfig();
@@ -1006,22 +983,13 @@ try {
     }
     // TODO volatile
 
-    BLOG_D("UpdateCandidateStartupConfig: determining config source");
-    // Determine which initialization path was used and replay it correctly
     auto configSource = DetermineConfigSource();
-    BLOG_D("UpdateCandidateStartupConfig: config source = " << (int)configSource);
-    BLOG_D("UpdateCandidateStartupConfig: config source = " << (int)configSource);
     
-    // Reset replay tracking flags
     LastReplayUsedSeedNodesPath = false;
     LastReplayUsedDynamicConfigPath = false;
     
-    BLOG_D("UpdateCandidateStartupConfig: setting up mocks");
     switch (configSource) {
         case EConfigSource::SeedNodes:
-            BLOG_D("UpdateCandidateStartupConfig: seed nodes path");
-            // For seed-nodes scenario, use ConfigClient to match initialization path
-            // Set StorageYamlConfig from the startup config (received during initialization)
             configs->StorageYamlConfig = StartupStorageYaml;
             {
                 auto configClient = std::make_unique<TConfigClientMock>();
@@ -1033,8 +1001,6 @@ try {
             
         case EConfigSource::DynamicConfig:
         case EConfigSource::Unknown:
-            BLOG_D("UpdateCandidateStartupConfig: dynamic config path");
-            // For regular dynamic config (or unknown), use DynConfigClient
             {
                 auto dcClient = std::make_unique<TDynConfigClientMock>();
                 dcClient->SavedResult = configs;
@@ -1044,32 +1010,24 @@ try {
             break;
     }
 
-    BLOG_D("UpdateCandidateStartupConfig: getting deps");
     auto deps = RecordedInitialConfiguratorDeps->GetDeps();
-    BLOG_D("UpdateCandidateStartupConfig: creating TInitialConfigurator");
     NConfig::TInitialConfigurator initCfg(deps);
 
-    BLOG_D("UpdateCandidateStartupConfig: preparing argv");
     std::vector<const char*> argv;
 
     for (const auto& arg : Args) {
         argv.push_back(arg.data());
     }
 
-    BLOG_D("UpdateCandidateStartupConfig: registering cli options");
     NLastGetopt::TOpts opts;
     initCfg.RegisterCliOptions(opts);
     deps.ProtoConfigFileProvider.RegisterCliOptions(opts);
 
-    BLOG_D("UpdateCandidateStartupConfig: parsing options, argc=" << argv.size());
     NLastGetopt::TOptsParseResultException parseResult(&opts, argv.size(), argv.data());
 
-    BLOG_D("UpdateCandidateStartupConfig: validating options");
     initCfg.ValidateOptions(opts, parseResult);
-    BLOG_D("UpdateCandidateStartupConfig: parsing");
     initCfg.Parse(parseResult.GetFreeArgs(), nullptr);
 
-    BLOG_D("UpdateCandidateStartupConfig: preparing output variables");
     NKikimrConfig::TAppConfig appConfig;
     ui32 nodeId;
     TKikimrScopeId scopeId;
@@ -1079,7 +1037,6 @@ try {
     TString clusterName;
     NConfig::TConfigsDispatcherInitInfo configsDispatcherInitInfo;
 
-    BLOG_D("UpdateCandidateStartupConfig: calling initCfg.Apply()");
     initCfg.Apply(
         appConfig,
         nodeId,
@@ -1090,10 +1047,8 @@ try {
         clusterName,
         configsDispatcherInitInfo);
 
-    BLOG_D("UpdateCandidateStartupConfig: initCfg.Apply() completed");
     Y_UNUSED(tinyMode);
 
-    BLOG_D("UpdateCandidateStartupConfig: comparing configs");
     CandidateStartupConfig = appConfig;
     StartupConfigProcessError = false;
     StartupConfigProcessDiff = false;
@@ -1104,10 +1059,8 @@ try {
     md.ReportDifferencesToString(&StartupConfigInfo);
     StartupConfigProcessDiff = !md.Compare(BaseConfig, CandidateStartupConfig);
     *StartupConfigChanged = StartupConfigProcessDiff ? 1 : 0;
-    BLOG_D("UpdateCandidateStartupConfig: done, diff=" << StartupConfigProcessDiff);
 }
 catch (...) {
-    BLOG_D("UpdateCandidateStartupConfig: caught exception");
     CandidateStartupConfig = {};
     StartupConfigProcessError = true;
     StartupConfigProcessDiff = false;
@@ -1117,11 +1070,9 @@ catch (...) {
 
 void TConfigsDispatcher::Handle(TEvConsole::TEvConfigSubscriptionNotification::TPtr &ev)
 {
-    BLOG_D("Handle TEvConfigSubscriptionNotification: enter");
     auto &rec = ev->Get()->Record;
 
     UpdateCandidateStartupConfig(ev);
-    BLOG_D("Handle TEvConfigSubscriptionNotification: UpdateCandidateStartupConfig done");
 
     CurrentConfig = rec.GetConfig();
 
@@ -1483,17 +1434,12 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvGetNodeConfigurationVersionReques
 }
 
 void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvGetStateRequest::TPtr &ev) {
-    BLOG_D("Handle TEvGetStateRequest from " << ev->Sender);
     auto state = GetState();
-    BLOG_D("Sending TEvGetStateResponse to " << ev->Sender);
     Send(ev->Sender, new TEvConfigsDispatcher::TEvGetStateResponse(std::move(state)));
-    BLOG_D("TEvGetStateResponse sent");
 }
 
 void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvGetStorageYamlRequest::TPtr &ev) {
-    BLOG_D("Handle TEvGetStorageYamlRequest from " << ev->Sender);
     Send(ev->Sender, new TEvConfigsDispatcher::TEvGetStorageYamlResponse(StartupStorageYaml));
-    BLOG_D("TEvGetStorageYamlResponse sent");
 }
 
 IActor *CreateConfigsDispatcher(const TConfigsDispatcherInitInfo& initInfo) {

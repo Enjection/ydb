@@ -14,9 +14,9 @@ namespace NKikimr::NConsole {
  * Indicates how the system was initialized.
  */
 enum class EConfigSource {
-    SeedNodes,      // Initialized from seed nodes (uses ConfigClient, has storage YAML)
-    DynamicConfig,  // Initialized from dynamic config (uses DynConfigClient)
-    Unknown         // Unable to determine (fallback to DynamicConfig behavior)
+    SeedNodes,
+    DynamicConfig,
+    Unknown
 };
 
 /**
@@ -32,7 +32,6 @@ struct TConfigsDispatcherState {
     bool YamlConfigEnabled = false;
     size_t SubscriptionsCount = 0;
     
-    // Replay path tracking - indicates which path was used in last config update
     bool LastReplayUsedSeedNodesPath = false;
     bool LastReplayUsedDynamicConfigPath = false;
     
