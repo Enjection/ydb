@@ -216,6 +216,8 @@ TPathElement::EPathSubType TPathDescriber::CalcPathSubType(const TPath& path) {
                 return TPathElement::EPathSubType::EPathSubTypeSyncIndexImplTable;
             case NKikimrSchemeOp::EIndexTypeGlobalVectorKmeansTree:
                 return TPathElement::EPathSubType::EPathSubTypeVectorKmeansTreeIndexImplTable;
+            case NKikimrSchemeOp::EIndexTypeGlobalFulltext:
+                return TPathElement::EPathSubType::EPathSubTypeFulltextIndexImplTable;
             default:
                 Y_DEBUG_ABORT("%s", (TStringBuilder() << "unexpected indexInfo->Type# " << indexInfo->Type).data());
                 return TPathElement::EPathSubType::EPathSubTypeEmpty;
@@ -1199,7 +1201,8 @@ THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe
             checks.NotUnderDeleting(NKikimrScheme::StatusPathDoesNotExist);
         }
 
-        if (!Params.GetOptions().GetShowPrivateTable()) {
+        const bool skipCommonSensePathCheck = Params.GetOptions().GetShowPrivateTable() || path.ShouldSkipCommonPathCheckForIndexImplTable();
+        if (!skipCommonSensePathCheck) {
             checks.IsCommonSensePath();
         }
 
