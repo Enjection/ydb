@@ -184,13 +184,6 @@ public:
         }
     }
 
-    // Release parts in specific order (ui32 version for permutations)
-    void ReleaseInOrder(TTxId txId, const TVector<ui32>& order) {
-        for (ui32 partId : order) {
-            ReleasePart(txId, static_cast<TPartId>(partId));
-        }
-    }
-
     // Release all remaining parts for txId (in capture order)
     void ReleaseAll(TTxId txId) {
         auto opIt = Operations_.find(txId);

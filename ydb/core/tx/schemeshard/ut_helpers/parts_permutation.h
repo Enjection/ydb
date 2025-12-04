@@ -129,8 +129,7 @@ struct TPartsPermutationConfig {
 class TConfiguredPermutationIterator {
 public:
     TConfiguredPermutationIterator(size_t partCount, const TPartsPermutationConfig& config)
-        : PartCount_(partCount)
-        , Config_(config)
+        : Config_(config)
         , TotalPermutations_(TPartsPermutationIterator::TotalPermutations(partCount))
         , CurrentIndex_(0)
         , TestedCount_(0)
@@ -245,7 +244,6 @@ public:
     }
 
 private:
-    size_t PartCount_;
     TPartsPermutationConfig Config_;
     size_t TotalPermutations_;
     size_t CurrentIndex_;

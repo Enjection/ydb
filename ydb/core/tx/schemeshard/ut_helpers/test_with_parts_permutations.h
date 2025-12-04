@@ -78,7 +78,11 @@ public:
     TVector<TVector<ui32>> FailedPermutations;
 
 public:
-    explicit TTestWithPartsPermutations(TConfig config = {})
+    TTestWithPartsPermutations()
+        : Config()
+    {}
+
+    explicit TTestWithPartsPermutations(TConfig config)
         : Config(std::move(config))
     {}
 
