@@ -33,9 +33,12 @@ SRCS(
     helpers.h
     ls_checks.cpp
     ls_checks.h
+    operation_parts_blocker.h
+    parts_permutation.h
     shred_helpers.cpp
     test_env.cpp
     test_env.h
+    test_with_parts_permutations.h
     test_with_reboots.h
 )
 
