@@ -290,11 +290,25 @@ inline void ForEachPartsPermutation(
         }
 
         auto perm = iter.Current();
-        Cerr << "==== Permutation " << (count + 1)
-             << ": " << TPartsPermutationIterator::FormatPermutation(perm)
+        TString permStr = TPartsPermutationIterator::FormatPermutation(perm);
+        Cerr << "==== Permutation " << (count + 1) << "/"
+             << (maxPermutations > 0 ? Min(maxPermutations, total) : total)
+             << ": " << permStr
              << " ====" << Endl;
 
-        testFunc(perm);
+        try {
+            testFunc(perm);
+        } catch (const yexception& ex) {
+            Cerr << "==== FAILED at permutation " << (count + 1)
+                 << ": " << permStr << " ====" << Endl;
+            Cerr << "Error: " << ex.what() << Endl;
+            ythrow yexception() << "Test failed with permutation " << permStr
+                                << " (index " << count << "): " << ex.what();
+        } catch (...) {
+            Cerr << "==== FAILED at permutation " << (count + 1)
+                 << ": " << permStr << " ====" << Endl;
+            throw;
+        }
         ++count;
     }
 

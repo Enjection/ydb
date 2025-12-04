@@ -687,22 +687,35 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             // Trigger restore (async - we'll control the parts)
             ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
 
-            // Wait for parts to be captured
-            // Give some time for parts to arrive
-            bool partsReady = blocker.WaitForPartsWithTimeout(0, permutation.size(), TDuration::Seconds(10));
+            // Wait for any operation to be captured first
+            // The restore will create multiple operations - we want the one with the most parts
+            runtime.SimulateSleep(TDuration::Seconds(2));
 
-            if (partsReady) {
-                // Release parts in the specified permutation order
-                auto txIds = blocker.GetCapturedTxIds();
-                for (auto txId : txIds) {
-                    if (blocker.GetPartCount(txId) >= permutation.size()) {
-                        Cerr << "Releasing parts for txId " << txId << " in order: "
-                             << TPartsPermutationIterator::FormatPermutation(permutation) << Endl;
-                        blocker.ReleaseInOrder(txId, permutation);
-                    } else {
-                        blocker.ReleaseAll(txId);
-                    }
+            // Find the operation with most parts (this is the main restore operation)
+            auto txIds = blocker.GetCapturedTxIds();
+            Cerr << "Captured " << txIds.size() << " operations" << Endl;
+            for (auto txId : txIds) {
+                Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts" << Endl;
+            }
+
+            // Release parts for operations that have the expected part count
+            bool foundMatchingOp = false;
+            for (auto txId : txIds) {
+                size_t partCount = blocker.GetPartCount(txId);
+                if (partCount == permutation.size()) {
+                    Cerr << "Releasing parts for txId " << txId << " in order: "
+                         << TPartsPermutationIterator::FormatPermutation(permutation) << Endl;
+                    blocker.ReleaseInOrder(txId, permutation);
+                    foundMatchingOp = true;
+                } else {
+                    // Release other operations normally
+                    blocker.ReleaseAll(txId);
                 }
+            }
+
+            if (!foundMatchingOp && !txIds.empty()) {
+                Cerr << "WARNING: No operation with exactly " << permutation.size()
+                     << " parts found, releasing all normally" << Endl;
             }
 
             // Stop blocking and release any remaining
