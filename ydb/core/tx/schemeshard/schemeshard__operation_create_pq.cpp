@@ -540,11 +540,11 @@ public:
         ++parentPath.Base()->DirAlterVersion;
         context.MemChanges.GrabPath(context.SS, parentPath.Base()->PathId);
         context.DbChanges.PersistPath(parentPath.Base()->PathId);
-        context.SS->ClearDescribePathCaches(parentPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentPath.Base()->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentPath.Base()->PathId);
 
-        context.SS->ClearDescribePathCaches(dstPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, dstPath.Base()->PathId);
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, dstPath.Base()->PathId);
 
         dstPath.DomainInfo()->IncPathsInside(context.SS);
         dstPath.DomainInfo()->AddInternalShards(txState, context.SS);

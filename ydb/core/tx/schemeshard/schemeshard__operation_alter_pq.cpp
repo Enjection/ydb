@@ -1043,8 +1043,9 @@ public:
                 pqChannelsBinding, context, tabletConfig, newTabletConfig);
 
         context.OnComplete.ActivateTx(OperationId);
-        context.SS->ClearDescribePathCaches(path.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, path.Base()->PathId);
 
         path.DomainInfo()->AddInternalShards(txState, context.SS);
         path.DomainInfo()->IncPQPartitionsInside(partitionsToCreate);

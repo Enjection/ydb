@@ -788,12 +788,14 @@ void TPropose::PersistState(const TTxState& txState,
         auto parentDir = context.SS->PathsById.at(Path->ParentPathId);
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
     }
 
-    context.SS->ClearDescribePathCaches(Path);
-    context.OnComplete.PublishToSchemeBoard(OperationId, PathId);
+    // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+    // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+    context.OnComplete.DeferPublishToSchemeBoard(OperationId, PathId);
 
     TTopicInfo::TPtr pqGroup = context.SS->Topics[PathId];
 
