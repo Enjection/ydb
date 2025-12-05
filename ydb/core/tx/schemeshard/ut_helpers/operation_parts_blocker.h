@@ -93,6 +93,27 @@ public:
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
 
+            // Check if this part was already captured (and possibly released)
+            // This handles the case where released events go through the actor system again
+            auto opIt = Operations_.find(txId);
+            if (opIt != Operations_.end()) {
+                auto& op = opIt->second;
+                auto partIt = op.PartIdToIndex.find(partId);
+                if (partIt != op.PartIdToIndex.end()) {
+                    auto& captured = op.Parts[partIt->second];
+                    if (captured.Released) {
+                        // This is a re-send of a released event, let it through
+                        Cerr << "... allowing released TEvProgressOperation txId=" << txId
+                             << " partId=" << partId << Endl;
+                        return TTestActorRuntime::EEventAction::PROCESS;
+                    }
+                    // Already captured but not released - don't capture again
+                    Cerr << "... skipping already captured TEvProgressOperation txId=" << txId
+                         << " partId=" << partId << Endl;
+                    return TTestActorRuntime::EEventAction::DROP;
+                }
+            }
+
             Cerr << "... blocking TEvProgressOperation txId=" << txId
                  << " partId=" << partId << Endl;
 
