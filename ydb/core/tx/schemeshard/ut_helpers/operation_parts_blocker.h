@@ -1,11 +1,12 @@
 #pragma once
 
 #include <ydb/core/testlib/actors/test_runtime.h>
-#include <ydb/core/testlib/tablet_helpers.h>  // for ResolveTablet
 #include <ydb/core/tx/schemeshard/schemeshard_private.h>
+#include <ydb/core/tx/schemeshard/schemeshard.h>  // for TEvModifySchemeTransaction
 #include <ydb/core/tx/tx.h>  // for TTestTxConfig
 
 #include <util/generic/hash.h>
+#include <util/generic/hash_set.h>
 #include <util/generic/vector.h>
 #include <util/string/builder.h>
 
@@ -58,15 +59,25 @@ public:
     };
 
 public:
+    /**
+     * Creates an operation parts blocker.
+     *
+     * @param runtime The test runtime
+     * @param txFilter REQUIRED filter function that returns true for TxIds to capture.
+     *                 This is mandatory because the private event space is shared by
+     *                 multiple components - only exact TxId matching is reliable.
+     *
+     * Example:
+     *   ui64 txId = 101;
+     *   TOperationPartsBlocker blocker(runtime, [txId](ui64 t) { return t == txId; });
+     */
     explicit TOperationPartsBlocker(TTestActorRuntime& runtime,
-                                    std::function<bool(TTxId)> txFilter = {},
-                                    ui64 schemeShardTabletId = TTestTxConfig::SchemeShard)
+                                    std::function<bool(TTxId)> txFilter)
         : Runtime_(runtime)
         , TxFilter_(std::move(txFilter))
-        , SchemeShardActorId_(ResolveTablet(runtime, schemeShardTabletId))
     {
-        Cerr << "... TOperationPartsBlocker: resolved SchemeShard " << schemeShardTabletId
-             << " to ActorId " << SchemeShardActorId_ << Endl;
+        Y_ABORT_UNLESS(TxFilter_, "TxFilter is required - the private event space is shared");
+        Cerr << "... TOperationPartsBlocker: created with TxFilter" << Endl;
 
         // Use SetObserverFunc for better compatibility with TServer-based tests
         // This pattern is proven to work in ut_restore.cpp and other schemeshard tests
@@ -75,11 +86,39 @@ public:
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
 
+            // STEP 1: Detect SchemeShard ActorId from TEvModifySchemeTransaction
+            // This event is sent TO SchemeShard via pipe, so Recipient IS the SchemeShard ActorId.
+            // This is the deterministic way to identify which SchemeShard we're testing,
+            // avoiding any heuristics or race conditions with multiple SchemeShards.
+            if (ev->GetTypeRewrite() == TEvSchemeShard::TEvModifySchemeTransaction::EventType) {
+                auto* msg = ev->Get<TEvSchemeShard::TEvModifySchemeTransaction>();
+                TTxId txId = msg->Record.GetTxId();
+
+                // Only capture ActorId if this is a TxId we're interested in
+                if (TxFilter_(txId)) {
+                    if (!SchemeShardActorId_) {
+                        SchemeShardActorId_ = ev->Recipient;
+                        Cerr << "... TOperationPartsBlocker: detected SchemeShard ActorId "
+                             << SchemeShardActorId_ << " from TEvModifySchemeTransaction txId=" << txId << Endl;
+                    }
+                    // Record that this TxId belongs to the known SchemeShard
+                    KnownTxIds_.insert(txId);
+                }
+                // Always let the modify transaction through
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            // STEP 2: Block TEvProgressOperation events for the identified SchemeShard
             if (ev->GetTypeRewrite() != TEvPrivate::TEvProgressOperation::EventType) {
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
 
-            // Filter by SchemeShard ActorId - only capture events sent to/from our SchemeShard
+            // Must have identified SchemeShard first via TEvModifySchemeTransaction
+            if (!SchemeShardActorId_) {
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            // Only capture events for our identified SchemeShard
             if (ev->Recipient != SchemeShardActorId_) {
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
@@ -88,8 +127,9 @@ public:
             TTxId txId = msg->TxId;
             TPartId partId = msg->TxPartId;
 
-            // Apply filter if set
-            if (TxFilter_ && !TxFilter_(txId)) {
+            // Verify this TxId was registered via TEvModifySchemeTransaction
+            // This ensures we only capture parts for operations we know belong to this SchemeShard
+            if (!KnownTxIds_.contains(txId)) {
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
 
@@ -378,12 +418,14 @@ public:
     // Clear all captured operations
     void Clear() {
         Operations_.clear();
+        KnownTxIds_.clear();
     }
 
 private:
     TTestActorRuntime& Runtime_;
     std::function<bool(TTxId)> TxFilter_;
-    TActorId SchemeShardActorId_;  // Resolved from tablet ID
+    TActorId SchemeShardActorId_;  // Detected from TEvModifySchemeTransaction
+    THashSet<TTxId> KnownTxIds_;   // TxIds seen via TEvModifySchemeTransaction for this SchemeShard
     TTestActorRuntime::TEventObserver PrevObserver_;
     THashMap<TTxId, TOperationParts> Operations_;
     bool Stopped_ = false;

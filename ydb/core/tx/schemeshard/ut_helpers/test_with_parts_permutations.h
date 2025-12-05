@@ -172,6 +172,8 @@ public:
         PrepareRuntime();
 
         // Create blocker that will capture parts
+        // TxFilter is REQUIRED to reliably identify SchemeShard events
+        Y_ABORT_UNLESS(Config.TxFilter, "TxFilter must be set - the private event space is shared");
         TOperationPartsBlocker blocker(*Runtime, Config.TxFilter);
 
         testScenario(*Runtime, *TestEnv, blocker, permutation);
@@ -216,6 +218,7 @@ public:
 
         PrepareRuntime();
 
+        Y_ABORT_UNLESS(Config.TxFilter, "TxFilter must be set - the private event space is shared");
         TOperationPartsBlocker blocker(*Runtime, Config.TxFilter);
 
         setupAndTrigger(*Runtime, *TestEnv);

@@ -35,8 +35,9 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
 
         SetupLogging(runtime);
 
-        // Create blocker to capture TEvProgressOperation events
-        TOperationPartsBlocker blocker(runtime);
+        // Create blocker with TxFilter for the specific txId we'll use
+        const ui64 targetTxId = txId + 1;  // Will be 101
+        TOperationPartsBlocker blocker(runtime, [targetTxId](ui64 t) { return t == targetTxId; });
 
         // Create indexed table - this will have multiple parts
         // Part 0: Create table
@@ -100,7 +101,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
 
             runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_WARN);
 
-            TOperationPartsBlocker blocker(runtime);
+            const ui64 targetTxId = txId + 1;  // Will be 101
+            TOperationPartsBlocker blocker(runtime, [targetTxId](ui64 t) { return t == targetTxId; });
 
             AsyncCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
                 TableDescription {
@@ -709,9 +711,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
 
             // NOW: Set up parts blocker BEFORE triggering restore
-            // Use ChangeStateStorage to get the correct SchemeShard tablet ID for TServer
-            ui64 schemeShardTabletId = Tests::ChangeStateStorage(Tests::SchemeRoot, server->GetSettings().Domain);
-            TOperationPartsBlocker blocker(runtime, {}, schemeShardTabletId);
+            // The blocker uses lazy detection of SchemeShard ActorId from self-send events
+            TOperationPartsBlocker blocker(runtime);
 
             // Trigger restore (async - we'll control the parts)
             ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
