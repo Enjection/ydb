@@ -337,8 +337,9 @@ public:
                 // and KQP queries - the scheme cache might still have stale TIndexDescription
                 // with old SchemaVersion even after we publish the correct version.
                 TTableId tableId(srcPathId.OwnerId, srcPathId.LocalPathId);
+                TString tablePath = srcPath.PathString();
                 context.OnComplete.Send(MakeSchemeCacheID(), 
-                    new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, context.SS->SelfId()));
+                    new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, tablePath, context.SS->SelfId()));
 
                 LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                            "CopyTable re-publishing source table after child index sync"
@@ -458,8 +459,10 @@ public:
                             // and KQP queries - the scheme cache might still have stale TIndexDescription
                             // with old SchemaVersion even after we publish the correct version.
                             TTableId grandParentTableId(grandParentPathId.OwnerId, grandParentPathId.LocalPathId);
+                            TPath grandParentTPath = TPath::Init(grandParentPathId, context.SS);
+                            TString grandParentTablePath = grandParentTPath.PathString();
                             context.OnComplete.Send(MakeSchemeCacheID(), 
-                                new TEvTxProxySchemeCache::TEvInvalidateTable(grandParentTableId, context.SS->SelfId()));
+                                new TEvTxProxySchemeCache::TEvInvalidateTable(grandParentTableId, grandParentTablePath, context.SS->SelfId()));
 
                             LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                        "CopyTable re-publishing grandparent (main table) for impl table"

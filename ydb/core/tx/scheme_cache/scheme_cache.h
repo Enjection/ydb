@@ -570,10 +570,17 @@ public:
 
     struct TEvInvalidateTable : public TEventLocal<TEvInvalidateTable, EvInvalidateTable> {
         const TTableId TableId;
+        const TString Path;  // Table path for cache lookup by path
         const TActorId Sender;
 
         TEvInvalidateTable(const TTableId& tableId, const TActorId& sender)
             : TableId(tableId)
+            , Sender(sender)
+        {}
+        
+        TEvInvalidateTable(const TTableId& tableId, const TString& path, const TActorId& sender)
+            : TableId(tableId)
+            , Path(path)
             , Sender(sender)
         {}
     };

@@ -489,9 +489,59 @@ These are **independent event streams**. If KQP's sync request arrives at the re
 - Ensure test runtime properly processes all pending events
 - `SimulateSleep` might not dispatch scheme board notifications
 
-### Recommendation
+### Implemented Fix: Option 3 - Scheme Cache Invalidation
 
-The cleanest fix is **Option 3**: Add explicit scheme cache invalidation for the source table after the backup operation completes. This ensures any subsequent queries see the correct SchemaVersion.
+We implemented explicit scheme cache invalidation for the source table after version sync:
 
-Alternatively, investigate if the test's event dispatch is the issue - the 5-second sleep should be enough for real propagation, but test runtime might not process events correctly.
+#### Fix Part 1: Send Invalidation from Schemeshard
+
+In `schemeshard__operation_copy_table.cpp`, after version sync and publish:
+
+```cpp
+// Invalidate scheme cache for the source table to force fresh data fetch.
+TTableId tableId(srcPathId.OwnerId, srcPathId.LocalPathId);
+context.OnComplete.Send(MakeSchemeCacheID(), 
+    new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, context.SS->SelfId()));
+```
+
+Added in two places:
+1. After child index sync in the main table path
+2. After grandparent (main table) publish in the impl table path
+
+#### Fix Part 2: Implement Actual Cache Invalidation
+
+**Discovery:** The `TEvInvalidateTable` handler was a NO-OP stub!
+
+Original code (did nothing):
+```cpp
+void Handle(TEvTxProxySchemeCache::TEvInvalidateTable::TPtr& ev) {
+    SBC_LOG_D("Handle TEvTxProxySchemeCache::TEvInvalidateTable"
+        << ": self# " << SelfId());
+    Send(ev->Sender, new TEvTxProxySchemeCache::TEvInvalidateTableResult(...));
+}
+```
+
+Fixed code (actually invalidates):
+```cpp
+void Handle(TEvTxProxySchemeCache::TEvInvalidateTable::TPtr& ev) {
+    const auto& tableId = ev->Get()->TableId;
+    TPathId pathId(tableId.PathId.OwnerId, tableId.PathId.LocalPathId);
+    
+    TCacheItem* cacheItem = Cache.FindPtr(pathId);
+    if (cacheItem) {
+        // Kill the subscriber so it won't receive stale notifications
+        if (cacheItem->GetSubcriber().Subscriber) {
+            Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+        }
+        Cache.Erase(pathId);
+    }
+    
+    Send(ev->Sender, new TEvTxProxySchemeCache::TEvInvalidateTableResult(...));
+}
+```
+
+This ensures:
+1. The cache entry is completely removed
+2. The subscriber is killed to prevent stale notifications
+3. Next query creates fresh subscriber and fetches from schemeshard
 

@@ -2910,23 +2910,53 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
 
     void Handle(TEvTxProxySchemeCache::TEvInvalidateTable::TPtr& ev) {
         const auto& tableId = ev->Get()->TableId;
+        const auto& path = ev->Get()->Path;
         TPathId pathId(tableId.PathId.OwnerId, tableId.PathId.LocalPathId);
         
         SBC_LOG_D("Handle TEvTxProxySchemeCache::TEvInvalidateTable"
             << ": self# " << SelfId()
-            << ", pathId# " << pathId);
+            << ", pathId# " << pathId
+            << ", path# " << path);
         
-        // Erase the cache entry by PathId to force fresh data fetch on next access
-        TCacheItem* cacheItem = Cache.FindPtr(pathId);
-        if (cacheItem) {
-            // Kill the subscriber so it won't receive stale notifications
-            if (cacheItem->GetSubcriber().Subscriber) {
-                Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+        bool erased = false;
+        
+        // Try to erase by path first (most common case - KQP looks up by path)
+        if (path) {
+            TCacheItem* cacheItem = Cache.FindPtr(path);
+            if (cacheItem) {
+                // Kill the subscriber so it won't receive stale notifications
+                if (cacheItem->GetSubcriber().Subscriber) {
+                    Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+                }
+                Cache.Erase(path);
+                erased = true;
+                SBC_LOG_D("TEvInvalidateTable erased cache entry by path"
+                    << ": self# " << SelfId()
+                    << ", path# " << path);
             }
-            Cache.Erase(pathId);
-            SBC_LOG_D("TEvInvalidateTable erased cache entry"
+        }
+        
+        // Also try to erase by PathId (in case entry was created by pathId)
+        if (pathId) {
+            TCacheItem* cacheItem = Cache.FindPtr(pathId);
+            if (cacheItem) {
+                // Kill the subscriber so it won't receive stale notifications
+                if (cacheItem->GetSubcriber().Subscriber) {
+                    Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+                }
+                Cache.Erase(pathId);
+                erased = true;
+                SBC_LOG_D("TEvInvalidateTable erased cache entry by pathId"
+                    << ": self# " << SelfId()
+                    << ", pathId# " << pathId);
+            }
+        }
+        
+        if (!erased) {
+            SBC_LOG_D("TEvInvalidateTable no cache entry found"
                 << ": self# " << SelfId()
-                << ", pathId# " << pathId);
+                << ", pathId# " << pathId
+                << ", path# " << path);
         }
         
         Send(ev->Sender, new TEvTxProxySchemeCache::TEvInvalidateTableResult(ev->Get()->Sender), 0, ev->Cookie);
