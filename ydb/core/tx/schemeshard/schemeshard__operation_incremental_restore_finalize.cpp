@@ -275,8 +275,13 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                      TOperationContext& context) {
             LOG_I("SyncIndexSchemaVersions: Starting schema version sync for restored indexes");
             LOG_I("SyncIndexSchemaVersions: Processing " << finalize.GetTargetTablePaths().size() << " target table paths");
-            
+
             NIceDb::TNiceDb db(context.GetDB());
+
+            // Track already processed paths to avoid duplicate updates when the same
+            // index appears multiple times in target paths (e.g., from different parts)
+            THashSet<TPathId> processedImplTables;
+            THashSet<TPathId> processedIndexes;
 
             // Iterate through all target table paths and finalize their alters
             for (const auto& tablePath : finalize.GetTargetTablePaths()) {
@@ -297,6 +302,14 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                 }
 
                 TPathId implTablePathId = path.Base()->PathId;
+
+                // Skip if we've already processed this impl table
+                if (processedImplTables.contains(implTablePathId)) {
+                    LOG_I("SyncIndexSchemaVersions: Skipping already processed impl table: " << implTablePathId);
+                    continue;
+                }
+                processedImplTables.insert(implTablePathId);
+
                 if (!context.SS->Tables.contains(implTablePathId)) {
                     LOG_W("SyncIndexSchemaVersions: Table not found: " << implTablePathId);
                     continue;
@@ -311,33 +324,41 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                 // Finalize the alter - this commits AlterData to the main table state
                 LOG_I("SyncIndexSchemaVersions: Finalizing ALTER for table " << implTablePathId
                       << " version: " << table->AlterVersion << " -> " << table->AlterData->AlterVersion);
-                
+
                 table->FinishAlter();
                 context.SS->PersistTableAltered(db, implTablePathId, table);
-                
+
                 // Clear describe path caches and publish to scheme board
                 context.SS->ClearDescribePathCaches(path.Base());
                 context.OnComplete.PublishToSchemeBoard(OperationId, implTablePathId);
-                
+
                 LOG_I("SyncIndexSchemaVersions: Finalized schema version for: " << tablePath);
 
-                // Also update the parent index version
+                // Also update the parent index version (only once per index)
                 TPath indexPath = path.Parent();
                 if (indexPath.IsResolved() && indexPath.Base()->PathType == NKikimrSchemeOp::EPathTypeTableIndex) {
                     TPathId indexPathId = indexPath.Base()->PathId;
+
+                    // Skip if we've already incremented this index's version
+                    if (processedIndexes.contains(indexPathId)) {
+                        LOG_I("SyncIndexSchemaVersions: Skipping already processed index: " << indexPathId);
+                        continue;
+                    }
+                    processedIndexes.insert(indexPathId);
+
                     if (context.SS->Indexes.contains(indexPathId)) {
                         auto oldVersion = context.SS->Indexes[indexPathId]->AlterVersion;
                         context.SS->Indexes[indexPathId]->AlterVersion += 1;
                         context.SS->PersistTableIndexAlterVersion(db, indexPathId, context.SS->Indexes[indexPathId]);
-                        
+
                         LOG_I("SyncIndexSchemaVersions: Index AlterVersion incremented from "
                               << oldVersion << " to " << context.SS->Indexes[indexPathId]->AlterVersion);
-                        
+
                         context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
                     }
                 }
             }
-            
+
             LOG_I("SyncIndexSchemaVersions: Finished schema version sync");
         }
 
