@@ -221,3 +221,277 @@ The version registry was designed for **sibling coordination** - ensuring multip
 
 But **this doesn't matter** if we simply don't publish until we have the final converged version. The registry can continue doing its job (sibling coordination) while we fix the premature publishing issue.
 
+---
+
+## Implementation Progress (Dec 5, 2025)
+
+### Fix 1: Skip Early Publish in TProposeAtTable (CDC Stream)
+
+**File:** `schemeshard__operation_common_cdc_stream.cpp`
+
+The `TProposeAtTable::HandleReply` was publishing the table during Propose phase. We added a check to skip this publish when there's a sibling CopyTable operation that will handle the final publish:
+
+```cpp
+bool hasSiblingCopyTable = false;
+if (versionCtx.IsContinuousBackupStream || versionCtx.IsPartOfContinuousBackup) {
+    // Check if there's a sibling CopyTable operation in the same TxId
+    if (context.SS->Operations.contains(txId)) {
+        auto operation = context.SS->Operations.at(txId);
+        for (const auto& part : operation->Parts) {
+            if (siblingTxState->TxType == TTxState::TxCopyTable) {
+                hasSiblingCopyTable = true;
+                break;
+            }
+        }
+    }
+}
+if (!hasSiblingCopyTable) {
+    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+}
+```
+
+**Result:** Fixed other CDC stream tests that were breaking. But `SimpleBackupRestoreWithIndex` still failed because the backup flow uses `DoCreateStreamImpl` (not `TNewCdcStreamAtTable`).
+
+### Fix 2: Found the Real Early Publish Source - IncAliveChildrenSafeWithUndo
+
+**Root Cause Discovery:**
+
+When `TNewCdcStream` creates a CDC stream as the **first child** of a table, `IncAliveChildrenSafeWithUndo` publishes the **grandparent**:
+
+```cpp
+void IncAliveChildrenSafeWithUndo(const TOperationId& opId, const TPath& parentPath, ...) {
+    parentPath.Base()->IncAliveChildrenPrivate(isBackup);
+    if (parentPath.Base()->GetAliveChildren() == 1 && !parentPath.Base()->IsDomainRoot()) {
+        auto grandParent = parentPath.Parent();
+        if (grandParent.IsActive()) {
+            context.SS->ClearDescribePathCaches(grandParent.Base());
+            context.OnComplete.PublishToSchemeBoard(opId, grandParent->PathId);  // ← EARLY PUBLISH!
+        }
+    }
+}
+```
+
+**For the impl table CDC stream:**
+- CDC stream (pathId 17) is created under impl table (pathId 4)
+- Impl table has no children before → GetAliveChildren() becomes 1
+- Grandparent = main table (pathId 2)
+- **Main table is published with stale TIndexDescription.SchemaVersion!**
+
+### Fix 3: TNewCdcStream - Skip Grandparent Publish for Continuous Backup
+
+**File:** `schemeshard__operation_create_cdc_stream.cpp`
+
+```cpp
+const bool isContinuousBackup = streamName.EndsWith("_continuousBackupImpl");
+if (isContinuousBackup) {
+    // Just increment children count without publishing grandparent
+    tablePath.Base()->IncAliveChildrenPrivate(false);
+    if (tablePath.Base()->GetAliveChildren() == 1 && !tablePath.Base()->IsDomainRoot()) {
+        auto grandParent = tablePath.Parent();
+        if (grandParent.Base()->IsLikeDirectory()) {
+            ++grandParent.Base()->DirAlterVersion;
+            context.MemChanges.GrabPath(context.SS, grandParent.Base()->PathId);
+            context.DbChanges.PersistPath(grandParent.Base()->PathId);
+        }
+        // Skip grandparent publish - CopyTable HandleReply will handle it
+    }
+} else {
+    IncAliveChildrenSafeWithUndo(OperationId, tablePath, context);
+}
+```
+
+### Fix 4: TCreatePQ - Skip Grandparent Publish for Continuous Backup
+
+**File:** `schemeshard__operation_create_pq.cpp`
+
+Same issue: When PQ (PersQueue) is created under a CDC stream, it's the first child, so grandparent (the table) is published early.
+
+```cpp
+const bool isContinuousBackupCdc = parentPath.Base()->IsCdcStream() && 
+                                   parentPath.Base()->Name.EndsWith("_continuousBackupImpl");
+if (isContinuousBackupCdc) {
+    // Just increment children count without publishing grandparent
+    parentPath.Base()->IncAliveChildrenPrivate(false);
+    // ... (same pattern as above)
+    // Skip grandparent publish - CopyTable HandleReply will handle it
+} else {
+    IncAliveChildrenSafeWithUndo(OperationId, parentPath, context);
+}
+```
+
+### Current Status
+
+After Fixes 3 and 4:
+- **Verified:** Debug logs show `isContinuousBackup: 1` and `isContinuousBackupCdc: 1` - detection works
+- **Verified:** PathId 2 is NO LONGER in the early Propose phase publish batch
+- **Verified:** PathId 2 IS published in HandleReply phase at the correct time
+- **Verified:** Version 6 is published (correct GeneralVersion after syncs)
+
+**But test still fails with "expected 1 got 2"**
+
+### Current Investigation: Describe Time vs Sync Time
+
+The mystery: Even though the early publish is removed, the scheme cache still sees `SchemaVersion = 1`.
+
+Possible causes being investigated:
+1. Multiple publishes of pathId 2 in HandleReply (we see 3 DescribePath calls for pathId 2)
+2. The index version might not be visible when the table is described
+3. Transaction boundary issue between HandleReply and TTxPublishToSchemeBoard
+
+Added debug logging to `DescribeTableIndex` to trace what `SchemaVersion` is being set during describe:
+```cpp
+LOG_DEBUG_S(..., "DescribeTableIndex setting SchemaVersion"
+            << ", indexPathId: " << pathId
+            << ", schemaVersion: " << indexInfo->AlterVersion);
+```
+
+### Finding: SchemaVersion IS Correct at Describe Time!
+
+With the new logging, we confirmed:
+- **At describe time (18:51:34.083):** SchemaVersion = 2 (CORRECT!)
+- **AckPublish (18:51:34.095):** PathId 2 version 6 acknowledged
+- **Query fails (18:51:35.378):** "expected 1 got 2" - 1.28 seconds LATER
+
+The schemeshard is describing and publishing the correct data. But 1.28 seconds later, KQP still sees SchemaVersion=1.
+
+### How KQP Checks Schema Version
+
+In `kqp_metadata_loader.cpp`:
+1. KQP loads main table metadata from scheme cache
+2. Gets `TIndexDescription` which includes `SchemaVersion` (from `indexInfo->AlterVersion`)
+3. Uses `TIndexId{..., SchemaVersion=X}` to load impl table
+4. Compares `expectedSchemaVersion` (from TIndexDescription) with `implTable.TableId.SchemaVersion`
+5. If mismatch → ERROR
+
+The comparison:
+- `expectedSchemaVersion` = TIndexDescription.SchemaVersion (should be 2 if cache is fresh)
+- `entry.TableId.SchemaVersion` = impl table's actual version (2)
+- Error says "expected 1" → Scheme cache returned stale TIndexDescription with SchemaVersion=1
+
+### Root Cause Hypothesis: Scheme Cache Propagation Issue
+
+The issue is NOT in the schemeshard (it publishes correctly). The issue is that:
+1. The scheme board received version 6 correctly
+2. The scheme board should notify the scheme cache
+3. The scheme cache should invalidate its entry for pathId 2
+4. KQP queries scheme cache 1.28 seconds later
+5. **Scheme cache still returns old data**
+
+Possible causes:
+1. Scheme cache subscription isn't picking up the update
+2. Test runtime doesn't properly propagate scheme board notifications
+3. There's a separate caching layer that isn't being invalidated
+
+### Potential Solutions
+
+1. **Force scheme cache refresh** - Add explicit invalidation or wait for cache to update
+2. **Add SyncVersion flag** - When querying scheme cache, request sync version validation
+3. **Fix scheme cache subscription** - Ensure notifications are properly delivered
+
+### Scheme Cache Behavior Discovery
+
+In `ydb/core/tx/scheme_board/cache.cpp`, `HandleEntry` (lines 2449-2455):
+
+```cpp
+if (cacheItem->IsFilled() && !entry.SyncVersion) {
+    cacheItem->FillEntry(context.Get(), entry);  // Return cached data immediately
+}
+
+if (entry.SyncVersion) {
+    cacheItem->AddInFlight(context, index, true);  // Wait for sync
+}
+```
+
+**Key Finding:** When `SyncVersion = false` (default), the scheme cache returns cached data WITHOUT checking for updates. If the notification from scheme board hasn't been processed yet, stale data is returned.
+
+### How Scheme Board Notifications Work
+
+1. Schemeshard publishes to scheme board via `TTxPublishToSchemeBoard`
+2. Scheme board populator sends `TEvUpdate` to replica
+3. Replica sends `TEvNotifyUpdate` to all subscribers (scheme caches)
+4. Scheme cache's `HandleNotify` processes the notification
+5. `cacheItem->Fill(notify)` updates the cached data
+
+### The Race Condition
+
+The issue appears to be a race between:
+1. KQP's navigate request (with `SyncVersion=false`) arrives at scheme cache
+2. Scheme board's `TEvNotifyUpdate` notification arrives at scheme cache
+
+If (1) happens before (2) completes, KQP gets stale data.
+
+Even though there's a 5-second sleep in the test, the scheme board notification might not be processed correctly in the test runtime, or there's a path/pathId mismatch causing the update to go to a different cache item.
+
+### Potential Fixes
+
+**Option 1: Force SyncVersion for tables with indexes**
+- When KQP loads a table with indexes, set `SyncVersion=true` to force fresh data
+- Pros: Guaranteed consistency
+- Cons: May increase latency
+
+**Option 2: Ensure notification delivery in test runtime**
+- Debug why notifications aren't reaching the scheme cache
+- May be test-runtime specific
+
+**Option 3: Invalidate cache more aggressively**
+- When version bumps happen, ensure cache is invalidated before returning
+- Complex to implement
+
+### Sync Version Deep Dive
+
+Even with `SyncVersion = true` (which the KQP metadata loader uses), there's still a race condition:
+
+1. **KQP requests with SyncVersion=true**
+2. **Scheme cache calls `SendSyncRequest()` to subscriber**
+3. **Subscriber forwards `TEvSyncVersionRequest` to replica**
+4. **Replica responds with its current data**
+
+**The Race**: If step 4 happens BEFORE the scheme board populator has sent the update to the replica, the sync response contains stale data!
+
+### Flow of Updates (vs Sync Requests)
+
+**Update flow (from schemeshard):**
+```
+Schemeshard → Populator → Replica → Subscriber → Scheme Cache
+```
+
+**Sync request flow (from KQP):**
+```
+KQP → Scheme Cache → Subscriber → Replica → Response
+```
+
+These are **independent event streams**. If KQP's sync request arrives at the replica before the populator's update, KQP gets stale data.
+
+### Why the Test Fails
+
+1. **18:51:34.083** - Schemeshard describes pathId 2 with SchemaVersion=2
+2. **18:51:34.095** - AckPublish confirms scheme board received the data
+3. But this only means the **schemeshard** received the ack from **scheme board populator**
+4. The update still needs to propagate: Populator → Replica → Subscriber → Cache
+5. **18:51:35.378** - KQP query runs, sync request goes to replica
+6. If replica hasn't received the update yet, it returns SchemaVersion=1
+
+### Potential Fixes
+
+**Option 1: Wait for scheme board replication (complex)**
+- Schemeshard waits for ALL replicas to confirm receipt before completing operation
+- Ensures consistency but adds latency
+
+**Option 2: Retry on version mismatch (pragmatic)**
+- When KQP sees "schema version mismatch", retry with fresh scheme cache request
+- Already partially implemented (compilation retry on ABORTED)
+
+**Option 3: Force scheme cache invalidation (targeted)**
+- After backup operation completes, send `TEvInvalidateTable` for affected tables
+- Forces next query to fetch fresh data from schemeshard
+
+**Option 4: Test-specific fix**
+- Ensure test runtime properly processes all pending events
+- `SimulateSleep` might not dispatch scheme board notifications
+
+### Recommendation
+
+The cleanest fix is **Option 3**: Add explicit scheme cache invalidation for the source table after the backup operation completes. This ensures any subsequent queries see the correct SchemaVersion.
+
+Alternatively, investigate if the test's event dispatch is the issue - the 5-second sleep should be enough for real propagation, but test runtime might not process events correctly.
+

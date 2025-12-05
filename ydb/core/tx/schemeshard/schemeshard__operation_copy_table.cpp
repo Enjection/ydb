@@ -10,6 +10,7 @@
 
 #include <ydb/core/base/subdomain.h>
 #include <ydb/core/mind/hive/hive.h>
+#include <ydb/core/tx/scheme_cache/scheme_cache.h>
 
 namespace {
 
@@ -330,11 +331,20 @@ public:
                 context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
                 context.SS->ClearDescribePathCaches(srcPath);
                 context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
+                
+                // Invalidate scheme cache for the source table to force fresh data fetch.
+                // This is needed because there's a race between scheme board propagation
+                // and KQP queries - the scheme cache might still have stale TIndexDescription
+                // with old SchemaVersion even after we publish the correct version.
+                TTableId tableId(srcPathId.OwnerId, srcPathId.LocalPathId);
+                context.OnComplete.Send(MakeSchemeCacheID(), 
+                    new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, context.SS->SelfId()));
 
                 LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                            "CopyTable re-publishing source table after child index sync"
                            << ", srcTablePathId: " << srcPathId
                            << ", newTableAlterVersion: " << srcTable->AlterVersion
+                           << ", invalidatingSchemeCache: true"
                            << ", at schemeshard: " << context.SS->SelfTabletId());
             }
 
@@ -442,11 +452,20 @@ public:
                             }
                             context.SS->ClearDescribePathCaches(grandParentPath);
                             context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+                            
+                            // Invalidate scheme cache for the grandparent table to force fresh data fetch.
+                            // This is needed because there's a race between scheme board propagation
+                            // and KQP queries - the scheme cache might still have stale TIndexDescription
+                            // with old SchemaVersion even after we publish the correct version.
+                            TTableId grandParentTableId(grandParentPathId.OwnerId, grandParentPathId.LocalPathId);
+                            context.OnComplete.Send(MakeSchemeCacheID(), 
+                                new TEvTxProxySchemeCache::TEvInvalidateTable(grandParentTableId, context.SS->SelfId()));
 
                             LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                        "CopyTable re-publishing grandparent (main table) for impl table"
                                        << ", implTablePathId: " << srcPathId
                                        << ", grandParentPathId: " << grandParentPathId
+                                       << ", invalidatingSchemeCache: true"
                                        << ", at schemeshard: " << context.SS->SelfTabletId());
                         }
                     }
