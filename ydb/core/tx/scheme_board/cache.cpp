@@ -2909,8 +2909,26 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
     }
 
     void Handle(TEvTxProxySchemeCache::TEvInvalidateTable::TPtr& ev) {
+        const auto& tableId = ev->Get()->TableId;
+        TPathId pathId(tableId.PathId.OwnerId, tableId.PathId.LocalPathId);
+        
         SBC_LOG_D("Handle TEvTxProxySchemeCache::TEvInvalidateTable"
-            << ": self# " << SelfId());
+            << ": self# " << SelfId()
+            << ", pathId# " << pathId);
+        
+        // Erase the cache entry by PathId to force fresh data fetch on next access
+        TCacheItem* cacheItem = Cache.FindPtr(pathId);
+        if (cacheItem) {
+            // Kill the subscriber so it won't receive stale notifications
+            if (cacheItem->GetSubcriber().Subscriber) {
+                Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+            }
+            Cache.Erase(pathId);
+            SBC_LOG_D("TEvInvalidateTable erased cache entry"
+                << ": self# " << SelfId()
+                << ", pathId# " << pathId);
+        }
+        
         Send(ev->Sender, new TEvTxProxySchemeCache::TEvInvalidateTableResult(ev->Get()->Sender), 0, ev->Cookie);
     }
 
