@@ -1061,7 +1061,7 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
 
                     // Clear caches now that we're publishing with final versions
                     auto path = TPath::Init(pathId, ss);
-                    ss->ClearDescribePathCaches(path);
+                    ss->ClearDescribePathCaches(path.Base());
 
                     LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                 "Deferred publish path"
