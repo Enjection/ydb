@@ -63,7 +63,6 @@ public:
                                     ui64 schemeShardTabletId = TTestTxConfig::SchemeShard)
         : Runtime_(runtime)
         , TxFilter_(std::move(txFilter))
-        , SchemeShardTabletId_(schemeShardTabletId)
         , SchemeShardActorId_(ResolveTablet(runtime, schemeShardTabletId))
     {
         Cerr << "... TOperationPartsBlocker: resolved SchemeShard " << schemeShardTabletId
@@ -363,8 +362,7 @@ public:
 private:
     TTestActorRuntime& Runtime_;
     std::function<bool(TTxId)> TxFilter_;
-    ui64 SchemeShardTabletId_;
-    TActorId SchemeShardActorId_;  // Captured from first valid event
+    TActorId SchemeShardActorId_;  // Resolved from tablet ID
     TTestActorRuntime::TEventObserver PrevObserver_;
     THashMap<TTxId, TOperationParts> Operations_;
     bool Stopped_ = false;
