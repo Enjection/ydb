@@ -323,7 +323,20 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
 
     context.SS->PersistTableAlterVersion(db, pathId, table);
     context.SS->ClearDescribePathCaches(path);
-    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+    
+    // For continuous backup streams, skip the publish here.
+    // CopyTable's HandleReply will do the final publish after all version syncs complete.
+    // Publishing here would send stale TIndexDescription::SchemaVersion before sync.
+    if (!versionCtx.IsContinuousBackupStream && !versionCtx.IsPartOfContinuousBackup) {
+        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+    } else {
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "Skipping table publish for continuous backup stream"
+                    << ", pathId: " << pathId
+                    << ", isContinuousBackupStream: " << versionCtx.IsContinuousBackupStream
+                    << ", isPartOfContinuousBackup: " << versionCtx.IsPartOfContinuousBackup
+                    << ", at schemeshard: " << context.SS->SelfTabletId());
+    }
 
     context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
     return true;
