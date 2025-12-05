@@ -545,3 +545,115 @@ This ensures:
 2. The subscriber is killed to prevent stale notifications
 3. Next query creates fresh subscriber and fetches from schemeshard
 
+#### Fix Part 3: Cache Invalidation Still Not Working
+
+**Problem:** Invalidation messages were sent and responses received, but test still failed.
+
+**Discovery:** The scheme cache is a `TDoubleIndexedCache<TString, TPathId, TCacheItem>` - indexed by BOTH path string AND PathId. KQP loads tables **by path**, but we were invalidating **by PathId**.
+
+When a cache entry is created by path lookup (KQP's case), it's only indexed by path string initially. The PathId association happens later when notifications arrive. So `Cache.FindPtr(pathId)` returns null!
+
+#### Fix Part 4: Add Path to Invalidation
+
+Extended `TEvInvalidateTable` in `scheme_cache.h` to include path:
+
+```cpp
+struct TEvInvalidateTable : public TEventLocal<TEvInvalidateTable, EvInvalidateTable> {
+    const TTableId TableId;
+    const TString Path;  // NEW: Table path for cache lookup by path
+    const TActorId Sender;
+
+    TEvInvalidateTable(const TTableId& tableId, const TString& path, const TActorId& sender)
+        : TableId(tableId)
+        , Path(path)
+        , Sender(sender)
+    {}
+};
+```
+
+Updated handler in `cache.cpp` to invalidate by BOTH path and pathId:
+
+```cpp
+void Handle(TEvTxProxySchemeCache::TEvInvalidateTable::TPtr& ev) {
+    const auto& tableId = ev->Get()->TableId;
+    const auto& path = ev->Get()->Path;
+    TPathId pathId(tableId.PathId.OwnerId, tableId.PathId.LocalPathId);
+    
+    bool erased = false;
+    
+    // Try to erase by path first (most common case - KQP looks up by path)
+    if (path) {
+        TCacheItem* cacheItem = Cache.FindPtr(path);
+        if (cacheItem) {
+            if (cacheItem->GetSubcriber().Subscriber) {
+                Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+            }
+            Cache.Erase(path);
+            erased = true;
+        }
+    }
+    
+    // Also try to erase by PathId (in case entry was created by pathId)
+    if (pathId) {
+        TCacheItem* cacheItem = Cache.FindPtr(pathId);
+        if (cacheItem) {
+            if (cacheItem->GetSubcriber().Subscriber) {
+                Send(cacheItem->GetSubcriber().Subscriber, new TEvents::TEvPoison());
+            }
+            Cache.Erase(pathId);
+            erased = true;
+        }
+    }
+    
+    Send(ev->Sender, new TEvTxProxySchemeCache::TEvInvalidateTableResult(...));
+}
+```
+
+Updated schemeshard to include path in invalidation:
+
+```cpp
+TTableId tableId(srcPathId.OwnerId, srcPathId.LocalPathId);
+TPath srcTPath = TPath::Init(srcPathId, context.SS);
+TString tablePath = srcTPath.PathString();
+context.OnComplete.Send(MakeSchemeCacheID(), 
+    new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, tablePath, context.SS->SelfId()));
+```
+
+### Current Status: Still Failing
+
+The test still fails after all these fixes. The full fix path:
+
+1. ✅ Skipped early publish in `TNewCdcStream` for continuous backup
+2. ✅ Skipped early publish in `TCreatePQ` for continuous backup CDC
+3. ✅ Skipped early publish in `TProposeAtTable` when sibling CopyTable exists
+4. ✅ Implemented actual cache invalidation in `TEvInvalidateTable` handler (was NO-OP!)
+5. ✅ Extended invalidation to support path-based lookup
+6. ❌ Test still fails
+
+### Possible Remaining Issues
+
+1. **Invalidation timing:** The invalidation is sent AFTER publish, but before publish is acknowledged. Maybe the scheme cache processes the invalidation before the publish notification arrives?
+
+2. **Cache recreation:** After invalidation, the next KQP request creates a new cache entry. If the scheme board replica doesn't have the update yet, the new entry gets stale data.
+
+3. **Multiple scheme caches:** In the test runtime, there might be multiple scheme cache actors. We're invalidating one, but KQP queries another.
+
+4. **Test runtime event ordering:** The test's `SimulateSleep` might not process all pending events in the correct order.
+
+### Files Modified
+
+1. `schemeshard__operation_create_cdc_stream.cpp` - Skip grandparent publish for continuous backup
+2. `schemeshard__operation_create_pq.cpp` - Skip grandparent publish for continuous backup CDC
+3. `schemeshard__operation_common_cdc_stream.cpp` - Skip publish when sibling CopyTable exists
+4. `schemeshard__operation_copy_table.cpp` - Send cache invalidation after version sync
+5. `scheme_cache.h` - Extended TEvInvalidateTable with path field
+6. `cache.cpp` - Implemented actual cache invalidation by both path and pathId
+
+### Alternative Approaches to Consider
+
+1. **Wait for scheme board propagation in schemeshard** - Don't complete operation until replicas confirm receipt
+2. **Force SyncVersion in KQP** - Always use SyncVersion=true for tables with indexes
+3. **Retry on mismatch** - KQP retries with cache invalidation on schema version mismatch
+4. **Test-specific fix** - Ensure proper event dispatch in test runtime
+5. **Different invalidation timing** - Send invalidation BEFORE publish, not after
+
