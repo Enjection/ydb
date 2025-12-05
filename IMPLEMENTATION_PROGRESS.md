@@ -104,6 +104,12 @@ void LoadChange(change);
 - Changed from `newVersion = oldVersion + 1` to `tableVersion = table->AlterVersion` (after FinishAlter)
 - Index version now correctly syncs to impl table version
 
+### Fix 4: Always sync index even when AlterData is null
+- When multiple operation parts run, one might finalize the table (clearing AlterData)
+- The old code skipped index sync when AlterData was null (via `continue`)
+- Now: always sync index version, even if AlterData was already cleared by another part
+- Also publish main table to scheme board to ensure metadata consistency
+
 ## Next Steps (Phase 3)
 
 1. Build and test the changes

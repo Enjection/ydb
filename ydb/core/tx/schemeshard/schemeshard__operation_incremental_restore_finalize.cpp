@@ -318,23 +318,27 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                 }
 
                 auto table = context.SS->Tables.at(implTablePathId);
-                if (!table->AlterData) {
-                    LOG_W("SyncIndexSchemaVersions: No AlterData for table: " << implTablePathId);
-                    continue;
+
+                // Finalize the alter if AlterData exists
+                if (table->AlterData) {
+                    LOG_I("SyncIndexSchemaVersions: Finalizing ALTER for table " << implTablePathId
+                          << " version: " << table->AlterVersion << " -> " << table->AlterData->AlterVersion);
+
+                    table->FinishAlter();
+                    context.SS->PersistTableAltered(db, implTablePathId, table);
+
+                    // Clear describe path caches and publish to scheme board
+                    context.SS->ClearDescribePathCaches(path.Base());
+                    context.OnComplete.PublishToSchemeBoard(OperationId, implTablePathId);
+
+                    LOG_I("SyncIndexSchemaVersions: Finalized schema version for: " << tablePath);
+                } else {
+                    LOG_I("SyncIndexSchemaVersions: No AlterData for table " << implTablePathId
+                          << ", but will still sync index version (current table version: " << table->AlterVersion << ")");
                 }
 
-                // Finalize the alter - this commits AlterData to the main table state
-                LOG_I("SyncIndexSchemaVersions: Finalizing ALTER for table " << implTablePathId
-                      << " version: " << table->AlterVersion << " -> " << table->AlterData->AlterVersion);
-
-                table->FinishAlter();
-                context.SS->PersistTableAltered(db, implTablePathId, table);
-
-                // Clear describe path caches and publish to scheme board
-                context.SS->ClearDescribePathCaches(path.Base());
-                context.OnComplete.PublishToSchemeBoard(OperationId, implTablePathId);
-
-                LOG_I("SyncIndexSchemaVersions: Finalized schema version for: " << tablePath);
+                // Always sync the parent index version (even if AlterData was null -
+                // another sibling might have already finalized the table)
 
                 // Also update the parent index version (only once per index)
                 TPath indexPath = path.Parent();
@@ -385,6 +389,14 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                             }
 
                             context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
+
+                            // Also publish the main table (grandparent) to ensure metadata consistency
+                            TPath mainTablePath = indexPath.Parent();
+                            if (mainTablePath.IsResolved() && mainTablePath.Base()->IsTable()) {
+                                context.SS->ClearDescribePathCaches(mainTablePath.Base());
+                                context.OnComplete.PublishToSchemeBoard(OperationId, mainTablePath.Base()->PathId);
+                                LOG_I("SyncIndexSchemaVersions: Published main table " << mainTablePath.Base()->PathId);
+                            }
                         }
                     }
                 }
