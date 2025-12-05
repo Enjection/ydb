@@ -341,7 +341,26 @@ public:
         context.SS->IncrementPathDbRefCount(pathId);
 
         streamPath.DomainInfo()->IncPathsInside(context.SS);
-        IncAliveChildrenSafeWithUndo(OperationId, tablePath, context); // for correct discard of ChildrenExist prop
+        
+        // For continuous backup CDC streams, don't use IncAliveChildrenSafeWithUndo because
+        // it may publish the grandparent table with stale TIndexDescription.SchemaVersion.
+        // The grandparent will be published later by CopyTable's HandleReply after version sync.
+        const bool isContinuousBackup = streamName.EndsWith("_continuousBackupImpl");
+        if (isContinuousBackup) {
+            // Just increment children count without publishing grandparent
+            tablePath.Base()->IncAliveChildrenPrivate(false);
+            if (tablePath.Base()->GetAliveChildren() == 1 && !tablePath.Base()->IsDomainRoot()) {
+                auto grandParent = tablePath.Parent();
+                if (grandParent.Base()->IsLikeDirectory()) {
+                    ++grandParent.Base()->DirAlterVersion;
+                    context.MemChanges.GrabPath(context.SS, grandParent.Base()->PathId);
+                    context.DbChanges.PersistPath(grandParent.Base()->PathId);
+                }
+                // Skip grandparent publish - CopyTable HandleReply will handle it
+            }
+        } else {
+            IncAliveChildrenSafeWithUndo(OperationId, tablePath, context); // for correct discard of ChildrenExist prop
+        }
 
         context.OnComplete.ActivateTx(OperationId);
 
