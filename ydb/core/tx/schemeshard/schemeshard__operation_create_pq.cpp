@@ -559,7 +559,34 @@ public:
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_SHARDS_COUNT].Add(StreamShardsCountChange);
 
         dstPath.Base()->IncShardsInside(shardsToCreate);
-        IncAliveChildrenSafeWithUndo(OperationId, parentPath, context); // for correct discard of ChildrenExist prop
+        
+        // For continuous backup CDC streams, don't use IncAliveChildrenSafeWithUndo because
+        // it may publish the grandparent table with stale TIndexDescription.SchemaVersion.
+        // The grandparent will be published later by CopyTable's HandleReply after version sync.
+        const bool isContinuousBackupCdc = parentPath.Base()->IsCdcStream() && 
+                                           parentPath.Base()->Name.EndsWith("_continuousBackupImpl");
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "TCreatePQ checking continuous backup CDC"
+                    << ", parentPathId: " << parentPath.Base()->PathId
+                    << ", parentName: " << parentPath.Base()->Name
+                    << ", isCdcStream: " << parentPath.Base()->IsCdcStream()
+                    << ", isContinuousBackupCdc: " << isContinuousBackupCdc
+                    << ", at schemeshard: " << context.SS->SelfTabletId());
+        if (isContinuousBackupCdc) {
+            // Just increment children count without publishing grandparent
+            parentPath.Base()->IncAliveChildrenPrivate(false);
+            if (parentPath.Base()->GetAliveChildren() == 1 && !parentPath.Base()->IsDomainRoot()) {
+                auto grandParent = parentPath.Parent();
+                if (grandParent.Base()->IsLikeDirectory()) {
+                    ++grandParent.Base()->DirAlterVersion;
+                    context.MemChanges.GrabPath(context.SS, grandParent.Base()->PathId);
+                    context.DbChanges.PersistPath(grandParent.Base()->PathId);
+                }
+                // Skip grandparent publish - CopyTable HandleReply will handle it
+            }
+        } else {
+            IncAliveChildrenSafeWithUndo(OperationId, parentPath, context); // for correct discard of ChildrenExist prop
+        }
 
         SetState(NextState());
         return result;

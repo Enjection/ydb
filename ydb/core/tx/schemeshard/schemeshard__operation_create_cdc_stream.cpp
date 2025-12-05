@@ -346,6 +346,12 @@ public:
         // it may publish the grandparent table with stale TIndexDescription.SchemaVersion.
         // The grandparent will be published later by CopyTable's HandleReply after version sync.
         const bool isContinuousBackup = streamName.EndsWith("_continuousBackupImpl");
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "TNewCdcStream checking continuous backup"
+                    << ", streamName: " << streamName
+                    << ", tablePathId: " << tablePath.Base()->PathId
+                    << ", isContinuousBackup: " << isContinuousBackup
+                    << ", at schemeshard: " << context.SS->SelfTabletId());
         if (isContinuousBackup) {
             // Just increment children count without publishing grandparent
             tablePath.Base()->IncAliveChildrenPrivate(false);
