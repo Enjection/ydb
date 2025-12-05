@@ -60,12 +60,25 @@ public:
 
 public:
     /**
-     * Creates an operation parts blocker.
+     * Creates an operation parts blocker that captures ALL operations.
+     *
+     * Use this constructor when TxIds are not known ahead of time (e.g., SQL-based tests).
+     * The SchemeShard ActorId is detected from TEvModifySchemeTransaction events.
      *
      * @param runtime The test runtime
-     * @param txFilter REQUIRED filter function that returns true for TxIds to capture.
-     *                 This is mandatory because the private event space is shared by
-     *                 multiple components - only exact TxId matching is reliable.
+     */
+    explicit TOperationPartsBlocker(TTestActorRuntime& runtime)
+        : TOperationPartsBlocker(runtime, [](TTxId) { return true; })
+    {
+    }
+
+    /**
+     * Creates an operation parts blocker with a TxId filter.
+     *
+     * @param runtime The test runtime
+     * @param txFilter Filter function that returns true for TxIds to capture.
+     *                 Use this when you know specific TxIds to avoid capturing
+     *                 operations from other SchemeShards in multi-SchemeShard tests.
      *
      * Example:
      *   ui64 txId = 101;

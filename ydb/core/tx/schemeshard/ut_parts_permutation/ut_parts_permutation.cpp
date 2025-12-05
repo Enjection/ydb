@@ -293,10 +293,12 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
 
         SetupLogging(runtime);
 
-        TOperationPartsBlocker blocker(runtime);
-
         // Specify the exact permutation that caused the failure
         TVector<ui32> failingPermutation = {1, 0};  // Adjust based on failure
+
+        // txId we'll use for this operation (pre-increment)
+        ui64 opTxId = txId + 1;
+        TOperationPartsBlocker blocker(runtime, [opTxId](ui64 t) { return t == opTxId; });
 
         AsyncCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
             TableDescription {
@@ -404,18 +406,16 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         Cerr << "Tables dropped" << Endl;
 
         // Now start blocking to discover restore operation parts
-        TOperationPartsBlocker blocker(runtime);
+        // txId we'll use for restore operation (pre-increment)
+        ui64 restoreTxId = txId + 1;
+        TOperationPartsBlocker blocker(runtime, [restoreTxId](ui64 t) { return t == restoreTxId; });
 
         // Trigger restore
         AsyncRestoreBackupCollection(runtime, ++txId, "/MyRoot",
             R"(Name: ".backups/collections/TestCollection")");
 
         // Wait for parts to be captured (give it some time)
-        TDispatchOptions opts;
-        opts.CustomFinalCondition = [&]() {
-            return blocker.GetPartCount(txId) > 0;
-        };
-        runtime.DispatchEvents(opts, TDuration::Seconds(10));
+        blocker.WaitForPartsWithTimeout(restoreTxId, 1, TDuration::Seconds(10));
 
         Cerr << "Discovered " << blocker.GetPartCount(txId) << " parts for restore operation" << Endl;
         auto partIds = blocker.GetPartIds(txId);
