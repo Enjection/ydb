@@ -390,12 +390,34 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
 
                             context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
 
-                            // Also publish the main table (grandparent) to ensure metadata consistency
+                            // Also update the main table (grandparent) to ensure metadata consistency
+                            // The main table's cached metadata includes TIndexDescription::SchemaVersion
+                            // which must match the impl table version for KQP metadata loading
                             TPath mainTablePath = indexPath.Parent();
                             if (mainTablePath.IsResolved() && mainTablePath.Base()->IsTable()) {
-                                context.SS->ClearDescribePathCaches(mainTablePath.Base());
-                                context.OnComplete.PublishToSchemeBoard(OperationId, mainTablePath.Base()->PathId);
-                                LOG_I("SyncIndexSchemaVersions: Published main table " << mainTablePath.Base()->PathId);
+                                TPathId mainTablePathId = mainTablePath.Base()->PathId;
+                                if (context.SS->Tables.contains(mainTablePathId)) {
+                                    auto mainTable = context.SS->Tables.at(mainTablePathId);
+                                    ui64 oldMainVersion = mainTable->AlterVersion;
+                                    ui64 newMainVersion = oldMainVersion + 1;
+
+                                    // Claim version change for main table too
+                                    auto mainClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                                        OperationId, mainTablePathId, oldMainVersion, newMainVersion,
+                                        ETxType::TxIncrementalRestoreFinalize, "Restore finalization main table version bump");
+
+                                    if (mainClaimResult == EClaimResult::Claimed) {
+                                        mainTable->AlterVersion = newMainVersion;
+                                        context.SS->PersistTableAlterVersion(db, mainTablePathId, mainTable);
+                                        context.SS->PersistPendingVersionChange(db,
+                                            *context.SS->VersionRegistry.GetPendingChange(mainTablePathId));
+                                        LOG_I("SyncIndexSchemaVersions: Main table " << mainTablePathId
+                                              << " version bumped from " << oldMainVersion << " to " << newMainVersion);
+                                    }
+
+                                    context.SS->ClearDescribePathCaches(mainTablePath.Base());
+                                    context.OnComplete.PublishToSchemeBoard(OperationId, mainTablePathId);
+                                }
                             }
                         }
                     }

@@ -110,6 +110,13 @@ void LoadChange(change);
 - Now: always sync index version, even if AlterData was already cleared by another part
 - Also publish main table to scheme board to ensure metadata consistency
 
+### Fix 5: Bump main table version when index version changes
+- KQP loads table metadata which includes `TIndexDescription::SchemaVersion`
+- This SchemaVersion is compared against the impl table's actual version
+- If only the index is updated but not the main table, scheme cache may serve stale metadata
+- Now: when syncing index version, also bump the parent table's AlterVersion
+- This forces scheme cache to refresh and pick up the new index SchemaVersion
+
 ## Next Steps (Phase 3)
 
 1. Build and test the changes
