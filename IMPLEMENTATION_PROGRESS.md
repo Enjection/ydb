@@ -52,9 +52,10 @@
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation.cpp` - MODIFY (added rollback in AbortOperationPropose)
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation_incremental_restore_finalize.cpp` - MODIFY (migrated to use registry)
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation_common_cdc_stream.cpp` - MODIFY (migrated to use registry, removed old functions)
-- [x] `ydb/core/tx/schemeshard/schemeshard__operation_copy_table.cpp` - MODIFY (migrated to use registry)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_copy_table.cpp` - MODIFY (migrated to use registry, added parent index sync)
 - [x] `ydb/core/tx/schemeshard/schemeshard_cdc_stream_common.h` - MODIFY (removed old function declarations)
 - [x] `ydb/core/tx/schemeshard/ya.make` - MODIFY (added new files)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_alter_table.cpp` - MODIFY (added parent index sync for impl tables)
 
 ## Key Implementation Details
 
@@ -77,8 +78,80 @@ void LoadChange(change);
 ### Sibling Convergence
 - Claims are at TxId level (not SubTxId)
 - Multiple siblings can join the same claim
-- Version converges to Max() of all sibling requests
+- **First sibling's claim is authoritative** - subsequent siblings join without updating ClaimedVersion
+- When `Claimed`: caller updates in-memory state and persists
+- When `Joined`: caller does NOT update (in-memory already correct from first sibling)
 - All siblings use GetEffectiveVersion() for consistent values
+
+### Version Increment Responsibility
+- **Who increments**: The first sibling to run HandleReply gets `Claimed` and increments `table->AlterVersion`
+- Subsequent siblings get `Joined` and skip the in-memory update (it's already done)
+- All siblings call `PersistTableAlterVersion()`, which persists the current in-memory value (same for all)
+
+## Bug Fixes (2025-12-05)
+
+### Fix 1: Remove Max() when joining claims
+- Removed `Max()` logic when joining an existing claim
+- The old logic caused ClaimedVersion to drift when second sibling read already-updated version
+- First sibling's target version is now authoritative for the entire TxId
+
+### Fix 2: Restore index-to-implTable version sync (CDC stream)
+- For index impl tables with CDC, index version must equal impl table version (not just increment)
+- Changed from `newIndexVersion = oldIndexVersion + 1` to `newIndexVersion = effectiveTableVersion`
+- This preserves the original sync semantics: `index->AlterVersion = implTable->AlterVersion`
+
+### Fix 3: Restore index-to-implTable version sync (incremental restore finalize)
+- Same issue in restore finalize - index was being incremented instead of synced to table version
+- Changed from `newVersion = oldVersion + 1` to `tableVersion = table->AlterVersion` (after FinishAlter)
+- Index version now correctly syncs to impl table version
+
+### Fix 4: Always sync index even when AlterData is null
+- When multiple operation parts run, one might finalize the table (clearing AlterData)
+- The old code skipped index sync when AlterData was null (via `continue`)
+- Now: always sync index version, even if AlterData was already cleared by another part
+- Also publish main table to scheme board to ensure metadata consistency
+
+### Fix 5: Bump main table version when index version changes
+- KQP loads table metadata which includes `TIndexDescription::SchemaVersion`
+- This SchemaVersion is compared against the impl table's actual version
+- If only the index is updated but not the main table, scheme cache may serve stale metadata
+- Now: when syncing index version, also bump the parent table's AlterVersion
+- This forces scheme cache to refresh and pick up the new index SchemaVersion
+
+### Fix 6: Sync parent index version in copy table for impl tables
+- **Root cause**: When copying an index impl table with CDC, the copy table operation bumps the impl table version
+- But the parent INDEX version (TTableIndexInfo::AlterVersion) was NOT synced
+- KQP compares TIndexDescription::SchemaVersion (from parent table metadata) with impl table's actual version
+- If they don't match: "schema version mismatch during metadata loading for: /path/to/indexImplTable"
+- **The fix**: In TCopyTable::TPropose::HandleReply, when the source is an impl table:
+  - Sync the parent index version to match the impl table version
+  - Also bump the main table (grandparent) to refresh scheme cache
+- This ensures TIndexDescription::SchemaVersion == implTable->AlterVersion
+
+### Fix 7: REVERTED - InitializeBuildIndex/FinalizeBuildIndex fixes were wrong
+- **Problem discovered**: These operations target the MAIN TABLE, not the impl table!
+  - `InitializeBuildIndex` uses `tablePathId` = main table
+  - `FinalizeBuildIndex` uses `tablePathId` = main table
+- The fix that checked `if (parent.IsTableIndex())` would NEVER execute because main table's parent is a directory
+- **Action taken**: Reverted these ineffective fixes
+- **Files reverted**:
+  - `schemeshard__operation_initiate_build_index.cpp` - Removed ineffective code
+  - `schemeshard__operation_finalize_build_index.cpp` - Removed ineffective code
+
+### Fix 8: Sync parent index version in TAlterTable for impl tables
+- **Root cause**: When AlterTable runs on an impl table (including FinalizeBuildIndexImplTable during ApplyBuildIndex), it bumps the impl table version but doesn't sync the parent index
+- ApplyBuildIndex flow:
+  1. FinalizeBuildIndexMainTable - bumps main table version
+  2. AlterTableIndex - changes index state to Ready
+  3. FinalizeBuildIndexImplTable (via TAlterTable) - bumps impl table version ← PROBLEM
+- The impl table version bump wasn't synced to parent index, causing version mismatch
+- **Error**: "schema version mismatch during metadata loading for: indexImplTable expected 1 got 2"
+- **The fix**: In TAlterTable::TPropose::HandleReply (schemeshard__operation_alter_table.cpp):
+  - After `table->FinishAlter()`, check if parent is an index
+  - If so, sync parent index's AlterVersion to match the impl table version using TVersionRegistry
+  - Also bump the grandparent (main table) to refresh scheme cache
+- **Files modified**:
+  - `schemeshard__operation_alter_table.cpp` - Added parent index sync after FinishAlter()
 
 ## Next Steps (Phase 3)
 
