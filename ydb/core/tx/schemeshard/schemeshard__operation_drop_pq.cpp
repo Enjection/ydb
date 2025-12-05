@@ -216,12 +216,12 @@ public:
 
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.SS->ClearDescribePathCaches(path);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
 
         if (!context.SS->DisablePublicationsOfDropping) {
-            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
-            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
         }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
@@ -437,12 +437,12 @@ public:
         auto parentDir = path.Parent();
         ++parentDir.Base()->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir.Base());
-        context.SS->ClearDescribePathCaches(parentDir.Base());
-        context.SS->ClearDescribePathCaches(path.Base());
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
 
         if (!context.SS->DisablePublicationsOfDropping) {
-            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
-            context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, path.Base()->PathId);
         }
 
         SetState(NextState());
