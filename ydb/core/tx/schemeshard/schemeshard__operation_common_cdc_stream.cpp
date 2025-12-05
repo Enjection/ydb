@@ -265,7 +265,8 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
                 context.SS->PersistPendingVersionChange(db,
                     *context.SS->VersionRegistry.GetPendingChange(versionCtx.ParentPathId));
-                context.OnComplete.PublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
+                // Defer publish until all operation parts complete
+                context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
                 break;
 
             case EClaimResult::Joined:
@@ -304,7 +305,8 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                         context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
                         context.SS->PersistPendingVersionChange(db,
                             *context.SS->VersionRegistry.GetPendingChange(childPathId));
-                        context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                        // Defer publish until all operation parts complete
+                        context.OnComplete.DeferPublishToSchemeBoard(OperationId, childPathId);
                     }
                 }
             }
@@ -313,7 +315,8 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
 
     context.SS->PersistTableAlterVersion(db, pathId, table);
     context.SS->ClearDescribePathCaches(path);
-    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+    // Defer publish until all operation parts complete
+    context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
     context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
     return true;

@@ -46,6 +46,7 @@ private:
     TDeque<TBindMsgAck> BindedMessageAcks;
     TPublications PublishPaths;
     TPublications RePublishPaths; // only for UpgradeSubDomain
+    TPublications DeferredPublishPaths; // deferred until operation completion
     TDeque<TProposeRec> CoordinatorProposes;
     TDeque<TProposeShards> CoordinatorProposesShards;
     TPendingPipeTrackerCommands PendingPipeTrackerCommands;
@@ -89,6 +90,7 @@ public:
 
     void PublishToSchemeBoard(TOperationId opId, TPathId pathId);
     void RePublishToSchemeBoard(TOperationId opId, TPathId pathId);
+    void DeferPublishToSchemeBoard(TOperationId opId, TPathId pathId);
 
     void Send(TActorId dst, ::NActors::IEventBase* message, ui64 cookie = 0, ui32 flags = 0);
     template <typename TEvent>
@@ -144,6 +146,7 @@ private:
     void DoUpdateTenant(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext &txc, const TActorContext& ctx);
 
     void DoPersistPublishPaths(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx);
+    void DoPersistDeferredPublishPaths(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx);
     void DoPublishToSchemeBoard(TSchemeShard* ss, const TActorContext& ctx);
 
     void DoSend(TSchemeShard* ss, const TActorContext& ctx);

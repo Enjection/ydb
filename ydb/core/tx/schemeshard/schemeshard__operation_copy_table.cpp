@@ -263,14 +263,16 @@ public:
                             context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
                             context.SS->PersistPendingVersionChange(db,
                                 *context.SS->VersionRegistry.GetPendingChange(childPathId));
-                            context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                            // Defer publish until all operation parts complete
+                            context.OnComplete.DeferPublishToSchemeBoard(OperationId, childPathId);
                         }
                     }
                 }
             }
 
             context.SS->ClearDescribePathCaches(srcPath);
-            context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
+            // Defer publish for source table until all operation parts complete
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, srcPathId);
         }
 
         context.SS->ClearDescribePathCaches(path);

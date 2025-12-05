@@ -2289,6 +2289,16 @@ struct Schema : NIceDb::Schema {
         >;
     };
 
+    // Tracks paths that should be published when operation completes (deferred publishing)
+    struct DeferredPublishPaths : Table<131> {
+        struct TxId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TTxId; };
+        struct PathOwnerId : Column<2, NScheme::NTypeIds::Uint64> { using Type = TOwnerId; };
+        struct PathLocalId : Column<3, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
+
+        using TKey = TableKey<TxId, PathOwnerId, PathLocalId>;
+        using TColumns = TableColumns<TxId, PathOwnerId, PathLocalId>;
+    };
+
     using TTables = SchemaTables<
         Paths,
         TxInFlight,
@@ -2417,7 +2427,8 @@ struct Schema : NIceDb::Schema {
         Secrets,
         SecretsAlterData,
         StreamingQueryState,
-        PendingVersionChanges
+        PendingVersionChanges,
+        DeferredPublishPaths
     >;
 
     static constexpr ui64 SysParam_NextPathId = 1;

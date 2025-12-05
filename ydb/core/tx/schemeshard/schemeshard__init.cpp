@@ -698,6 +698,31 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
     typedef std::tuple<TPathId, TTxId, ui64, ui64, ui32, ui64, TString> TPendingVersionChangeRec;
     typedef TDeque<TPendingVersionChangeRec> TPendingVersionChangeRows;
 
+    // DeferredPublishPaths: TxId, PathId
+    typedef std::tuple<TTxId, TPathId> TDeferredPublishPathRec;
+    typedef TDeque<TDeferredPublishPathRec> TDeferredPublishPathRows;
+
+    bool LoadDeferredPublishPaths(NIceDb::TNiceDb& db, TDeferredPublishPathRows& paths) const {
+        auto rowSet = db.Table<Schema::DeferredPublishPaths>().Range().Select();
+        if (!rowSet.IsReady()) {
+            return false;
+        }
+        while (!rowSet.EndOfSet()) {
+            const auto txId = rowSet.GetValue<Schema::DeferredPublishPaths::TxId>();
+            const auto pathId = TPathId(
+                rowSet.GetValue<Schema::DeferredPublishPaths::PathOwnerId>(),
+                rowSet.GetValue<Schema::DeferredPublishPaths::PathLocalId>()
+            );
+            paths.push_back(std::make_tuple(txId, pathId));
+
+            if (!rowSet.Next()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     bool LoadPendingVersionChanges(NIceDb::TNiceDb& db, TPendingVersionChangeRows& changes) const {
         auto rowSet = db.Table<Schema::PendingVersionChanges>().Range().Select();
         if (!rowSet.IsReady()) {
@@ -3982,6 +4007,28 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 change.DebugInfo = debugInfo;
 
                 Self->VersionRegistry.LoadChange(std::move(change));
+            }
+        }
+
+        // Read deferred publish paths
+        {
+            TDeferredPublishPathRows deferredPaths;
+            if (!LoadDeferredPublishPaths(db, deferredPaths)) {
+                return false;
+            }
+
+            LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                         "TTxInit for DeferredPublishPaths"
+                             << ", read records: " << deferredPaths.size()
+                             << ", at schemeshard: " << Self->TabletID());
+
+            for (const auto& rec : deferredPaths) {
+                TTxId txId = std::get<0>(rec);
+                TPathId pathId = std::get<1>(rec);
+
+                if (Self->Operations.contains(txId)) {
+                    Self->Operations.at(txId)->AddDeferredPublishPath(pathId);
+                }
             }
         }
 

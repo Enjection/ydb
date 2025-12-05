@@ -1,6 +1,6 @@
 # Deferred Publishing Implementation Progress
 
-## Status: PHASE 1 - IN PROGRESS
+## Status: PHASE 2 COMPLETE - BUILDING
 
 ## Goal
 Implement deferred publishing to fix schema version sync issues by ensuring all paths are published with final, converged versions after ALL operation parts complete.
@@ -11,23 +11,23 @@ Implement deferred publishing to fix schema version sync issues by ensuring all 
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 1 | Add `DeferredPublishPaths` to `TSideEffects` | ⬜ Pending | New member variable |
-| 2 | Add `DeferPublishToSchemeBoard()` method | ⬜ Pending | New API |
-| 3 | Add `DeferredPublishPaths` to `TOperation` | ⬜ Pending | Track per operation |
-| 4 | Add schema table `DeferredPublishPaths` (ID 131) | ⬜ Pending | Persistence |
-| 5 | Add `DoPersistDeferredPublishPaths()` | ⬜ Pending | Persist in ApplyOnExecute |
-| 6 | Modify `DoDoneTransactions()` to publish deferred | ⬜ Pending | Actual publish logic |
-| 7 | Add loading in `schemeshard__init.cpp` | ⬜ Pending | Crash recovery |
+| 1 | Add `DeferredPublishPaths` to `TSideEffects` | ✅ Done | New member variable |
+| 2 | Add `DeferPublishToSchemeBoard()` method | ✅ Done | New API |
+| 3 | Add `DeferredPublishPaths` to `TOperation` | ✅ Done | Track per operation |
+| 4 | Add schema table `DeferredPublishPaths` (ID 131) | ✅ Done | Persistence |
+| 5 | Add `DoPersistDeferredPublishPaths()` | ✅ Done | Persist in ApplyOnExecute |
+| 6 | Modify `DoDoneTransactions()` to publish deferred | ✅ Done | Actual publish logic |
+| 7 | Add loading in `schemeshard__init.cpp` | ✅ Done | Crash recovery |
 | 8 | Unit tests for infrastructure | ⬜ Pending | |
 
 ## Phase 2: Operation Migration
 
 | # | Task | Status | Notes |
 |---|------|--------|-------|
-| 9 | Migrate `schemeshard__operation_copy_table.cpp` | ⬜ Pending | Source table + indexes |
-| 10 | Migrate `schemeshard__operation_common_cdc_stream.cpp` | ⬜ Pending | CDC version sync paths |
-| 11 | Migrate `schemeshard__operation_alter_table.cpp` | ⬜ Pending | Parent index sync |
-| 12 | Migrate `schemeshard__operation_incremental_restore_finalize.cpp` | ⬜ Pending | Restore paths |
+| 9 | Migrate `schemeshard__operation_copy_table.cpp` | ✅ Done | Source table + indexes |
+| 10 | Migrate `schemeshard__operation_common_cdc_stream.cpp` | ✅ Done | CDC version sync paths |
+| 11 | Migrate `schemeshard__operation_alter_table.cpp` | ⏭️ Skipped | No version registry usage in this branch |
+| 12 | Migrate `schemeshard__operation_incremental_restore_finalize.cpp` | ✅ Done | Restore paths |
 
 ## Phase 3: Testing & Validation
 

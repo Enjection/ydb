@@ -45,6 +45,7 @@ struct TOperation: TSimpleRefCount<TOperation> {
 
     using TPublishPath = std::pair<TPathId, ui64>;
     TSet<TPublishPath> Publications;
+    THashSet<TPathId> DeferredPublishPaths; // paths to publish when operation completes
 
     TSet<TSubTxId> ReadyToProposeParts;
     THashSet<TSubTxId> ReadyToNotifyParts;
@@ -87,6 +88,14 @@ struct TOperation: TSimpleRefCount<TOperation> {
 
     bool AddPublishingPath(TPathId pathId, ui64 version);
     bool IsPublished() const;
+
+    bool AddDeferredPublishPath(TPathId pathId) {
+        return DeferredPublishPaths.insert(pathId).second;
+    }
+
+    const THashSet<TPathId>& GetDeferredPublishPaths() const {
+        return DeferredPublishPaths;
+    }
 
     void ReadyToNotifyPart(TSubTxId partId);
     bool IsReadyToNotify(const TActorContext& ctx) const;

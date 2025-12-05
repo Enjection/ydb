@@ -159,6 +159,10 @@ void TSideEffects::RePublishToSchemeBoard(TOperationId opId, TPathId pathId) {
     RePublishPaths[opId.GetTxId()].push_back(pathId);
 }
 
+void TSideEffects::DeferPublishToSchemeBoard(TOperationId opId, TPathId pathId) {
+    DeferredPublishPaths[opId.GetTxId()].push_back(pathId);
+}
+
 void TSideEffects::ReadyToNotify(TOperationId opId) {
     ReadyToNotifyOperations.insert(opId);
 }
@@ -181,6 +185,7 @@ void TSideEffects::ApplyOnExecute(TSchemeShard* ss, NTabletFlatExecutor::TTransa
     DoActivateShardCreated(ss, ctx);
 
     DoPersistPublishPaths(ss, txc, ctx); // before DoReadyToNotify
+    DoPersistDeferredPublishPaths(ss, txc, ctx);
 
     DoReadyToNotify(ss, ctx);
     ExpandCoordinatorProposes(ss, ctx);
@@ -616,6 +621,38 @@ void TSideEffects::DoPersistPublishPaths(TSchemeShard* ss, NTabletFlatExecutor::
     }
 }
 
+void TSideEffects::DoPersistDeferredPublishPaths(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
+    NIceDb::TNiceDb db(txc.DB);
+
+    for (const auto& kv : DeferredPublishPaths) {
+        const TTxId txId = kv.first;
+        if (!ss->Operations.contains(txId)) {
+            LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        "Cannot defer publish paths for unknown operation id#" << txId);
+            continue;
+        }
+
+        TOperation::TPtr operation = ss->Operations.at(txId);
+
+        const auto& paths = kv.second;
+        for (TPathId pathId : paths) {
+            if (!ss->PathsById.contains(pathId)) {
+                continue;
+            }
+
+            if (operation->AddDeferredPublishPath(pathId)) {
+                LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            "Deferring publish for path"
+                                << ", txId: " << txId
+                                << ", pathId: " << pathId);
+
+                db.Table<Schema::DeferredPublishPaths>()
+                    .Key(txId, pathId.OwnerId, pathId.LocalPathId)
+                    .Update();
+            }
+        }
+    }
+}
 
 void TSideEffects::DoPublishToSchemeBoard(TSchemeShard* ss, const TActorContext& ctx) {
     for (auto& kv : PublishPaths) {
@@ -1003,6 +1040,37 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
             }
             ss->VersionRegistry.MarkApplied(txId);
             ss->VersionRegistry.RemoveTransaction(txId);
+        }
+
+        // Publish all deferred paths with final versions now that operation is complete
+        const auto& deferredPaths = operation->GetDeferredPublishPaths();
+        if (!deferredPaths.empty()) {
+            LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "Publishing " << deferredPaths.size()
+                           << " deferred paths for txId: " << txId);
+
+            TDeque<TPathId> pathsToPublish;
+            for (const TPathId& pathId : deferredPaths) {
+                // Remove from persistence
+                db.Table<Schema::DeferredPublishPaths>()
+                    .Key(txId, pathId.OwnerId, pathId.LocalPathId)
+                    .Delete();
+
+                if (ss->PathsById.contains(pathId)) {
+                    pathsToPublish.push_back(pathId);
+
+                    LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                "Deferred publish path"
+                                    << ", txId: " << txId
+                                    << ", pathId: " << pathId
+                                    << ", version: " << ss->GetPathVersion(
+                                        TPath::Init(pathId, ss)).GetGeneralVersion());
+                }
+            }
+
+            if (!pathsToPublish.empty()) {
+                ss->PublishToSchemeBoard(txId, std::move(pathsToPublish), ctx);
+            }
         }
 
         if (!operation->IsPublished()) {

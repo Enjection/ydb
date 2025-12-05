@@ -330,9 +330,9 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                 table->FinishAlter();
                 context.SS->PersistTableAltered(db, implTablePathId, table);
 
-                // Clear describe path caches and publish to scheme board
+                // Clear describe path caches and defer publish until operation complete
                 context.SS->ClearDescribePathCaches(path.Base());
-                context.OnComplete.PublishToSchemeBoard(OperationId, implTablePathId);
+                context.OnComplete.DeferPublishToSchemeBoard(OperationId, implTablePathId);
 
                 LOG_I("SyncIndexSchemaVersions: Finalized schema version for: " << tablePath);
 
@@ -381,7 +381,8 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                 break;
                         }
 
-                        context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
+                        // Defer publish until all operation parts complete
+                        context.OnComplete.DeferPublishToSchemeBoard(OperationId, indexPathId);
                     }
                 }
             }
