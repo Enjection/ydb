@@ -300,14 +300,19 @@ public:
             }
 
             // If any child index was synced, we need to re-publish the parent table
-            // because its TIndexDescription embeds the index's SchemaVersion
+            // because its TIndexDescription embeds the index's SchemaVersion.
+            // We must also bump the parent table's AlterVersion to ensure GeneralVersion increases,
+            // otherwise the scheme board may ignore the publish if version didn't change.
             if (childIndexSynced) {
+                ++srcTable->AlterVersion;
+                context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
                 context.SS->ClearDescribePathCaches(srcPath);
                 context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
 
                 LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                            "CopyTable re-publishing source table after child index sync"
                            << ", srcTablePathId: " << srcPathId
+                           << ", newTableAlterVersion: " << srcTable->AlterVersion
                            << ", at schemeshard: " << context.SS->SelfTabletId());
             }
 

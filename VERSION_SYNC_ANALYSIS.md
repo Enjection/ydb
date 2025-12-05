@@ -188,6 +188,13 @@ Files modified:
 8. MISMATCH: expected 1 got 2
 
 **Solution:** In `schemeshard__operation_copy_table.cpp`:
-- After syncing child indexes, call `ClearDescribePathCaches(srcPath)` and `PublishToSchemeBoard(srcPathId)`
+- After syncing child indexes, bump the parent table's `DirAlterVersion`
+- Call `PersistPathDirAlterVersion`, `ClearDescribePathCaches(srcPath)` and `PublishToSchemeBoard(srcPathId)`
+- The DirAlterVersion bump ensures GeneralVersion increases, so scheme board accepts the update
 - This invalidates the parent table's scheme cache entry
 - KQP will reload the parent table with updated TIndexDescription.SchemaVersion
+
+**Key Insight:** Simply re-publishing without bumping any version component doesn't work because:
+- Child index's AlterVersion is NOT part of parent table's GeneralVersion
+- If GeneralVersion doesn't change, scheme board may ignore the publish
+- Must bump parent's DirAlterVersion to force a new GeneralVersion
