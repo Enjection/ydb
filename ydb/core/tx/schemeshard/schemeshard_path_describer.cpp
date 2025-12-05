@@ -1,4 +1,5 @@
 #include "schemeshard_path_describer.h"
+#include "schemeshard_impl.h"
 
 #include <ydb/core/protos/flat_scheme_op.pb.h>
 #include <ydb/public/api/protos/annotations/sensitive.pb.h>
@@ -1437,6 +1438,13 @@ void TSchemeShard::DescribeTableIndex(const TPathId& pathId, const TString& name
     entry.SetType(indexInfo->Type);
     entry.SetState(indexInfo->State);
     entry.SetSchemaVersion(indexInfo->AlterVersion);
+    
+    LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "DescribeTableIndex setting SchemaVersion"
+                << ", indexPathId: " << pathId
+                << ", indexName: " << name
+                << ", schemaVersion: " << indexInfo->AlterVersion
+                << ", at schemeshard: " << TabletID());
 
     for (const auto& keyName: indexInfo->IndexKeys) {
         *entry.MutableKeyColumnNames()->Add() = keyName;
