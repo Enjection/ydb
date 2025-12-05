@@ -6,6 +6,8 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 
+#include <memory>
+
 namespace NSchemeShardUT_Private {
 
 /**
@@ -172,14 +174,19 @@ public:
         PrepareRuntime();
 
         // Create blocker that will capture parts
-        // TxFilter is REQUIRED to reliably identify SchemeShard events
-        Y_ABORT_UNLESS(Config.TxFilter, "TxFilter must be set - the private event space is shared");
-        TOperationPartsBlocker blocker(*Runtime, Config.TxFilter);
+        // SchemeShard ActorId is detected from TEvModifySchemeTransaction events
+        std::unique_ptr<TOperationPartsBlocker> blocker;
+        if (Config.TxFilter) {
+            blocker = std::make_unique<TOperationPartsBlocker>(*Runtime, Config.TxFilter);
+        } else {
+            // No filter - capture all TxIds, detect SchemeShard from first TEvModifySchemeTransaction
+            blocker = std::make_unique<TOperationPartsBlocker>(*Runtime);
+        }
 
-        testScenario(*Runtime, *TestEnv, blocker, permutation);
+        testScenario(*Runtime, *TestEnv, *blocker, permutation);
 
         // Release any remaining parts
-        blocker.ReleaseAllOperations();
+        blocker->ReleaseAllOperations();
     }
 
     /**
@@ -218,19 +225,23 @@ public:
 
         PrepareRuntime();
 
-        Y_ABORT_UNLESS(Config.TxFilter, "TxFilter must be set - the private event space is shared");
-        TOperationPartsBlocker blocker(*Runtime, Config.TxFilter);
+        std::unique_ptr<TOperationPartsBlocker> blocker;
+        if (Config.TxFilter) {
+            blocker = std::make_unique<TOperationPartsBlocker>(*Runtime, Config.TxFilter);
+        } else {
+            blocker = std::make_unique<TOperationPartsBlocker>(*Runtime);
+        }
 
         setupAndTrigger(*Runtime, *TestEnv);
 
         // Wait a bit for parts to be captured
         TDispatchOptions opts;
         opts.CustomFinalCondition = [&]() {
-            return !blocker.GetCapturedTxIds().empty();
+            return !blocker->GetCapturedTxIds().empty();
         };
         Runtime->DispatchEvents(opts, TDuration::Seconds(5));
 
-        auto txIds = blocker.GetCapturedTxIds();
+        auto txIds = blocker->GetCapturedTxIds();
         if (txIds.empty()) {
             return 0;
         }
@@ -238,7 +249,7 @@ public:
         // Find operation with most parts
         size_t maxParts = 0;
         for (ui64 txId : txIds) {
-            size_t count = blocker.GetPartCount(txId);
+            size_t count = blocker->GetPartCount(txId);
             if (count > maxParts) {
                 maxParts = count;
                 txIdOut = txId;
