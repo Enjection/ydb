@@ -34,21 +34,10 @@ void CheckSrcDirOnPropose(
 
 } // namespace NKikimr::NSchemeShard::NCdcStreamAtTable
 
+// Note: SyncIndexEntityVersion and SyncChildIndexes have been replaced by TVersionRegistry.
+// Version synchronization is now done through ClaimVersionChange() for idempotent,
+// sibling-coordinated version updates. See schemeshard_version_registry.h.
+
 namespace NKikimr::NSchemeShard::NCdcStreamState {
-
-// Synchronize child index versions when parent table version is updated for continuous backup
-void SyncIndexEntityVersion(
-    const TPathId& indexPathId,
-    ui64 targetVersion,
-    TOperationId operationId,
-    TOperationContext& context,
-    NIceDb::TNiceDb& db);
-
-void SyncChildIndexes(
-    TPathElement::TPtr parentPath,
-    ui64 targetVersion,
-    TOperationId operationId,
-    TOperationContext& context,
-    NIceDb::TNiceDb& db);
 
 } // namespace NKikimr::NSchemeShard::NCdcStreamState

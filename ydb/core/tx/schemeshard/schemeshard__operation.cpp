@@ -314,6 +314,9 @@ void TSchemeShard::AbortOperationPropose(const TTxId txId, TOperationContext& co
 
     context.MemChanges.UnDo(context.SS);
 
+    // Rollback any pending version changes for this transaction
+    VersionRegistry.RollbackChanges(txId);
+
     // And remove aborted operation from existence
     Operations.erase(txId);
 }

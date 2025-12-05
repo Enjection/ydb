@@ -21,6 +21,7 @@
 #include "schemeshard_shard_deleter.h"
 #include "schemeshard_tx_infly.h"
 #include "schemeshard_types.h"
+#include "schemeshard_version_registry.h"
 
 #include <ydb/core/base/channel_profiles.h>
 #include <ydb/core/base/hive.h>
@@ -301,6 +302,9 @@ public:
     THashMap<TShardIdx, TAdoptedShard> AdoptedShards;
     THashMap<TTabletId, TShardIdx> TabletIdToShardIdx;
     THashMap<TShardIdx, TVector<TActorId>> ShardDeletionSubscribers; // for tests
+
+    // Pending version changes registry for sibling operation coordination
+    TVersionRegistry VersionRegistry;
 
     // in case of integral hists we need to remember what values we have set
     struct TPartitionMetrics {
@@ -774,6 +778,10 @@ public:
     void PersistDropSnapshot(NIceDb::TNiceDb& db, const TTxId snapshotId, const TPathId tableId);
     void PersistLongLock(NIceDb::TNiceDb& db, const TTxId lockId, const TPathId pathId);
     void PersistUnLock(NIceDb::TNiceDb& db, const TPathId pathId);
+
+    // version registry
+    void PersistPendingVersionChange(NIceDb::TNiceDb& db, const TPendingVersionChange& change);
+    void PersistRemovePendingVersionChange(NIceDb::TNiceDb& db, const TPathId& pathId);
 
     void PersistTxState(NIceDb::TNiceDb& db, const TOperationId opId);
     void ChangeTxState(NIceDb::TNiceDb& db, const TOperationId opId, TTxState::ETxState newState);

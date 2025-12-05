@@ -6,6 +6,7 @@
 #include "schemeshard_impl.h"
 #include "schemeshard_tx_infly.h"
 #include "schemeshard_utils.h"  // for TransactionTemplate
+#include "schemeshard_version_registry.h"
 
 #include <ydb/core/base/subdomain.h>
 #include <ydb/core/mind/hive/hive.h>
@@ -222,12 +223,51 @@ public:
             Y_ABORT_UNLESS(context.SS->Tables.contains(srcPathId));
             auto srcTable = context.SS->Tables.at(srcPathId);
 
-            srcTable->AlterVersion += 1;
+            // Claim table version change using the registry
+            ui64 oldSrcVersion = srcTable->AlterVersion;
+            ui64 newSrcVersion = oldSrcVersion + 1;
+
+            auto srcClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                OperationId, srcPathId, oldSrcVersion, newSrcVersion,
+                TTxState::TxCopyTable, "Copy table source version bump");
+
+            if (srcClaimResult == EClaimResult::Claimed) {
+                srcTable->AlterVersion = newSrcVersion;
+                context.SS->PersistPendingVersionChange(db,
+                    *context.SS->VersionRegistry.GetPendingChange(srcPathId));
+            }
 
             context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
 
-            // Sync child indexes to match the new version
-            NCdcStreamState::SyncChildIndexes(srcPath, srcTable->AlterVersion, OperationId, context, db);
+            // Sync child indexes to match the new version using registry
+            ui64 effectiveVersion = context.SS->VersionRegistry.GetEffectiveVersion(srcPathId, srcTable->AlterVersion);
+
+            for (const auto& [childName, childPathId] : srcPath->GetChildren()) {
+                auto childPath = context.SS->PathsById.at(childPathId);
+                if (!childPath->IsTableIndex() || childPath->Dropped()) {
+                    continue;
+                }
+
+                if (context.SS->Indexes.contains(childPathId)) {
+                    auto childIndex = context.SS->Indexes.at(childPathId);
+                    ui64 oldChildVersion = childIndex->AlterVersion;
+
+                    // Only claim if we'd be increasing the version
+                    if (effectiveVersion > oldChildVersion) {
+                        auto childClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                            OperationId, childPathId, oldChildVersion, effectiveVersion,
+                            TTxState::TxCopyTable, "Copy table child index sync");
+
+                        if (childClaimResult == EClaimResult::Claimed) {
+                            childIndex->AlterVersion = effectiveVersion;
+                            context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
+                            context.SS->PersistPendingVersionChange(db,
+                                *context.SS->VersionRegistry.GetPendingChange(childPathId));
+                            context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                        }
+                    }
+                }
+            }
 
             context.SS->ClearDescribePathCaches(srcPath);
             context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);

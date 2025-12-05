@@ -2591,6 +2591,21 @@ void TSchemeShard::PersistUnLock(NIceDb::TNiceDb& db, const TPathId pathId) {
     db.Table<Schema::LongLocks>().Key(pathId.OwnerId, pathId.LocalPathId).Delete();
 }
 
+void TSchemeShard::PersistPendingVersionChange(NIceDb::TNiceDb& db, const TPendingVersionChange& change) {
+    db.Table<Schema::PendingVersionChanges>().Key(change.PathId.OwnerId, change.PathId.LocalPathId).Update(
+        NIceDb::TUpdate<Schema::PendingVersionChanges::TxId>(change.ClaimingTxId),
+        NIceDb::TUpdate<Schema::PendingVersionChanges::OriginalVersion>(change.OriginalVersion),
+        NIceDb::TUpdate<Schema::PendingVersionChanges::ClaimedVersion>(change.ClaimedVersion),
+        NIceDb::TUpdate<Schema::PendingVersionChanges::OperationType>(static_cast<ui32>(change.OperationType)),
+        NIceDb::TUpdate<Schema::PendingVersionChanges::ClaimTime>(change.ClaimTime.MicroSeconds()),
+        NIceDb::TUpdate<Schema::PendingVersionChanges::DebugInfo>(change.DebugInfo)
+    );
+}
+
+void TSchemeShard::PersistRemovePendingVersionChange(NIceDb::TNiceDb& db, const TPathId& pathId) {
+    db.Table<Schema::PendingVersionChanges>().Key(pathId.OwnerId, pathId.LocalPathId).Delete();
+}
+
 void TSchemeShard::PersistDropStep(NIceDb::TNiceDb& db, const TPathId pathId, TStepId step, TOperationId opId) {
     Y_ABORT_UNLESS(step, "Drop step must be valid (not 0)");
     if (pathId.OwnerId == TabletID()) {

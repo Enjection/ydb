@@ -996,6 +996,15 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
             ss->RemoveTx(ctx, db, TOperationId(txId, partId), nullptr);
         }
 
+        // Apply and cleanup pending version changes for this transaction
+        if (auto* claimedPaths = ss->VersionRegistry.GetClaimedPaths(txId)) {
+            for (const TPathId& pathId : *claimedPaths) {
+                ss->PersistRemovePendingVersionChange(db, pathId);
+            }
+            ss->VersionRegistry.MarkApplied(txId);
+            ss->VersionRegistry.RemoveTransaction(txId);
+        }
+
         if (!operation->IsPublished()) {
             LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                          "Publication still in progress"

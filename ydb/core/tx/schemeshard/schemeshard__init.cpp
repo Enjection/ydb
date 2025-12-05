@@ -694,6 +694,38 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
         return true;
     }
 
+    // PendingVersionChanges: PathId, TxId, OriginalVersion, ClaimedVersion, OperationType, ClaimTime, DebugInfo
+    typedef std::tuple<TPathId, TTxId, ui64, ui64, ui32, ui64, TString> TPendingVersionChangeRec;
+    typedef TDeque<TPendingVersionChangeRec> TPendingVersionChangeRows;
+
+    bool LoadPendingVersionChanges(NIceDb::TNiceDb& db, TPendingVersionChangeRows& changes) const {
+        auto rowSet = db.Table<Schema::PendingVersionChanges>().Range().Select();
+        if (!rowSet.IsReady()) {
+            return false;
+        }
+        while (!rowSet.EndOfSet()) {
+            const auto pathId = TPathId(
+                rowSet.GetValue<Schema::PendingVersionChanges::PathOwnerId>(),
+                rowSet.GetValue<Schema::PendingVersionChanges::PathLocalId>()
+            );
+            changes.push_back(std::make_tuple(
+                pathId,
+                rowSet.GetValue<Schema::PendingVersionChanges::TxId>(),
+                rowSet.GetValue<Schema::PendingVersionChanges::OriginalVersion>(),
+                rowSet.GetValue<Schema::PendingVersionChanges::ClaimedVersion>(),
+                rowSet.GetValue<Schema::PendingVersionChanges::OperationType>(),
+                rowSet.GetValueOrDefault<Schema::PendingVersionChanges::ClaimTime>(0),
+                rowSet.GetValueOrDefault<Schema::PendingVersionChanges::DebugInfo>("")
+            ));
+
+            if (!rowSet.Next()) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     typedef std::tuple<TOperationId, TShardIdx, TTxState::ETxState> TTxShardRec;
     typedef TVector<TTxShardRec> TTxShardsRows;
 
@@ -3916,6 +3948,40 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
 
             for (auto& rec: shardsToDelete) {
                 OnComplete.DeleteSystemShard(std::get<0>(rec));
+            }
+        }
+
+        // Read pending version changes
+        {
+            TPendingVersionChangeRows pendingChanges;
+            if (!LoadPendingVersionChanges(db, pendingChanges)) {
+                return false;
+            }
+
+            LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                         "TTxInit for PendingVersionChanges"
+                             << ", read records: " << pendingChanges.size()
+                             << ", at schemeshard: " << Self->TabletID());
+
+            for (const auto& rec: pendingChanges) {
+                TPathId pathId = std::get<0>(rec);
+                TTxId txId = std::get<1>(rec);
+                ui64 originalVersion = std::get<2>(rec);
+                ui64 claimedVersion = std::get<3>(rec);
+                ui32 operationType = std::get<4>(rec);
+                ui64 claimTime = std::get<5>(rec);
+                TString debugInfo = std::get<6>(rec);
+
+                TPendingVersionChange change;
+                change.PathId = pathId;
+                change.OriginalVersion = originalVersion;
+                change.ClaimedVersion = claimedVersion;
+                change.ClaimingTxId = txId;
+                change.OperationType = static_cast<ETxType>(operationType);
+                change.ClaimTime = TInstant::MicroSeconds(claimTime);
+                change.DebugInfo = debugInfo;
+
+                Self->VersionRegistry.LoadChange(std::move(change));
             }
         }
 

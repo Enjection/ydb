@@ -2265,6 +2265,30 @@ struct Schema : NIceDb::Schema {
         using TColumns = TableColumns<OwnerPathId, LocalPathId, AlterVersion, Properties>;
     };
 
+    // Tracks pending version changes for sibling operation coordination
+    struct PendingVersionChanges : Table<130> {
+        struct PathOwnerId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TOwnerId; };
+        struct PathLocalId : Column<2, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
+        struct TxId : Column<3, NScheme::NTypeIds::Uint64> { using Type = TTxId; };
+        struct OriginalVersion : Column<4, NScheme::NTypeIds::Uint64> {};
+        struct ClaimedVersion : Column<5, NScheme::NTypeIds::Uint64> {};
+        struct OperationType : Column<6, NScheme::NTypeIds::Uint32> {};
+        struct ClaimTime : Column<7, NScheme::NTypeIds::Uint64> {};
+        struct DebugInfo : Column<8, NScheme::NTypeIds::Utf8> {};
+
+        using TKey = TableKey<PathOwnerId, PathLocalId>;
+        using TColumns = TableColumns<
+            PathOwnerId,
+            PathLocalId,
+            TxId,
+            OriginalVersion,
+            ClaimedVersion,
+            OperationType,
+            ClaimTime,
+            DebugInfo
+        >;
+    };
+
     using TTables = SchemaTables<
         Paths,
         TxInFlight,
@@ -2392,7 +2416,8 @@ struct Schema : NIceDb::Schema {
         IncrementalBackupItems,
         Secrets,
         SecretsAlterData,
-        StreamingQueryState
+        StreamingQueryState,
+        PendingVersionChanges
     >;
 
     static constexpr ui64 SysParam_NextPathId = 1;

@@ -313,6 +313,8 @@ SRCS(
     schemeshard_utils.cpp
     schemeshard_utils.h
     schemeshard_validate_ttl.cpp
+    schemeshard_version_registry.cpp
+    schemeshard_version_registry.h
     schemeshard_xxport__helpers.cpp
     user_attributes.cpp
     schemeshard__operation_create_set_constraint.cpp

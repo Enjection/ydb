@@ -2,12 +2,14 @@
 
 #include "schemeshard__operation_base.h"
 #include "schemeshard__operation_common.h"
+#include "schemeshard_version_registry.h"
 
 #include <ydb/core/base/table_index.h>
 
 #define LOG_I(stream) LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_N(stream) LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_W(stream) LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
+#define LOG_E(stream) LOG_ERROR_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 
 namespace NKikimr::NSchemeShard {
 
@@ -347,12 +349,37 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                     processedIndexes.insert(indexPathId);
 
                     if (context.SS->Indexes.contains(indexPathId)) {
-                        auto oldVersion = context.SS->Indexes[indexPathId]->AlterVersion;
-                        context.SS->Indexes[indexPathId]->AlterVersion += 1;
-                        context.SS->PersistTableIndexAlterVersion(db, indexPathId, context.SS->Indexes[indexPathId]);
+                        auto index = context.SS->Indexes[indexPathId];
+                        ui64 oldVersion = index->AlterVersion;
+                        ui64 newVersion = oldVersion + 1;
 
-                        LOG_I("SyncIndexSchemaVersions: Index AlterVersion incremented from "
-                              << oldVersion << " to " << context.SS->Indexes[indexPathId]->AlterVersion);
+                        auto claimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                            OperationId, indexPathId, oldVersion, newVersion,
+                            ETxType::TxIncrementalRestoreFinalize, "Restore finalization index sync");
+
+                        switch (claimResult) {
+                            case EClaimResult::Claimed:
+                                // First sibling to claim - update in-memory state and persist
+                                index->AlterVersion = newVersion;
+                                context.SS->PersistTableIndexAlterVersion(db, indexPathId, index);
+                                context.SS->PersistPendingVersionChange(db,
+                                    *context.SS->VersionRegistry.GetPendingChange(indexPathId));
+                                LOG_I("SyncIndexSchemaVersions: Index AlterVersion incremented from "
+                                      << oldVersion << " to " << newVersion << " (Claimed)");
+                                break;
+
+                            case EClaimResult::Joined:
+                                // Sibling already claimed - use effective version
+                                LOG_I("SyncIndexSchemaVersions: Index " << indexPathId
+                                      << " already claimed by sibling, effective version: "
+                                      << context.SS->VersionRegistry.GetEffectiveVersion(indexPathId, oldVersion));
+                                break;
+
+                            case EClaimResult::Conflict:
+                                // Different operation claimed - should not happen
+                                LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
+                                break;
+                        }
 
                         context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
                     }
