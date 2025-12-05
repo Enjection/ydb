@@ -227,26 +227,27 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
         OperationId, pathId, oldTableVersion, newTableVersion,
         txState->TxType, "CDC stream table version");
 
-    switch (tableClaimResult) {
-        case EClaimResult::Claimed:
-            // First sibling to claim - update in-memory state
-            table->AlterVersion = newTableVersion;
-            context.SS->PersistPendingVersionChange(db,
-                *context.SS->VersionRegistry.GetPendingChange(pathId));
-            break;
+    // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+    // might have updated the claimed version to a higher value
+    if (tableClaimResult != EClaimResult::Conflict) {
+        ui64 effectiveTableVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+            pathId, oldTableVersion);
 
-        case EClaimResult::Joined:
-            // Sibling already claimed - get the effective version
+        if (effectiveTableVersion > table->AlterVersion) {
+            table->AlterVersion = effectiveTableVersion;
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                        "Table " << pathId << " already claimed by sibling, effective version: "
-                        << context.SS->VersionRegistry.GetEffectiveVersion(pathId, oldTableVersion));
-            break;
+                        "CDC stream updated table version"
+                        << ", pathId: " << pathId
+                        << ", claimResult: " << static_cast<int>(tableClaimResult)
+                        << ", newVersion: " << effectiveTableVersion);
+        }
 
-        case EClaimResult::Conflict:
-            // Different operation claimed - should not happen
-            LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                       "Unexpected conflict for CDC table version: " << pathId);
-            break;
+        if (auto* pendingChange = context.SS->VersionRegistry.GetPendingChange(pathId)) {
+            context.SS->PersistPendingVersionChange(db, *pendingChange);
+        }
+    } else {
+        LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                   "Unexpected conflict for CDC table version: " << pathId);
     }
 
     // For index impl tables that are part of continuous backup, sync index version to impl table version

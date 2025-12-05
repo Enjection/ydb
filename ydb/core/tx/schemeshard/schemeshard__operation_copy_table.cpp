@@ -251,10 +251,19 @@ public:
                        << ", claimResult: " << static_cast<int>(srcClaimResult)
                        << ", at schemeshard: " << context.SS->SelfTabletId());
 
-            if (srcClaimResult == EClaimResult::Claimed) {
-                srcTable->AlterVersion = newSrcVersion;
-                context.SS->PersistPendingVersionChange(db,
-                    *context.SS->VersionRegistry.GetPendingChange(srcPathId));
+            // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+            // might have updated the claimed version to a higher value
+            if (srcClaimResult != EClaimResult::Conflict) {
+                ui64 effectiveSrcVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                    srcPathId, srcTable->AlterVersion);
+
+                if (effectiveSrcVersion > srcTable->AlterVersion) {
+                    srcTable->AlterVersion = effectiveSrcVersion;
+                }
+
+                if (auto* pendingChange = context.SS->VersionRegistry.GetPendingChange(srcPathId)) {
+                    context.SS->PersistPendingVersionChange(db, *pendingChange);
+                }
             }
 
             context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
@@ -273,28 +282,41 @@ public:
                     auto childIndex = context.SS->Indexes.at(childPathId);
                     ui64 oldChildVersion = childIndex->AlterVersion;
 
-                    // Only claim if we'd be increasing the version
-                    if (effectiveVersion > oldChildVersion) {
+                    // Check if there's already a pending claim from a sibling
+                    ui64 effectiveChildVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                        childPathId, oldChildVersion);
+
+                    // Only claim if parent's effective version is higher than child's effective version
+                    if (effectiveVersion > effectiveChildVersion) {
                         auto childClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
                             OperationId, childPathId, oldChildVersion, effectiveVersion,
                             TTxState::TxCopyTable, "Copy table child index sync");
 
-                        if (childClaimResult == EClaimResult::Claimed) {
-                            childIndex->AlterVersion = effectiveVersion;
-                            context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
-                            context.SS->PersistPendingVersionChange(db,
-                                *context.SS->VersionRegistry.GetPendingChange(childPathId));
-                            context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
-                            childIndexSynced = true;
-
-                            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                       "CopyTable SYNCED child index version"
-                                       << ", srcTablePathId: " << srcPathId
-                                       << ", childIndexPathId: " << childPathId
-                                       << ", childIndexName: " << childName
-                                       << ", newVersion: " << effectiveVersion
-                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+                        // Handle both Claimed and Joined - sibling may have claimed higher version
+                        if (childClaimResult != EClaimResult::Conflict) {
+                            effectiveChildVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                childPathId, oldChildVersion);
                         }
+                    }
+
+                    // Update in-memory state if effective version is higher
+                    if (effectiveChildVersion > childIndex->AlterVersion) {
+                        childIndex->AlterVersion = effectiveChildVersion;
+                        context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
+                        if (auto* pendingChange = context.SS->VersionRegistry.GetPendingChange(childPathId)) {
+                            context.SS->PersistPendingVersionChange(db, *pendingChange);
+                        }
+                        context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                        childIndexSynced = true;
+
+                        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                   "CopyTable SYNCED child index version"
+                                   << ", srcTablePathId: " << srcPathId
+                                   << ", childIndexPathId: " << childPathId
+                                   << ", childIndexName: " << childName
+                                   << ", oldVersion: " << oldChildVersion
+                                   << ", newVersion: " << effectiveChildVersion
+                                   << ", at schemeshard: " << context.SS->SelfTabletId());
                     }
                 }
             }
