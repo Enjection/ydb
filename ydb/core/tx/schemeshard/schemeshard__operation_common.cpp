@@ -1199,6 +1199,7 @@ void ValidateNoTransactionOnPaths(TOperationId operationId, const THashSet<TPath
 }  // namespace NForceDrop
 
 void IncParentDirAlterVersionWithRepublishSafeWithUndo(const TOperationId& opId, const TPath& path, TSchemeShard* ss, TSideEffects& onComplete) {
+    Y_UNUSED(ss);
     auto parent = path.Parent();
     if (parent.Base()->IsDirectory() || parent.Base()->IsDomainRoot()) {
         ++parent.Base()->DirAlterVersion;
