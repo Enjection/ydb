@@ -67,8 +67,9 @@ public:
         context.SS->ResolveDomainInfo(pathId)->DecPathsInside(context.SS);
         DecAliveChildrenDirect(OperationId, parent, context); // for correct discard of ChildrenExist prop
 
-        context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;
@@ -200,8 +201,9 @@ public:
         streamPath.Base()->LastTxId = OperationId.GetTxId();
 
         context.SS->TabletCounters->Simple()[COUNTER_CDC_STREAMS_COUNT].Sub(1);
-        context.SS->ClearDescribePathCaches(streamPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, streamPath.Base()->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, streamPath.Base()->PathId);
         context.OnComplete.ActivateTx(OperationId);
 
         SetState(NextState());
@@ -441,10 +443,11 @@ public:
             streamPath.Base()->PathState = TPathElement::EPathState::EPathStateDrop;
             streamPath.Base()->DropTxId = OperationId.GetTxId();
             streamPath.Base()->LastTxId = OperationId.GetTxId();
-            
+
             context.SS->TabletCounters->Simple()[COUNTER_CDC_STREAMS_COUNT].Sub(1);
-            context.SS->ClearDescribePathCaches(streamPath.Base());
-            context.OnComplete.PublishToSchemeBoard(OperationId, streamPath.Base()->PathId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, streamPath.Base()->PathId);
         }
 
         const auto txType = DropSnapshot

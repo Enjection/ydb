@@ -76,10 +76,10 @@ public:
         context.SS->PersistCdcStream(db, oldStreamPathId);
         context.SS->CdcStreams[oldStreamPathId]->FinishAlter();
 
-        context.SS->ClearDescribePathCaches(oldStreamPath);
-        context.SS->ClearDescribePathCaches(newStreamPath);
-        context.OnComplete.PublishToSchemeBoard(OperationId, oldStreamPathId);
-        context.OnComplete.PublishToSchemeBoard(OperationId, newStreamPathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, oldStreamPathId);
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, newStreamPathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;
