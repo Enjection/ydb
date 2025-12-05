@@ -217,6 +217,12 @@ public:
         if (txState->CdcPathId != InvalidPathId) {
             TPathId srcPathId = txState->SourcePathId;
 
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "CopyTable CDC version sync starting"
+                       << ", srcPathId: " << srcPathId
+                       << ", cdcPathId: " << txState->CdcPathId
+                       << ", at schemeshard: " << context.SS->SelfTabletId());
+
             Y_ABORT_UNLESS(context.SS->PathsById.contains(srcPathId));
             auto srcPath = context.SS->PathsById.at(srcPathId);
 
@@ -227,9 +233,23 @@ public:
             ui64 oldSrcVersion = srcTable->AlterVersion;
             ui64 newSrcVersion = oldSrcVersion + 1;
 
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "CopyTable claiming source table version"
+                       << ", srcPathId: " << srcPathId
+                       << ", srcPath: " << srcPath->Name
+                       << ", oldVersion: " << oldSrcVersion
+                       << ", newVersion: " << newSrcVersion
+                       << ", at schemeshard: " << context.SS->SelfTabletId());
+
             auto srcClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
                 OperationId, srcPathId, oldSrcVersion, newSrcVersion,
                 TTxState::TxCopyTable, "Copy table source version bump");
+
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "CopyTable source table claim result"
+                       << ", srcPathId: " << srcPathId
+                       << ", claimResult: " << static_cast<int>(srcClaimResult)
+                       << ", at schemeshard: " << context.SS->SelfTabletId());
 
             if (srcClaimResult == EClaimResult::Claimed) {
                 srcTable->AlterVersion = newSrcVersion;
@@ -272,16 +292,47 @@ public:
             // If the source table is an index impl table, sync the parent index version
             // This ensures TIndexDescription::SchemaVersion matches the impl table version
             TPathId parentPathId = srcPath->ParentPathId;
+            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                       "CopyTable checking for impl table parent sync"
+                       << ", srcPathId: " << srcPathId
+                       << ", srcPath: " << srcPath->Name
+                       << ", parentPathId: " << parentPathId
+                       << ", effectiveVersion: " << effectiveVersion
+                       << ", at schemeshard: " << context.SS->SelfTabletId());
+
             if (parentPathId && context.SS->PathsById.contains(parentPathId)) {
                 auto parentPath = context.SS->PathsById.at(parentPathId);
+                LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                           "CopyTable parent path info"
+                           << ", parentPathId: " << parentPathId
+                           << ", parentName: " << parentPath->Name
+                           << ", isTableIndex: " << parentPath->IsTableIndex()
+                           << ", hasIndex: " << context.SS->Indexes.contains(parentPathId)
+                           << ", at schemeshard: " << context.SS->SelfTabletId());
+
                 if (parentPath->IsTableIndex() && context.SS->Indexes.contains(parentPathId)) {
                     auto parentIndex = context.SS->Indexes.at(parentPathId);
                     ui64 oldParentVersion = parentIndex->AlterVersion;
+
+                    LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                               "CopyTable IMPL TABLE DETECTED - syncing parent index"
+                               << ", implTablePathId: " << srcPathId
+                               << ", parentIndexPathId: " << parentPathId
+                               << ", implTableEffectiveVersion: " << effectiveVersion
+                               << ", oldParentIndexVersion: " << oldParentVersion
+                               << ", willSync: " << (effectiveVersion > oldParentVersion)
+                               << ", at schemeshard: " << context.SS->SelfTabletId());
 
                     if (effectiveVersion > oldParentVersion) {
                         auto parentClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
                             OperationId, parentPathId, oldParentVersion, effectiveVersion,
                             TTxState::TxCopyTable, "Copy table parent index sync for impl table");
+
+                        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                   "CopyTable parent index claim result"
+                                   << ", parentPathId: " << parentPathId
+                                   << ", claimResult: " << static_cast<int>(parentClaimResult)
+                                   << ", at schemeshard: " << context.SS->SelfTabletId());
 
                         // Handle both Claimed and Joined - with MAX tracking, a joining sibling
                         // might have updated the claimed version to a higher value
@@ -289,12 +340,26 @@ public:
                             ui64 effectiveIndexVersion = context.SS->VersionRegistry.GetEffectiveVersion(
                                 parentPathId, parentIndex->AlterVersion);
 
+                            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                       "CopyTable parent index effective version"
+                                       << ", parentPathId: " << parentPathId
+                                       << ", effectiveIndexVersion: " << effectiveIndexVersion
+                                       << ", currentIndexVersion: " << parentIndex->AlterVersion
+                                       << ", willUpdate: " << (effectiveIndexVersion > parentIndex->AlterVersion)
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
+
                             if (effectiveIndexVersion > parentIndex->AlterVersion) {
                                 parentIndex->AlterVersion = effectiveIndexVersion;
                                 context.SS->PersistTableIndexAlterVersion(db, parentPathId, parentIndex);
                                 context.SS->PersistPendingVersionChange(db,
                                     *context.SS->VersionRegistry.GetPendingChange(parentPathId));
                                 context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+
+                                LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                           "CopyTable SYNCED parent index version"
+                                           << ", parentPathId: " << parentPathId
+                                           << ", newIndexVersion: " << effectiveIndexVersion
+                                           << ", at schemeshard: " << context.SS->SelfTabletId());
                             }
                         }
                     }
