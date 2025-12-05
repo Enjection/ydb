@@ -1,7 +1,9 @@
 #pragma once
 
 #include <ydb/core/testlib/actors/test_runtime.h>
+#include <ydb/core/testlib/tablet_helpers.h>  // for ResolveTablet
 #include <ydb/core/tx/schemeshard/schemeshard_private.h>
+#include <ydb/core/tx/tx.h>  // for TTestTxConfig
 
 #include <util/generic/hash.h>
 #include <util/generic/vector.h>
@@ -57,10 +59,16 @@ public:
 
 public:
     explicit TOperationPartsBlocker(TTestActorRuntime& runtime,
-                                    std::function<bool(TTxId)> txFilter = {})
+                                    std::function<bool(TTxId)> txFilter = {},
+                                    ui64 schemeShardTabletId = TTestTxConfig::SchemeShard)
         : Runtime_(runtime)
         , TxFilter_(std::move(txFilter))
+        , SchemeShardTabletId_(schemeShardTabletId)
+        , SchemeShardActorId_(ResolveTablet(runtime, schemeShardTabletId))
     {
+        Cerr << "... TOperationPartsBlocker: resolved SchemeShard " << schemeShardTabletId
+             << " to ActorId " << SchemeShardActorId_ << Endl;
+
         // Use SetObserverFunc for better compatibility with TServer-based tests
         // This pattern is proven to work in ut_restore.cpp and other schemeshard tests
         PrevObserver_ = Runtime_.SetObserverFunc([this](TAutoPtr<IEventHandle>& ev) {
@@ -69,6 +77,11 @@ public:
             }
 
             if (ev->GetTypeRewrite() != TEvPrivate::TEvProgressOperation::EventType) {
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            // Filter by SchemeShard ActorId - only capture events sent to/from our SchemeShard
+            if (ev->Recipient != SchemeShardActorId_) {
                 return TTestActorRuntime::EEventAction::PROCESS;
             }
 
@@ -350,6 +363,8 @@ public:
 private:
     TTestActorRuntime& Runtime_;
     std::function<bool(TTxId)> TxFilter_;
+    ui64 SchemeShardTabletId_;
+    TActorId SchemeShardActorId_;  // Captured from first valid event
     TTestActorRuntime::TEventObserver PrevObserver_;
     THashMap<TTxId, TOperationParts> Operations_;
     bool Stopped_ = false;
