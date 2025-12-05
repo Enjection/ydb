@@ -350,38 +350,42 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
 
                     if (context.SS->Indexes.contains(indexPathId)) {
                         auto index = context.SS->Indexes[indexPathId];
-                        ui64 oldVersion = index->AlterVersion;
-                        ui64 newVersion = oldVersion + 1;
+                        ui64 oldIndexVersion = index->AlterVersion;
+                        // Sync index version to impl table version (after FinishAlter)
+                        ui64 tableVersion = table->AlterVersion;
 
-                        auto claimResult = context.SS->VersionRegistry.ClaimVersionChange(
-                            OperationId, indexPathId, oldVersion, newVersion,
-                            ETxType::TxIncrementalRestoreFinalize, "Restore finalization index sync");
+                        // Only sync if table version is higher
+                        if (tableVersion > oldIndexVersion) {
+                            auto claimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                                OperationId, indexPathId, oldIndexVersion, tableVersion,
+                                ETxType::TxIncrementalRestoreFinalize, "Restore finalization index sync to impl table");
 
-                        switch (claimResult) {
-                            case EClaimResult::Claimed:
-                                // First sibling to claim - update in-memory state and persist
-                                index->AlterVersion = newVersion;
-                                context.SS->PersistTableIndexAlterVersion(db, indexPathId, index);
-                                context.SS->PersistPendingVersionChange(db,
-                                    *context.SS->VersionRegistry.GetPendingChange(indexPathId));
-                                LOG_I("SyncIndexSchemaVersions: Index AlterVersion incremented from "
-                                      << oldVersion << " to " << newVersion << " (Claimed)");
-                                break;
+                            switch (claimResult) {
+                                case EClaimResult::Claimed:
+                                    // First sibling to claim - update in-memory state and persist
+                                    index->AlterVersion = tableVersion;
+                                    context.SS->PersistTableIndexAlterVersion(db, indexPathId, index);
+                                    context.SS->PersistPendingVersionChange(db,
+                                        *context.SS->VersionRegistry.GetPendingChange(indexPathId));
+                                    LOG_I("SyncIndexSchemaVersions: Index AlterVersion synced from "
+                                          << oldIndexVersion << " to " << tableVersion << " (Claimed)");
+                                    break;
 
-                            case EClaimResult::Joined:
-                                // Sibling already claimed - use effective version
-                                LOG_I("SyncIndexSchemaVersions: Index " << indexPathId
-                                      << " already claimed by sibling, effective version: "
-                                      << context.SS->VersionRegistry.GetEffectiveVersion(indexPathId, oldVersion));
-                                break;
+                                case EClaimResult::Joined:
+                                    // Sibling already claimed - use effective version
+                                    LOG_I("SyncIndexSchemaVersions: Index " << indexPathId
+                                          << " already claimed by sibling, effective version: "
+                                          << context.SS->VersionRegistry.GetEffectiveVersion(indexPathId, oldIndexVersion));
+                                    break;
 
-                            case EClaimResult::Conflict:
-                                // Different operation claimed - should not happen
-                                LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
-                                break;
+                                case EClaimResult::Conflict:
+                                    // Different operation claimed - should not happen
+                                    LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
+                                    break;
+                            }
+
+                            context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
                         }
-
-                        context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
                     }
                 }
             }

@@ -18,8 +18,9 @@ EClaimResult TVersionRegistry::ClaimVersionChange(
     if (auto* existing = PendingByPath_.FindPtr(pathId)) {
         if (existing->ClaimingTxId == txId) {
             // SIBLING CLAIM - join existing
-            // Take max version (in case siblings computed different targets)
-            existing->ClaimedVersion = Max(existing->ClaimedVersion, targetVersion);
+            // First sibling's claim is authoritative - do NOT update ClaimedVersion
+            // (subsequent siblings may read already-updated in-memory state and compute
+            // higher targets, but we want exactly one increment per TxId)
             existing->Contributors.insert(subTxId);
 
             return EClaimResult::Joined;

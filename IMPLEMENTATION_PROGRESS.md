@@ -77,8 +77,32 @@ void LoadChange(change);
 ### Sibling Convergence
 - Claims are at TxId level (not SubTxId)
 - Multiple siblings can join the same claim
-- Version converges to Max() of all sibling requests
+- **First sibling's claim is authoritative** - subsequent siblings join without updating ClaimedVersion
+- When `Claimed`: caller updates in-memory state and persists
+- When `Joined`: caller does NOT update (in-memory already correct from first sibling)
 - All siblings use GetEffectiveVersion() for consistent values
+
+### Version Increment Responsibility
+- **Who increments**: The first sibling to run HandleReply gets `Claimed` and increments `table->AlterVersion`
+- Subsequent siblings get `Joined` and skip the in-memory update (it's already done)
+- All siblings call `PersistTableAlterVersion()`, which persists the current in-memory value (same for all)
+
+## Bug Fixes (2025-12-05)
+
+### Fix 1: Remove Max() when joining claims
+- Removed `Max()` logic when joining an existing claim
+- The old logic caused ClaimedVersion to drift when second sibling read already-updated version
+- First sibling's target version is now authoritative for the entire TxId
+
+### Fix 2: Restore index-to-implTable version sync (CDC stream)
+- For index impl tables with CDC, index version must equal impl table version (not just increment)
+- Changed from `newIndexVersion = oldIndexVersion + 1` to `newIndexVersion = effectiveTableVersion`
+- This preserves the original sync semantics: `index->AlterVersion = implTable->AlterVersion`
+
+### Fix 3: Restore index-to-implTable version sync (incremental restore finalize)
+- Same issue in restore finalize - index was being incremented instead of synced to table version
+- Changed from `newVersion = oldVersion + 1` to `tableVersion = table->AlterVersion` (after FinishAlter)
+- Index version now correctly syncs to impl table version
 
 ## Next Steps (Phase 3)
 

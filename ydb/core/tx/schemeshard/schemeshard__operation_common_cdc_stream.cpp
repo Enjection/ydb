@@ -249,33 +249,37 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
             break;
     }
 
-    // For index impl tables that are part of continuous backup, also claim index version
+    // For index impl tables that are part of continuous backup, sync index version to impl table version
     if (isIndexImplTableCdc && context.SS->Indexes.contains(versionCtx.ParentPathId)) {
         auto index = context.SS->Indexes.at(versionCtx.ParentPathId);
         ui64 oldIndexVersion = index->AlterVersion;
-        ui64 newIndexVersion = oldIndexVersion + 1;
+        // Sync index version to impl table version (not just increment)
+        ui64 effectiveTableVersion = context.SS->VersionRegistry.GetEffectiveVersion(pathId, table->AlterVersion);
 
-        auto indexClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
-            OperationId, versionCtx.ParentPathId, oldIndexVersion, newIndexVersion,
-            txState->TxType, "CDC stream index version sync");
+        // Only sync if table version is higher
+        if (effectiveTableVersion > oldIndexVersion) {
+            auto indexClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                OperationId, versionCtx.ParentPathId, oldIndexVersion, effectiveTableVersion,
+                txState->TxType, "CDC stream index version sync to impl table");
 
-        switch (indexClaimResult) {
-            case EClaimResult::Claimed:
-                index->AlterVersion = newIndexVersion;
-                context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
-                context.SS->PersistPendingVersionChange(db,
-                    *context.SS->VersionRegistry.GetPendingChange(versionCtx.ParentPathId));
-                context.OnComplete.PublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
-                break;
+            switch (indexClaimResult) {
+                case EClaimResult::Claimed:
+                    index->AlterVersion = effectiveTableVersion;
+                    context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
+                    context.SS->PersistPendingVersionChange(db,
+                        *context.SS->VersionRegistry.GetPendingChange(versionCtx.ParentPathId));
+                    context.OnComplete.PublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
+                    break;
 
-            case EClaimResult::Joined:
-                // Sibling already handled
-                break;
+                case EClaimResult::Joined:
+                    // Sibling already handled
+                    break;
 
-            case EClaimResult::Conflict:
-                LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                           "Unexpected conflict for CDC index version: " << versionCtx.ParentPathId);
-                break;
+                case EClaimResult::Conflict:
+                    LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                               "Unexpected conflict for CDC index version: " << versionCtx.ParentPathId);
+                    break;
+            }
         }
     }
 
