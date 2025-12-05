@@ -325,28 +325,8 @@ public:
             // because its TIndexDescription embeds the index's SchemaVersion.
             // We must also bump the parent table's AlterVersion to ensure GeneralVersion increases,
             // otherwise the scheme board may ignore the publish if version didn't change.
-            // Use the version registry to track this bump for proper sibling coordination.
             if (childIndexSynced) {
-                ui64 currentTableVersion = srcTable->AlterVersion;
-                ui64 targetBumpVersion = currentTableVersion + 1;
-
-                auto bumpClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
-                    OperationId, srcPathId, currentTableVersion, targetBumpVersion,
-                    TTxState::TxCopyTable, "Copy table re-publish after child index sync");
-
-                if (bumpClaimResult != EClaimResult::Conflict) {
-                    ui64 effectiveBumpVersion = context.SS->VersionRegistry.GetEffectiveVersion(
-                        srcPathId, currentTableVersion);
-
-                    if (effectiveBumpVersion > srcTable->AlterVersion) {
-                        srcTable->AlterVersion = effectiveBumpVersion;
-                    }
-
-                    if (auto* pendingChange = context.SS->VersionRegistry.GetPendingChange(srcPathId)) {
-                        context.SS->PersistPendingVersionChange(db, *pendingChange);
-                    }
-                }
-
+                ++srcTable->AlterVersion;
                 context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
                 context.SS->ClearDescribePathCaches(srcPath);
                 context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
@@ -355,7 +335,6 @@ public:
                            "CopyTable re-publishing source table after child index sync"
                            << ", srcTablePathId: " << srcPathId
                            << ", newTableAlterVersion: " << srcTable->AlterVersion
-                           << ", claimResult: " << static_cast<int>(bumpClaimResult)
                            << ", at schemeshard: " << context.SS->SelfTabletId());
             }
 

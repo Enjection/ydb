@@ -1438,13 +1438,6 @@ void TSchemeShard::DescribeTableIndex(const TPathId& pathId, const TString& name
     entry.SetState(indexInfo->State);
     entry.SetSchemaVersion(indexInfo->AlterVersion);
 
-    LOG_DEBUG_S(TlsActivationContext->AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
-                "DescribeTableIndex setting SchemaVersion"
-                << ", indexPathId: " << pathId
-                << ", indexName: " << name
-                << ", schemaVersion: " << indexInfo->AlterVersion
-                << ", at schemeshard: " << SelfTabletId());
-
     for (const auto& keyName: indexInfo->IndexKeys) {
         *entry.MutableKeyColumnNames()->Add() = keyName;
     }
