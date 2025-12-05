@@ -181,48 +181,6 @@ public:
         context.SS->ClearDescribePathCaches(tablePath);
         context.OnComplete.PublishToSchemeBoard(OperationId, tablePath->PathId);
 
-        // If this is an index impl table, sync the parent index version to match
-        // This ensures TIndexDescription.SchemaVersion == implTable.AlterVersion
-        TPathId parentPathId = tablePath->ParentPathId;
-        if (parentPathId && context.SS->PathsById.contains(parentPathId)) {
-            auto parentPath = context.SS->PathsById.at(parentPathId);
-            if (parentPath->IsTableIndex() && context.SS->Indexes.contains(parentPathId)) {
-                auto parentIndex = context.SS->Indexes.at(parentPathId);
-                ui64 implTableVersion = tableInfo->AlterVersion;
-
-                // Only sync if impl table version is higher
-                if (implTableVersion > parentIndex->AlterVersion) {
-                    parentIndex->AlterVersion = implTableVersion;
-                    context.SS->PersistTableIndexAlterVersion(db, parentPathId, parentIndex);
-                    context.SS->ClearDescribePathCaches(parentPath);
-                    context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
-
-                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                DebugHint() << " synced parent index version"
-                                            << " indexPathId: " << parentPathId
-                                            << " to version: " << implTableVersion);
-
-                    // Also bump the grandparent (main table) to refresh scheme cache
-                    TPathId grandParentPathId = parentPath->ParentPathId;
-                    if (grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
-                        auto grandParentPath = context.SS->PathsById.at(grandParentPathId);
-                        if (grandParentPath->IsTable() && context.SS->Tables.contains(grandParentPathId)) {
-                            auto mainTable = context.SS->Tables.at(grandParentPathId);
-                            mainTable->AlterVersion += 1;
-                            context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
-                            context.SS->ClearDescribePathCaches(grandParentPath);
-                            context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
-
-                            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                        DebugHint() << " bumped main table version"
-                                                    << " mainTablePathId: " << grandParentPathId
-                                                    << " to version: " << mainTable->AlterVersion);
-                        }
-                    }
-                }
-            }
-        }
-
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;
     }

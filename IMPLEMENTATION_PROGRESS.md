@@ -55,8 +55,7 @@
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation_copy_table.cpp` - MODIFY (migrated to use registry, added parent index sync)
 - [x] `ydb/core/tx/schemeshard/schemeshard_cdc_stream_common.h` - MODIFY (removed old function declarations)
 - [x] `ydb/core/tx/schemeshard/ya.make` - MODIFY (added new files)
-- [x] `ydb/core/tx/schemeshard/schemeshard__operation_initiate_build_index.cpp` - MODIFY (added parent index sync)
-- [x] `ydb/core/tx/schemeshard/schemeshard__operation_finalize_build_index.cpp` - MODIFY (added parent index sync)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_alter_table.cpp` - MODIFY (added parent index sync for impl tables)
 
 ## Key Implementation Details
 
@@ -129,22 +128,30 @@ void LoadChange(change);
   - Also bump the main table (grandparent) to refresh scheme cache
 - This ensures TIndexDescription::SchemaVersion == implTable->AlterVersion
 
-### Fix 7: Sync parent index version during InitializeBuildIndex and FinalizeBuildIndex
-- **Root cause**: When creating a table with index, these operations bump impl table version without syncing the index:
-  - InitializeBuildIndex: bumps impl table AlterVersion (1→2)
-  - FinalizeBuildIndex: bumps impl table AlterVersion (2→3)
-- But the parent index's AlterVersion was never synced, so after creation:
-  - Index AlterVersion = 2 (from CreateTableIndex completion)
-  - Impl table AlterVersion = 3 (from initiate + finalize bumps)
-- **Error observed**: "schema version mismatch during metadata loading for: indexImplTable expected 1 got 2"
-  - This occurs because TIndexDescription.SchemaVersion (from index) != impl table's actual version
-- **The fix**: In both InitializeBuildIndex and FinalizeBuildIndex HandleReply:
-  - After bumping impl table version, check if parent is an index
-  - If so, sync parent index's AlterVersion to match the impl table version
+### Fix 7: REVERTED - InitializeBuildIndex/FinalizeBuildIndex fixes were wrong
+- **Problem discovered**: These operations target the MAIN TABLE, not the impl table!
+  - `InitializeBuildIndex` uses `tablePathId` = main table
+  - `FinalizeBuildIndex` uses `tablePathId` = main table
+- The fix that checked `if (parent.IsTableIndex())` would NEVER execute because main table's parent is a directory
+- **Action taken**: Reverted these ineffective fixes
+- **Files reverted**:
+  - `schemeshard__operation_initiate_build_index.cpp` - Removed ineffective code
+  - `schemeshard__operation_finalize_build_index.cpp` - Removed ineffective code
+
+### Fix 8: Sync parent index version in TAlterTable for impl tables
+- **Root cause**: When AlterTable runs on an impl table (including FinalizeBuildIndexImplTable during ApplyBuildIndex), it bumps the impl table version but doesn't sync the parent index
+- ApplyBuildIndex flow:
+  1. FinalizeBuildIndexMainTable - bumps main table version
+  2. AlterTableIndex - changes index state to Ready
+  3. FinalizeBuildIndexImplTable (via TAlterTable) - bumps impl table version ← PROBLEM
+- The impl table version bump wasn't synced to parent index, causing version mismatch
+- **Error**: "schema version mismatch during metadata loading for: indexImplTable expected 1 got 2"
+- **The fix**: In TAlterTable::TPropose::HandleReply (schemeshard__operation_alter_table.cpp):
+  - After `table->FinishAlter()`, check if parent is an index
+  - If so, sync parent index's AlterVersion to match the impl table version using TVersionRegistry
   - Also bump the grandparent (main table) to refresh scheme cache
 - **Files modified**:
-  - `schemeshard__operation_initiate_build_index.cpp` - Added parent index sync
-  - `schemeshard__operation_finalize_build_index.cpp` - Added parent index sync
+  - `schemeshard__operation_alter_table.cpp` - Added parent index sync after FinishAlter()
 
 ## Next Steps (Phase 3)
 

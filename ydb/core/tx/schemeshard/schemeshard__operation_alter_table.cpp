@@ -2,6 +2,7 @@
 #include "schemeshard__operation_part.h"
 #include "schemeshard_impl.h"
 #include "schemeshard_utils.h"  // for TransactionTemplate
+#include "schemeshard_version_registry.h"
 
 #include <ydb/core/base/auth.h>
 #include <ydb/core/base/hive.h>
@@ -384,6 +385,68 @@ public:
 
         TTableInfo::TPtr table = context.SS->Tables.at(pathId);
         table->FinishAlter();
+
+        // For index impl tables, sync the parent index version to match the impl table version
+        // This ensures TIndexDescription::SchemaVersion == implTable->AlterVersion invariant
+        const TPathId& parentPathId = path->ParentPathId;
+        if (parentPathId && context.SS->PathsById.contains(parentPathId)) {
+            TPathElement::TPtr parent = context.SS->PathsById.at(parentPathId);
+            if (parent->IsTableIndex() && context.SS->Indexes.contains(parentPathId)) {
+                auto index = context.SS->Indexes.at(parentPathId);
+                ui64 oldIndexVersion = index->AlterVersion;
+                ui64 implTableVersion = table->AlterVersion;
+
+                // Only sync if impl table version is higher
+                if (implTableVersion > oldIndexVersion) {
+                    auto indexClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                        OperationId, parentPathId, oldIndexVersion, implTableVersion,
+                        txState->TxType, "AlterTable impl table - sync parent index");
+
+                    if (indexClaimResult == EClaimResult::Claimed) {
+                        index->AlterVersion = implTableVersion;
+                        context.SS->PersistTableIndexAlterVersion(db, parentPathId, index);
+                        context.SS->PersistPendingVersionChange(db,
+                            *context.SS->VersionRegistry.GetPendingChange(parentPathId));
+                        context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+
+                        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                    "Synced parent index version for impl table alter"
+                                    << ", implTablePathId: " << pathId
+                                    << ", indexPathId: " << parentPathId
+                                    << ", newVersion: " << implTableVersion);
+
+                        // Also bump grandparent (main table) to refresh scheme cache
+                        const TPathId& grandParentPathId = parent->ParentPathId;
+                        if (grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
+                            TPathElement::TPtr grandParent = context.SS->PathsById.at(grandParentPathId);
+                            if (grandParent->IsTable() && context.SS->Tables.contains(grandParentPathId)) {
+                                auto mainTable = context.SS->Tables.at(grandParentPathId);
+                                ui64 oldMainVersion = mainTable->AlterVersion;
+                                ui64 newMainVersion = oldMainVersion + 1;
+
+                                auto mainClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                                    OperationId, grandParentPathId, oldMainVersion, newMainVersion,
+                                    txState->TxType, "AlterTable impl table - bump main table");
+
+                                if (mainClaimResult == EClaimResult::Claimed) {
+                                    mainTable->AlterVersion = newMainVersion;
+                                    context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
+                                    context.SS->PersistPendingVersionChange(db,
+                                        *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
+                                    context.SS->ClearDescribePathCaches(grandParent);
+                                    context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+
+                                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                                "Bumped main table version for impl table alter"
+                                                << ", mainTablePathId: " << grandParentPathId
+                                                << ", newVersion: " << newMainVersion);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if (!table->IsAsyncReplica()) {
             path->SetAsyncReplica(false);
