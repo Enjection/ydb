@@ -117,6 +117,16 @@ void LoadChange(change);
 - Now: when syncing index version, also bump the parent table's AlterVersion
 - This forces scheme cache to refresh and pick up the new index SchemaVersion
 
+### Fix 6: Sync parent index version in copy table for impl tables
+- **Root cause**: When copying an index impl table with CDC, the copy table operation bumps the impl table version
+- But the parent INDEX version (TTableIndexInfo::AlterVersion) was NOT synced
+- KQP compares TIndexDescription::SchemaVersion (from parent table metadata) with impl table's actual version
+- If they don't match: "schema version mismatch during metadata loading for: /path/to/indexImplTable"
+- **The fix**: In TCopyTable::TPropose::HandleReply, when the source is an impl table:
+  - Sync the parent index version to match the impl table version
+  - Also bump the main table (grandparent) to refresh scheme cache
+- This ensures TIndexDescription::SchemaVersion == implTable->AlterVersion
+
 ## Next Steps (Phase 3)
 
 1. Build and test the changes

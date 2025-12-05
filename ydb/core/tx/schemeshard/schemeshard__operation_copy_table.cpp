@@ -269,6 +269,55 @@ public:
                 }
             }
 
+            // If the source table is an index impl table, sync the parent index version
+            // This ensures TIndexDescription::SchemaVersion matches the impl table version
+            TPathId parentPathId = srcPath->ParentPathId;
+            if (parentPathId && context.SS->PathsById.contains(parentPathId)) {
+                auto parentPath = context.SS->PathsById.at(parentPathId);
+                if (parentPath->IsTableIndex() && context.SS->Indexes.contains(parentPathId)) {
+                    auto parentIndex = context.SS->Indexes.at(parentPathId);
+                    ui64 oldParentVersion = parentIndex->AlterVersion;
+
+                    if (effectiveVersion > oldParentVersion) {
+                        auto parentClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                            OperationId, parentPathId, oldParentVersion, effectiveVersion,
+                            TTxState::TxCopyTable, "Copy table parent index sync for impl table");
+
+                        if (parentClaimResult == EClaimResult::Claimed) {
+                            parentIndex->AlterVersion = effectiveVersion;
+                            context.SS->PersistTableIndexAlterVersion(db, parentPathId, parentIndex);
+                            context.SS->PersistPendingVersionChange(db,
+                                *context.SS->VersionRegistry.GetPendingChange(parentPathId));
+                            context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+                        }
+                    }
+
+                    // Also bump the main table (grandparent) to refresh scheme cache
+                    TPathId grandParentPathId = parentPath->ParentPathId;
+                    if (grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
+                        auto grandParentPath = context.SS->PathsById.at(grandParentPathId);
+                        if (grandParentPath->IsTable() && context.SS->Tables.contains(grandParentPathId)) {
+                            auto mainTable = context.SS->Tables.at(grandParentPathId);
+                            ui64 oldMainVersion = mainTable->AlterVersion;
+                            ui64 newMainVersion = oldMainVersion + 1;
+
+                            auto mainClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                                OperationId, grandParentPathId, oldMainVersion, newMainVersion,
+                                TTxState::TxCopyTable, "Copy table main table bump for impl table");
+
+                            if (mainClaimResult == EClaimResult::Claimed) {
+                                mainTable->AlterVersion = newMainVersion;
+                                context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
+                                context.SS->PersistPendingVersionChange(db,
+                                    *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
+                            }
+                            context.SS->ClearDescribePathCaches(grandParentPath);
+                            context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+                        }
+                    }
+                }
+            }
+
             context.SS->ClearDescribePathCaches(srcPath);
             context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
         }
