@@ -52,9 +52,11 @@
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation.cpp` - MODIFY (added rollback in AbortOperationPropose)
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation_incremental_restore_finalize.cpp` - MODIFY (migrated to use registry)
 - [x] `ydb/core/tx/schemeshard/schemeshard__operation_common_cdc_stream.cpp` - MODIFY (migrated to use registry, removed old functions)
-- [x] `ydb/core/tx/schemeshard/schemeshard__operation_copy_table.cpp` - MODIFY (migrated to use registry)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_copy_table.cpp` - MODIFY (migrated to use registry, added parent index sync)
 - [x] `ydb/core/tx/schemeshard/schemeshard_cdc_stream_common.h` - MODIFY (removed old function declarations)
 - [x] `ydb/core/tx/schemeshard/ya.make` - MODIFY (added new files)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_initiate_build_index.cpp` - MODIFY (added parent index sync)
+- [x] `ydb/core/tx/schemeshard/schemeshard__operation_finalize_build_index.cpp` - MODIFY (added parent index sync)
 
 ## Key Implementation Details
 
@@ -126,6 +128,23 @@ void LoadChange(change);
   - Sync the parent index version to match the impl table version
   - Also bump the main table (grandparent) to refresh scheme cache
 - This ensures TIndexDescription::SchemaVersion == implTable->AlterVersion
+
+### Fix 7: Sync parent index version during InitializeBuildIndex and FinalizeBuildIndex
+- **Root cause**: When creating a table with index, these operations bump impl table version without syncing the index:
+  - InitializeBuildIndex: bumps impl table AlterVersion (1→2)
+  - FinalizeBuildIndex: bumps impl table AlterVersion (2→3)
+- But the parent index's AlterVersion was never synced, so after creation:
+  - Index AlterVersion = 2 (from CreateTableIndex completion)
+  - Impl table AlterVersion = 3 (from initiate + finalize bumps)
+- **Error observed**: "schema version mismatch during metadata loading for: indexImplTable expected 1 got 2"
+  - This occurs because TIndexDescription.SchemaVersion (from index) != impl table's actual version
+- **The fix**: In both InitializeBuildIndex and FinalizeBuildIndex HandleReply:
+  - After bumping impl table version, check if parent is an index
+  - If so, sync parent index's AlterVersion to match the impl table version
+  - Also bump the grandparent (main table) to refresh scheme cache
+- **Files modified**:
+  - `schemeshard__operation_initiate_build_index.cpp` - Added parent index sync
+  - `schemeshard__operation_finalize_build_index.cpp` - Added parent index sync
 
 ## Next Steps (Phase 3)
 
