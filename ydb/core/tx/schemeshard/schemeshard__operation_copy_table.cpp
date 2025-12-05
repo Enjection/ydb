@@ -413,7 +413,9 @@ public:
                         }
                     }
 
-                    // Also bump the main table (grandparent) to refresh scheme cache
+                    // ALWAYS bump and re-publish the main table (grandparent) when copying impl table
+                    // This ensures TIndexDescription.SchemaVersion is refreshed in scheme cache
+                    // even if no index sync was needed (e.g., index already at correct version)
                     TPathId grandParentPathId = parentPath->ParentPathId;
                     if (grandParentPathId && context.SS->PathsById.contains(grandParentPathId)) {
                         auto grandParentPath = context.SS->PathsById.at(grandParentPathId);
@@ -440,6 +442,12 @@ public:
                             }
                             context.SS->ClearDescribePathCaches(grandParentPath);
                             context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+
+                            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                       "CopyTable re-publishing grandparent (main table) for impl table"
+                                       << ", implTablePathId: " << srcPathId
+                                       << ", grandParentPathId: " << grandParentPathId
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
                         }
                     }
                 }
