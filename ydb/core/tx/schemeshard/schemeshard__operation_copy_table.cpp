@@ -337,7 +337,8 @@ public:
                 // and KQP queries - the scheme cache might still have stale TIndexDescription
                 // with old SchemaVersion even after we publish the correct version.
                 TTableId tableId(srcPathId.OwnerId, srcPathId.LocalPathId);
-                TString tablePath = srcPath.PathString();
+                TPath srcTPath = TPath::Init(srcPathId, context.SS);
+                TString tablePath = srcTPath.PathString();
                 context.OnComplete.Send(MakeSchemeCacheID(), 
                     new TEvTxProxySchemeCache::TEvInvalidateTable(tableId, tablePath, context.SS->SelfId()));
 
