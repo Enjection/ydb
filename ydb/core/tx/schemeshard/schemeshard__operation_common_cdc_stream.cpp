@@ -315,8 +315,9 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
 
     context.SS->PersistTableAlterVersion(db, pathId, table);
     context.SS->ClearDescribePathCaches(path);
-    // Defer publish until all operation parts complete
-    context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
+    // Table path should publish immediately to avoid race with concurrent user operations
+    // Only index paths need deferred publishing for version convergence
+    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
 
     context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
     return true;
