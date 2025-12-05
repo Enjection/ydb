@@ -1059,12 +1059,15 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                 if (ss->PathsById.contains(pathId)) {
                     pathsToPublish.push_back(pathId);
 
+                    // Clear caches now that we're publishing with final versions
+                    auto path = TPath::Init(pathId, ss);
+                    ss->ClearDescribePathCaches(path);
+
                     LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                 "Deferred publish path"
                                     << ", txId: " << txId
                                     << ", pathId: " << pathId
-                                    << ", version: " << ss->GetPathVersion(
-                                        TPath::Init(pathId, ss)).GetGeneralVersion());
+                                    << ", version: " << ss->GetPathVersion(path).GetGeneralVersion());
                 }
             }
 

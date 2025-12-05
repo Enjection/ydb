@@ -314,10 +314,12 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     }
 
     context.SS->PersistTableAlterVersion(db, pathId, table);
-    context.SS->ClearDescribePathCaches(path);
-    // Table path should publish immediately to avoid race with concurrent user operations
-    // Only index paths need deferred publishing for version convergence
-    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+    // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing
+    // Clearing the cache while deferring publish creates a race window where concurrent operations
+    // get stale data from scheme board. The cache will be cleared when PublishToSchemeBoard is
+    // called by DoDoneTransactions after all operation parts complete.
+    // Defer publish until all operation parts complete for version convergence
+    context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
     context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
     return true;
