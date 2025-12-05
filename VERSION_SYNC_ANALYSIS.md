@@ -166,3 +166,28 @@ Files modified:
 - `schemeshard__operation_copy_table.cpp` - Handle Joined case with GetEffectiveVersion
 - `schemeshard__operation_common_cdc_stream.cpp` - Handle Joined case with GetEffectiveVersion
 - `schemeshard__operation_incremental_restore_finalize.cpp` - Handle Joined case with GetEffectiveVersion
+
+## Critical Fix: Parent Table Re-publish After Child Index Sync
+
+**Problem:** When CopyTable syncs child indexes of the main table to a new version:
+- The child index's AlterVersion is updated and published to scheme board
+- BUT the parent (main) table's scheme cache entry is NOT invalidated
+- The parent table's TIndexDescription embeds the index's SchemaVersion
+- KQP loads stale parent metadata with old TIndexDescription.SchemaVersion
+- KQP then loads fresh impl table metadata with new SchemaVersion
+- Result: "schema version mismatch" error (expected 1 got 2)
+
+**Example Failure Flow:**
+1. CreateIndexedTable: index.AlterVersion = 1, implTable.AlterVersion = 1
+2. Main table metadata cached with TIndexDescription.SchemaVersion = 1
+3. Backup CopyTable for main table: bumps index to version 2
+4. Child index published but parent table NOT re-published
+5. Backup CopyTable for impl table: bumps implTable to version 2
+6. KQP query loads parent table from cache: sees TIndexDescription.SchemaVersion = 1
+7. KQP loads impl table fresh: sees SchemaVersion = 2
+8. MISMATCH: expected 1 got 2
+
+**Solution:** In `schemeshard__operation_copy_table.cpp`:
+- After syncing child indexes, call `ClearDescribePathCaches(srcPath)` and `PublishToSchemeBoard(srcPathId)`
+- This invalidates the parent table's scheme cache entry
+- KQP will reload the parent table with updated TIndexDescription.SchemaVersion

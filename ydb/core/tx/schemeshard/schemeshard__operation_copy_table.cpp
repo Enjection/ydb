@@ -262,6 +262,7 @@ public:
             // Sync child indexes to match the new version using registry
             ui64 effectiveVersion = context.SS->VersionRegistry.GetEffectiveVersion(srcPathId, srcTable->AlterVersion);
 
+            bool childIndexSynced = false;
             for (const auto& [childName, childPathId] : srcPath->GetChildren()) {
                 auto childPath = context.SS->PathsById.at(childPathId);
                 if (!childPath->IsTableIndex() || childPath->Dropped()) {
@@ -284,9 +285,30 @@ public:
                             context.SS->PersistPendingVersionChange(db,
                                 *context.SS->VersionRegistry.GetPendingChange(childPathId));
                             context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                            childIndexSynced = true;
+
+                            LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                       "CopyTable SYNCED child index version"
+                                       << ", srcTablePathId: " << srcPathId
+                                       << ", childIndexPathId: " << childPathId
+                                       << ", childIndexName: " << childName
+                                       << ", newVersion: " << effectiveVersion
+                                       << ", at schemeshard: " << context.SS->SelfTabletId());
                         }
                     }
                 }
+            }
+
+            // If any child index was synced, we need to re-publish the parent table
+            // because its TIndexDescription embeds the index's SchemaVersion
+            if (childIndexSynced) {
+                context.SS->ClearDescribePathCaches(srcPath);
+                context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
+
+                LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                           "CopyTable re-publishing source table after child index sync"
+                           << ", srcTablePathId: " << srcPathId
+                           << ", at schemeshard: " << context.SS->SelfTabletId());
             }
 
             // If the source table is an index impl table, sync the parent index version
