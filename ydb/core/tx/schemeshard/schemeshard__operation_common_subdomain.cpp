@@ -342,13 +342,15 @@ bool TPropose::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOperationCon
         auto parentDir = context.SS->PathsById.at(path->ParentPathId);
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
     }
 
     context.OnComplete.UpdateTenant(pathId);
-    context.SS->ClearDescribePathCaches(path);
-    context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+    // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+    // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+    context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
     if (txState->NeedSyncHive) {
         context.SS->ChangeTxState(db, OperationId, TTxState::SyncHive);
