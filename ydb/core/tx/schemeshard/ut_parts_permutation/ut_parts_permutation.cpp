@@ -785,4 +785,181 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         }, 24);  // Test up to 24 permutations (4!)
     }
 
+    /**
+     * Reproduction test for the failing permutation [3, 0, 1, 2].
+     * Error: schema version mismatch during metadata loading for: /Root/Table2/idx2 expected 3 got 4
+     */
+    Y_UNIT_TEST(REPRO_MultiTableRestore_Permutation_3_0_1_2) {
+        using namespace NDataShard;
+        using namespace Tests;
+
+        // The specific failing permutation
+        const TVector<ui32> permutation = {3, 0, 1, 2};
+
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+            .SetEnableBackupService(true)
+            .SetEnableRealSystemViewPaths(false)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        // Keep full logging for debugging
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_DEBUG);
+
+        InitRoot(server, edgeActor);
+
+        // Create first table with index
+        CreateShardedTable(server, edgeActor, "/Root", "Table1",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"val1", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"idx1", {"val1"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Create second table with different index
+        CreateShardedTable(server, edgeActor, "/Root", "Table2",
+            TShardedTableOptions()
+                .Columns({
+                    {"key", "Uint32", true, false},
+                    {"val2", "Uint32", false, false}
+                })
+                .Indexes({
+                    {"idx2", {"val2"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                }));
+
+        // Insert data into both tables
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, val1) VALUES (1, 100), (2, 200);
+            UPSERT INTO `/Root/Table2` (key, val2) VALUES (1, 1000), (2, 2000);
+        )");
+
+        // Create backup collection with both tables
+        ExecSQL(server, edgeActor, R"(
+            CREATE BACKUP COLLECTION `MultiTableCollection`
+              ( TABLE `/Root/Table1`
+              , TABLE `/Root/Table2`
+              )
+            WITH
+              ( STORAGE = 'cluster'
+              , INCREMENTAL_BACKUP_ENABLED = 'true'
+              );
+        )", false);
+
+        // Full backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection`;)", false);
+        SimulateSleep(server, TDuration::Seconds(1));
+
+        // Modify both tables
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, val1) VALUES (3, 300);
+            UPSERT INTO `/Root/Table2` (key, val2) VALUES (3, 3000);
+        )");
+
+        // Incremental backup
+        ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection` INCREMENTAL;)", false);
+        SimulateSleep(server, TDuration::Seconds(5));
+
+        // Capture expected states
+        auto expected1 = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+        )");
+        auto expected2 = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+        )");
+
+        Cerr << "Expected Table1: " << expected1 << Endl;
+        Cerr << "Expected Table2: " << expected2 << Endl;
+
+        // Drop both tables
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table1`;)", false);
+        ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
+
+        // NOW: Set up parts blocker BEFORE triggering restore
+        TOperationPartsBlocker blocker(runtime);
+
+        // Trigger restore (async - we'll control the parts)
+        ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
+
+        // Wait for any operation to be captured first
+        runtime.SimulateSleep(TDuration::Seconds(2));
+
+        // Find the operation with most parts (this is the main restore operation)
+        auto txIds = blocker.GetCapturedTxIds();
+        Cerr << "Captured " << txIds.size() << " operations" << Endl;
+        for (auto txId : txIds) {
+            Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts: ";
+            auto partIds = blocker.GetPartIds(txId);
+            for (auto partId : partIds) {
+                Cerr << partId << " ";
+            }
+            Cerr << Endl;
+        }
+
+        // Release parts for operations that have the expected part count
+        bool foundMatchingOp = false;
+        for (auto txId : txIds) {
+            size_t partCount = blocker.GetPartCount(txId);
+            if (partCount >= permutation.size()) {
+                Cerr << "Releasing parts for txId " << txId << " in order: "
+                     << TPartsPermutationIterator::FormatPermutation(permutation) << Endl;
+                // Use permutation as indices into captured parts, not as part IDs
+                blocker.ReleaseByPermutationIndices(txId, permutation);
+                // Release any remaining parts that weren't in the permutation
+                blocker.ReleaseAll(txId);
+                foundMatchingOp = true;
+            } else {
+                // Release other operations normally
+                blocker.ReleaseAll(txId);
+            }
+        }
+
+        if (!foundMatchingOp && !txIds.empty()) {
+            Cerr << "WARNING: No operation with exactly " << permutation.size()
+                 << " parts found, releasing all normally" << Endl;
+        }
+
+        // Stop blocking and release any remaining
+        blocker.Stop();
+        blocker.ReleaseAllOperations();
+
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Verify both tables and indexes
+        auto actual1 = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+        )");
+        auto actual2 = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+        )");
+
+        Cerr << "Actual Table1: " << actual1 << Endl;
+        Cerr << "Actual Table2: " << actual2 << Endl;
+
+        UNIT_ASSERT_VALUES_EQUAL(expected1, actual1);
+        UNIT_ASSERT_VALUES_EQUAL(expected2, actual2);
+
+        // Verify indexes work
+        auto idx1Query = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key FROM `/Root/Table1` VIEW idx1 WHERE val1 = 300
+        )");
+        UNIT_ASSERT_C(idx1Query.find("uint32_value: 3") != TString::npos,
+            "Index idx1 should work with permutation " +
+            TPartsPermutationIterator::FormatPermutation(permutation));
+
+        auto idx2Query = KqpSimpleExecSuccess(runtime, R"(
+            SELECT key FROM `/Root/Table2` VIEW idx2 WHERE val2 = 3000
+        )");
+        UNIT_ASSERT_C(idx2Query.find("uint32_value: 3") != TString::npos,
+            "Index idx2 should work with permutation " +
+            TPartsPermutationIterator::FormatPermutation(permutation));
+    }
+
 } // Y_UNIT_TEST_SUITE
