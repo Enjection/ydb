@@ -709,7 +709,9 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
 
             // NOW: Set up parts blocker BEFORE triggering restore
-            TOperationPartsBlocker blocker(runtime);
+            // Use ChangeStateStorage to get the correct SchemeShard tablet ID for TServer
+            ui64 schemeShardTabletId = Tests::ChangeStateStorage(Tests::SchemeRoot, server->GetSettings().Domain);
+            TOperationPartsBlocker blocker(runtime, {}, schemeShardTabletId);
 
             // Trigger restore (async - we'll control the parts)
             ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
