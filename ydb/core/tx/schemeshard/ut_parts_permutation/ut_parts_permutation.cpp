@@ -70,6 +70,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         blocker.ReleaseByPermutationIndices(txId, {1, 0});
         // Release any remaining parts that weren't in the permutation
         blocker.ReleaseAll(txId);
+        // Stop blocking to allow subsequent TEvProgressOperation events through
+        blocker.Stop();
 
         // Wait for completion
         env.TestWaitNotification(runtime, txId);
@@ -119,6 +121,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             blocker.ReleaseByPermutationIndices(txId, permutation);
             // Release any remaining parts that weren't in the permutation
             blocker.ReleaseAll(txId);
+            // Stop blocking to allow subsequent TEvProgressOperation events through
+            blocker.Stop();
             env.TestWaitNotification(runtime, txId);
 
             // Verify
@@ -167,6 +171,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             blocker.ReleaseByPermutationIndices(txId, permutation);
             // Release any remaining parts that weren't in the permutation
             blocker.ReleaseAll(txId);
+            // Stop blocking to allow subsequent TEvProgressOperation events through
+            blocker.Stop();
             env.TestWaitNotification(runtime, txId);
 
             TestDescribeResult(DescribePath(runtime, "/MyRoot/TestTable"), {
@@ -243,6 +249,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             blocker.ReleaseByPermutationIndices(txId, permutation);
             // Release any remaining parts that weren't in the permutation
             blocker.ReleaseAll(txId);
+            // Stop blocking to allow subsequent TEvProgressOperation events through
+            blocker.Stop();
             env.TestWaitNotification(runtime, txId);
 
             // Verify both tables exist with correct indexes
@@ -307,6 +315,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         blocker.ReleaseByPermutationIndices(txId, failingPermutation);
         // Release any remaining parts that weren't in the permutation
         blocker.ReleaseAll(txId);
+        // Stop blocking to allow subsequent TEvProgressOperation events through
+        blocker.Stop();
         env.TestWaitNotification(runtime, txId);
 
         TestDescribeResult(DescribePath(runtime, "/MyRoot/TestTable"), {
@@ -413,6 +423,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
 
         // Release all parts to complete the restore
         blocker.ReleaseAll(txId);
+        // Stop blocking to allow subsequent TEvProgressOperation events through
+        blocker.Stop();
         env.TestWaitNotification(runtime, txId);
 
         // Verify restore worked
