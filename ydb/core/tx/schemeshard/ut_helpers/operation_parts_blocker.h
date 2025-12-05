@@ -43,7 +43,7 @@ public:
     using TTxId = ui64;
 
     struct TCapturedPart {
-        TEvPrivate::TEvProgressOperation::TPtr Event;
+        THolder<IEventHandle> Event;
         TPartId PartId;
         bool Released = false;
     };
@@ -60,11 +60,42 @@ public:
                                     std::function<bool(TTxId)> txFilter = {})
         : Runtime_(runtime)
         , TxFilter_(std::move(txFilter))
-        , Observer_(Runtime_.AddObserver<TEvPrivate::TEvProgressOperation>(
-            [this](TEvPrivate::TEvProgressOperation::TPtr& ev) {
-                OnProgressOperation(ev);
-            }))
-    {}
+    {
+        // Use SetObserverFunc for better compatibility with TServer-based tests
+        // This pattern is proven to work in ut_restore.cpp and other schemeshard tests
+        PrevObserver_ = Runtime_.SetObserverFunc([this](TAutoPtr<IEventHandle>& ev) {
+            if (Stopped_) {
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            if (ev->GetTypeRewrite() != TEvPrivate::TEvProgressOperation::EventType) {
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            auto* msg = ev->Get<TEvPrivate::TEvProgressOperation>();
+            TTxId txId = msg->TxId;
+            TPartId partId = msg->TxPartId;
+
+            // Apply filter if set
+            if (TxFilter_ && !TxFilter_(txId)) {
+                return TTestActorRuntime::EEventAction::PROCESS;
+            }
+
+            Cerr << "... blocking TEvProgressOperation txId=" << txId
+                 << " partId=" << partId << Endl;
+
+            auto& op = Operations_[txId];
+            size_t idx = op.Parts.size();
+            op.Parts.push_back({
+                THolder<IEventHandle>(ev.Release()),
+                partId,
+                false
+            });
+            op.PartIdToIndex[partId] = idx;
+
+            return TTestActorRuntime::EEventAction::DROP;
+        });
+    }
 
     ~TOperationPartsBlocker() {
         Stop();
@@ -73,7 +104,7 @@ public:
     // Stop capturing new events (already captured remain)
     void Stop() {
         if (!Stopped_) {
-            Observer_.Remove();
+            Runtime_.SetObserverFunc(PrevObserver_);
             Stopped_ = true;
         }
     }
@@ -170,10 +201,10 @@ public:
         Cerr << "... releasing TEvProgressOperation txId=" << txId
              << " partId=" << partId << Endl;
 
-        auto& ev = captured.Event;
+        IEventHandle* ev = captured.Event.Release();
         ui32 nodeId = ev->GetRecipientRewrite().NodeId();
         ui32 nodeIdx = nodeId - Runtime_.GetFirstNodeId();
-        Runtime_.Send(ev.Release(), nodeIdx, /* viaActorSystem */ true);
+        Runtime_.Send(ev, nodeIdx, /* viaActorSystem */ true);
         captured.Released = true;
     }
 
@@ -197,10 +228,10 @@ public:
                 Cerr << "... releasing TEvProgressOperation txId=" << txId
                      << " partId=" << captured.PartId << " (ReleaseAll)" << Endl;
 
-                auto& ev = captured.Event;
+                IEventHandle* ev = captured.Event.Release();
                 ui32 nodeId = ev->GetRecipientRewrite().NodeId();
                 ui32 nodeIdx = nodeId - Runtime_.GetFirstNodeId();
-                Runtime_.Send(ev.Release(), nodeIdx, /* viaActorSystem */ true);
+                Runtime_.Send(ev, nodeIdx, /* viaActorSystem */ true);
                 captured.Released = true;
             }
         }
@@ -247,32 +278,9 @@ public:
     }
 
 private:
-    void OnProgressOperation(TEvPrivate::TEvProgressOperation::TPtr& ev) {
-        if (Stopped_) {
-            return;
-        }
-
-        TTxId txId = ev->Get()->TxId;
-        TPartId partId = ev->Get()->TxPartId;
-
-        // Apply filter if set
-        if (TxFilter_ && !TxFilter_(txId)) {
-            return;
-        }
-
-        Cerr << "... blocking TEvProgressOperation txId=" << txId
-             << " partId=" << partId << Endl;
-
-        auto& op = Operations_[txId];
-        size_t idx = op.Parts.size();
-        op.Parts.push_back({std::move(ev), partId, false});
-        op.PartIdToIndex[partId] = idx;
-    }
-
-private:
     TTestActorRuntime& Runtime_;
     std::function<bool(TTxId)> TxFilter_;
-    TTestActorRuntime::TEventObserverHolder Observer_;
+    TTestActorRuntime::TEventObserver PrevObserver_;
     THashMap<TTxId, TOperationParts> Operations_;
     bool Stopped_ = false;
 };
