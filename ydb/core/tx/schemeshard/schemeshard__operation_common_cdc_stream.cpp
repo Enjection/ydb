@@ -1,4 +1,5 @@
 #include "schemeshard__operation_common.h"
+#include "schemeshard__operation.h"
 #include "schemeshard_cdc_stream_common.h"
 #include "schemeshard_private.h"
 #include "schemeshard_version_registry.h"
@@ -324,14 +325,36 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     context.SS->PersistTableAlterVersion(db, pathId, table);
     context.SS->ClearDescribePathCaches(path);
     
-    // For continuous backup streams, skip the publish here.
+    // For continuous backup streams that have a sibling CopyTable operation, skip the publish here.
     // CopyTable's HandleReply will do the final publish after all version syncs complete.
     // Publishing here would send stale TIndexDescription::SchemaVersion before sync.
-    if (!versionCtx.IsContinuousBackupStream && !versionCtx.IsPartOfContinuousBackup) {
+    //
+    // We must check if there's a sibling CopyTable operation - if this is a standalone CDC stream
+    // creation (not part of ConsistentCopyTables), we MUST publish here.
+    bool hasSiblingCopyTable = false;
+    if (versionCtx.IsContinuousBackupStream || versionCtx.IsPartOfContinuousBackup) {
+        // Check if there's a sibling CopyTable operation in the same TxId
+        TTxId txId = OperationId.GetTxId();
+        if (context.SS->Operations.contains(txId)) {
+            auto operation = context.SS->Operations.at(txId);
+            for (const auto& part : operation->Parts) {
+                // Check if this sibling is a CopyTable operation
+                TOperationId siblingOpId = TOperationId(txId, TSubTxId(part->GetOperationId().GetSubTxId()));
+                if (auto* siblingTxState = context.SS->FindTx(siblingOpId)) {
+                    if (siblingTxState->TxType == TTxState::TxCopyTable) {
+                        hasSiblingCopyTable = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    if (!hasSiblingCopyTable) {
         context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
     } else {
         LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                    "Skipping table publish for continuous backup stream"
+                    "Skipping table publish for continuous backup stream (sibling CopyTable will publish)"
                     << ", pathId: " << pathId
                     << ", isContinuousBackupStream: " << versionCtx.IsContinuousBackupStream
                     << ", isPartOfContinuousBackup: " << versionCtx.IsPartOfContinuousBackup
