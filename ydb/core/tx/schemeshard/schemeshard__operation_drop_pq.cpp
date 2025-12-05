@@ -196,7 +196,9 @@ public:
         if (domainInfo->CheckDiskSpaceQuotas(context.SS)) {
             auto subDomainId = context.SS->ResolvePathIdForDomain(pathId);
             context.SS->PersistSubDomainState(db, subDomainId, *domainInfo);
-            context.OnComplete.PublishToSchemeBoard(OperationId, subDomainId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, subDomainId);
         }
 
         context.SS->ChangeDiskSpaceTopicsTotalBytes(domainInfo->GetPQAccountStorage());
