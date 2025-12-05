@@ -1205,13 +1205,15 @@ void IncParentDirAlterVersionWithRepublishSafeWithUndo(const TOperationId& opId,
     }
 
     if (parent.IsActive()) {
-        ss->ClearDescribePathCaches(parent.Base());
-        onComplete.PublishToSchemeBoard(opId, parent->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        onComplete.DeferPublishToSchemeBoard(opId, parent->PathId);
     }
 
     if (path.IsActive()) {
-        ss->ClearDescribePathCaches(path.Base());
-        onComplete.PublishToSchemeBoard(opId, path->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        onComplete.DeferPublishToSchemeBoard(opId, path->PathId);
     }
 }
 
@@ -1236,8 +1238,9 @@ void IncAliveChildrenSafeWithUndo(const TOperationId& opId, const TPath& parentP
         }
 
         if (grandParent.IsActive()) {
-            context.SS->ClearDescribePathCaches(grandParent.Base());
-            context.OnComplete.PublishToSchemeBoard(opId, grandParent->PathId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(opId, grandParent->PathId);
         }
     }
 }
@@ -1253,8 +1256,9 @@ void IncAliveChildrenDirect(const TOperationId& opId, const TPath& parentPath, T
         }
 
         if (grandParent.IsActive()) {
-            context.SS->ClearDescribePathCaches(grandParent.Base());
-            context.OnComplete.PublishToSchemeBoard(opId, grandParent->PathId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(opId, grandParent->PathId);
         }
     }
 }
@@ -1267,8 +1271,9 @@ void DecAliveChildrenDirect(const TOperationId& opId, TPathElement::TPtr parentP
             ++grandParentDir->DirAlterVersion;
             NIceDb::TNiceDb db(context.GetDB());
             context.SS->PersistPathDirAlterVersion(db, grandParentDir);
-            context.SS->ClearDescribePathCaches(grandParentDir);
-            context.OnComplete.PublishToSchemeBoard(opId, grandParentDir->PathId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(opId, grandParentDir->PathId);
         }
     }
 }
