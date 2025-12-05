@@ -30,7 +30,8 @@ namespace NSchemeShardUT_Private {
  *           blocker.WaitForParts(txId, permutation.size());
  *
  *           // Release parts in the order specified by permutation
- *           blocker.ReleaseInOrder(txId, permutation);
+ *           // (permutation is indices into captured parts, not part IDs)
+ *           blocker.ReleaseByPermutationIndices(txId, permutation);
  *
  *           env.TestWaitNotification(runtime, txId);
  *
@@ -93,7 +94,7 @@ public:
      *                     The test should:
      *                     1. Trigger the schema operation
      *                     2. Wait for parts: blocker.WaitForParts(txId, permutation.size())
-     *                     3. Release in order: blocker.ReleaseInOrder(txId, permutation)
+     *                     3. Release by permutation: blocker.ReleaseByPermutationIndices(txId, permutation)
      *                     4. Wait for completion and verify results
      */
     void Run(std::function<void(TTestActorRuntime& runtime,
@@ -267,7 +268,8 @@ private:
  *
  *           // ... trigger operation ...
  *           blocker.WaitForParts(txId, 3);
- *           blocker.ReleaseInOrder(txId, perm);
+ *           // perm is indices into captured parts, not part IDs
+ *           blocker.ReleaseByPermutationIndices(txId, perm);
  *           // ... verify ...
  *       });
  *   }

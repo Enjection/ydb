@@ -66,7 +66,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         }
 
         // Release in reverse order to test ordering control
-        blocker.ReleaseInOrder(txId, {1, 0});
+        // Use ReleaseByPermutationIndices since we're permuting by capture order, not part IDs
+        blocker.ReleaseByPermutationIndices(txId, {1, 0});
 
         // Wait for completion
         env.TestWaitNotification(runtime, txId);
@@ -112,7 +113,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             )");
 
             blocker.WaitForParts(txId, 2);
-            blocker.ReleaseInOrder(txId, permutation);
+            // Use permutation as indices into captured parts, not as part IDs
+            blocker.ReleaseByPermutationIndices(txId, permutation);
             env.TestWaitNotification(runtime, txId);
 
             // Verify
@@ -157,7 +159,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             )");
 
             blocker.WaitForParts(txId, permutation.size());
-            blocker.ReleaseInOrder(txId, permutation);
+            // Use permutation as indices into captured parts, not as part IDs
+            blocker.ReleaseByPermutationIndices(txId, permutation);
             env.TestWaitNotification(runtime, txId);
 
             TestDescribeResult(DescribePath(runtime, "/MyRoot/TestTable"), {
@@ -230,7 +233,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             )");
 
             blocker.WaitForParts(txId, permutation.size());
-            blocker.ReleaseInOrder(txId, permutation);
+            // Use permutation as indices into captured parts, not as part IDs
+            blocker.ReleaseByPermutationIndices(txId, permutation);
             env.TestWaitNotification(runtime, txId);
 
             // Verify both tables exist with correct indexes
@@ -291,7 +295,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         )");
 
         blocker.WaitForParts(txId, failingPermutation.size());
-        blocker.ReleaseInOrder(txId, failingPermutation);
+        // Use permutation as indices into captured parts, not as part IDs
+        blocker.ReleaseByPermutationIndices(txId, failingPermutation);
         env.TestWaitNotification(runtime, txId);
 
         TestDescribeResult(DescribePath(runtime, "/MyRoot/TestTable"), {
@@ -705,7 +710,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
                 if (partCount == permutation.size()) {
                     Cerr << "Releasing parts for txId " << txId << " in order: "
                          << TPartsPermutationIterator::FormatPermutation(permutation) << Endl;
-                    blocker.ReleaseInOrder(txId, permutation);
+                    // Use permutation as indices into captured parts, not as part IDs
+                    blocker.ReleaseByPermutationIndices(txId, permutation);
                     foundMatchingOp = true;
                 } else {
                     // Release other operations normally

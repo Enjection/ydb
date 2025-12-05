@@ -208,10 +208,80 @@ public:
         captured.Released = true;
     }
 
-    // Release parts in specific order
+    // Release parts in specific order (by part ID)
     void ReleaseInOrder(TTxId txId, const TVector<TPartId>& order) {
         for (TPartId partId : order) {
             ReleasePart(txId, partId);
+        }
+    }
+
+    // Try to release a part, returns false if not captured
+    bool TryReleasePart(TTxId txId, TPartId partId) {
+        auto opIt = Operations_.find(txId);
+        if (opIt == Operations_.end()) {
+            Cerr << "... TryReleasePart: TxId " << txId << " not found" << Endl;
+            return false;
+        }
+
+        auto& op = opIt->second;
+        auto it = op.PartIdToIndex.find(partId);
+        if (it == op.PartIdToIndex.end()) {
+            Cerr << "... TryReleasePart: Part " << partId << " not captured for txId " << txId << Endl;
+            return false;
+        }
+
+        auto& captured = op.Parts[it->second];
+        if (captured.Released) {
+            Cerr << "... TryReleasePart: Part " << partId << " already released for txId " << txId << Endl;
+            return false;
+        }
+
+        Cerr << "... releasing TEvProgressOperation txId=" << txId
+             << " partId=" << partId << Endl;
+
+        IEventHandle* ev = captured.Event.Release();
+        ui32 nodeId = ev->GetRecipientRewrite().NodeId();
+        ui32 nodeIdx = nodeId - Runtime_.GetFirstNodeId();
+        Runtime_.Send(ev, nodeIdx, /* viaActorSystem */ true);
+        captured.Released = true;
+        return true;
+    }
+
+    /**
+     * Release captured parts using permutation indices.
+     *
+     * The permutation specifies the ORDER in which to release captured parts,
+     * where indices refer to positions in the captured parts list (not part IDs).
+     *
+     * Example: If we captured parts [1, 2, 5] (in that order), and permutation is [2, 0, 1],
+     * we release: part 5 (index 2), part 1 (index 0), part 2 (index 1)
+     */
+    void ReleaseByPermutationIndices(TTxId txId, const TVector<ui32>& permutation) {
+        auto opIt = Operations_.find(txId);
+        Y_ABORT_UNLESS(opIt != Operations_.end(),
+                       "TxId %lu not found in captured operations", txId);
+
+        auto& op = opIt->second;
+        Y_ABORT_UNLESS(permutation.size() <= op.Parts.size(),
+                       "Permutation size %zu exceeds captured parts %zu for txId %lu",
+                       permutation.size(), op.Parts.size(), txId);
+
+        for (ui32 idx : permutation) {
+            Y_ABORT_UNLESS(idx < op.Parts.size(),
+                           "Permutation index %u out of range for txId %lu", idx, txId);
+
+            auto& captured = op.Parts[idx];
+            Y_ABORT_UNLESS(!captured.Released,
+                           "Part at index %u already released for txId %lu", idx, txId);
+
+            Cerr << "... releasing TEvProgressOperation txId=" << txId
+                 << " partId=" << captured.PartId << " (index " << idx << ")" << Endl;
+
+            IEventHandle* ev = captured.Event.Release();
+            ui32 nodeId = ev->GetRecipientRewrite().NodeId();
+            ui32 nodeIdx = nodeId - Runtime_.GetFirstNodeId();
+            Runtime_.Send(ev, nodeIdx, /* viaActorSystem */ true);
+            captured.Released = true;
         }
     }
 
