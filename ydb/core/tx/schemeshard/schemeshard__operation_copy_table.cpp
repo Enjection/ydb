@@ -329,9 +329,7 @@ public:
                 ++srcTable->AlterVersion;
                 context.SS->PersistTableAlterVersion(db, srcPathId, srcTable);
                 context.SS->ClearDescribePathCaches(srcPath);
-                // Use PublishAndWaitPublication to ensure the operation waits
-                // for the scheme cache to be updated before completing.
-                context.OnComplete.PublishAndWaitPublication(OperationId, srcPathId);
+                context.OnComplete.PublishToSchemeBoard(OperationId, srcPathId);
 
                 LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                            "CopyTable re-publishing source table after child index sync"
@@ -443,11 +441,7 @@ public:
                                 }
                             }
                             context.SS->ClearDescribePathCaches(grandParentPath);
-                            // Use PublishAndWaitPublication to ensure the operation waits
-                            // for the scheme cache to be updated before completing.
-                            // This prevents the "schema version mismatch" error where
-                            // TIndexDescription.SchemaVersion is stale in the cache.
-                            context.OnComplete.PublishAndWaitPublication(OperationId, grandParentPathId);
+                            context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
 
                             LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                        "CopyTable re-publishing grandparent (main table) for impl table"
