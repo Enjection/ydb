@@ -142,5 +142,27 @@ All operations that bump impl table version now sync parent index:
 2. ✅ `schemeshard__operation_alter_table.cpp` - TAlterTable::TPropose::HandleReply syncs parent index
 3. ✅ `schemeshard__operation_copy_table.cpp` - Syncs parent index when copying impl table
 4. ✅ `schemeshard__operation_common_cdc_stream.cpp` - Syncs parent index for CDC on impl tables
+5. ✅ `schemeshard__operation_incremental_restore_finalize.cpp` - SyncIndexSchemaVersions syncs parent index
 
 All fixes use TVersionRegistry for sibling coordination to handle concurrent sub-operations.
+
+## Critical Fix: Version Registry MAX Tracking
+
+The version registry was updated to track the MAX target version across all siblings:
+
+**Problem:** When sibling A claims version 2 and sibling B (same TxId) claims version 3:
+- Original: B got "Joined" but ClaimedVersion stayed at 2
+- B didn't update index because it got Joined
+- Result: index=2, but impl table=3 → version mismatch!
+
+**Solution:** In `TVersionRegistry::ClaimVersionChange`:
+- When a sibling joins, update ClaimedVersion to MAX if new target is higher
+- All version sync code now handles both Claimed AND Joined cases
+- Uses `GetEffectiveVersion()` to get the updated MAX version
+
+Files modified:
+- `schemeshard_version_registry.cpp` - Update ClaimedVersion to MAX on Join
+- `schemeshard__operation_alter_table.cpp` - Handle Joined case with GetEffectiveVersion
+- `schemeshard__operation_copy_table.cpp` - Handle Joined case with GetEffectiveVersion
+- `schemeshard__operation_common_cdc_stream.cpp` - Handle Joined case with GetEffectiveVersion
+- `schemeshard__operation_incremental_restore_finalize.cpp` - Handle Joined case with GetEffectiveVersion

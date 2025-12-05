@@ -262,23 +262,22 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 OperationId, versionCtx.ParentPathId, oldIndexVersion, effectiveTableVersion,
                 txState->TxType, "CDC stream index version sync to impl table");
 
-            switch (indexClaimResult) {
-                case EClaimResult::Claimed:
-                    index->AlterVersion = effectiveTableVersion;
+            // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+            // might have updated the claimed version to a higher value
+            if (indexClaimResult != EClaimResult::Conflict) {
+                ui64 effectiveIndexVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                    versionCtx.ParentPathId, index->AlterVersion);
+
+                if (effectiveIndexVersion > index->AlterVersion) {
+                    index->AlterVersion = effectiveIndexVersion;
                     context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
                     context.SS->PersistPendingVersionChange(db,
                         *context.SS->VersionRegistry.GetPendingChange(versionCtx.ParentPathId));
                     context.OnComplete.PublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
-                    break;
-
-                case EClaimResult::Joined:
-                    // Sibling already handled
-                    break;
-
-                case EClaimResult::Conflict:
-                    LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                               "Unexpected conflict for CDC index version: " << versionCtx.ParentPathId);
-                    break;
+                }
+            } else {
+                LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                           "Unexpected conflict for CDC index version: " << versionCtx.ParentPathId);
             }
         }
     }
@@ -303,12 +302,18 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                         OperationId, childPathId, oldChildVersion, effectiveTableVersion,
                         txState->TxType, "CDC stream child index sync");
 
-                    if (childClaimResult == EClaimResult::Claimed) {
-                        childIndex->AlterVersion = effectiveTableVersion;
-                        context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
-                        context.SS->PersistPendingVersionChange(db,
-                            *context.SS->VersionRegistry.GetPendingChange(childPathId));
-                        context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                    // Handle both Claimed and Joined
+                    if (childClaimResult != EClaimResult::Conflict) {
+                        ui64 effectiveChildVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                            childPathId, childIndex->AlterVersion);
+
+                        if (effectiveChildVersion > childIndex->AlterVersion) {
+                            childIndex->AlterVersion = effectiveChildVersion;
+                            context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
+                            context.SS->PersistPendingVersionChange(db,
+                                *context.SS->VersionRegistry.GetPendingChange(childPathId));
+                            context.OnComplete.PublishToSchemeBoard(OperationId, childPathId);
+                        }
                     }
                 }
             }

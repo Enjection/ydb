@@ -283,12 +283,19 @@ public:
                             OperationId, parentPathId, oldParentVersion, effectiveVersion,
                             TTxState::TxCopyTable, "Copy table parent index sync for impl table");
 
-                        if (parentClaimResult == EClaimResult::Claimed) {
-                            parentIndex->AlterVersion = effectiveVersion;
-                            context.SS->PersistTableIndexAlterVersion(db, parentPathId, parentIndex);
-                            context.SS->PersistPendingVersionChange(db,
-                                *context.SS->VersionRegistry.GetPendingChange(parentPathId));
-                            context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+                        // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+                        // might have updated the claimed version to a higher value
+                        if (parentClaimResult != EClaimResult::Conflict) {
+                            ui64 effectiveIndexVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                parentPathId, parentIndex->AlterVersion);
+
+                            if (effectiveIndexVersion > parentIndex->AlterVersion) {
+                                parentIndex->AlterVersion = effectiveIndexVersion;
+                                context.SS->PersistTableIndexAlterVersion(db, parentPathId, parentIndex);
+                                context.SS->PersistPendingVersionChange(db,
+                                    *context.SS->VersionRegistry.GetPendingChange(parentPathId));
+                                context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+                            }
                         }
                     }
 
@@ -305,11 +312,17 @@ public:
                                 OperationId, grandParentPathId, oldMainVersion, newMainVersion,
                                 TTxState::TxCopyTable, "Copy table main table bump for impl table");
 
-                            if (mainClaimResult == EClaimResult::Claimed) {
-                                mainTable->AlterVersion = newMainVersion;
-                                context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
-                                context.SS->PersistPendingVersionChange(db,
-                                    *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
+                            // Handle both Claimed and Joined
+                            if (mainClaimResult != EClaimResult::Conflict) {
+                                ui64 effectiveMainVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                    grandParentPathId, mainTable->AlterVersion);
+
+                                if (effectiveMainVersion > mainTable->AlterVersion) {
+                                    mainTable->AlterVersion = effectiveMainVersion;
+                                    context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
+                                    context.SS->PersistPendingVersionChange(db,
+                                        *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
+                                }
                             }
                             context.SS->ClearDescribePathCaches(grandParentPath);
                             context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);

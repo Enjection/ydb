@@ -364,28 +364,23 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                 OperationId, indexPathId, oldIndexVersion, tableVersion,
                                 ETxType::TxIncrementalRestoreFinalize, "Restore finalization index sync to impl table");
 
-                            switch (claimResult) {
-                                case EClaimResult::Claimed:
-                                    // First sibling to claim - update in-memory state and persist
-                                    index->AlterVersion = tableVersion;
+                            // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+                            // might have updated the claimed version to a higher value
+                            if (claimResult != EClaimResult::Conflict) {
+                                ui64 effectiveIndexVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                    indexPathId, index->AlterVersion);
+
+                                if (effectiveIndexVersion > index->AlterVersion) {
+                                    index->AlterVersion = effectiveIndexVersion;
                                     context.SS->PersistTableIndexAlterVersion(db, indexPathId, index);
                                     context.SS->PersistPendingVersionChange(db,
                                         *context.SS->VersionRegistry.GetPendingChange(indexPathId));
                                     LOG_I("SyncIndexSchemaVersions: Index AlterVersion synced from "
-                                          << oldIndexVersion << " to " << tableVersion << " (Claimed)");
-                                    break;
-
-                                case EClaimResult::Joined:
-                                    // Sibling already claimed - use effective version
-                                    LOG_I("SyncIndexSchemaVersions: Index " << indexPathId
-                                          << " already claimed by sibling, effective version: "
-                                          << context.SS->VersionRegistry.GetEffectiveVersion(indexPathId, oldIndexVersion));
-                                    break;
-
-                                case EClaimResult::Conflict:
-                                    // Different operation claimed - should not happen
-                                    LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
-                                    break;
+                                          << oldIndexVersion << " to " << effectiveIndexVersion
+                                          << " (claimResult: " << static_cast<int>(claimResult) << ")");
+                                }
+                            } else {
+                                LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
                             }
 
                             context.OnComplete.PublishToSchemeBoard(OperationId, indexPathId);
@@ -406,13 +401,19 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                         OperationId, mainTablePathId, oldMainVersion, newMainVersion,
                                         ETxType::TxIncrementalRestoreFinalize, "Restore finalization main table version bump");
 
-                                    if (mainClaimResult == EClaimResult::Claimed) {
-                                        mainTable->AlterVersion = newMainVersion;
-                                        context.SS->PersistTableAlterVersion(db, mainTablePathId, mainTable);
-                                        context.SS->PersistPendingVersionChange(db,
-                                            *context.SS->VersionRegistry.GetPendingChange(mainTablePathId));
-                                        LOG_I("SyncIndexSchemaVersions: Main table " << mainTablePathId
-                                              << " version bumped from " << oldMainVersion << " to " << newMainVersion);
+                                    // Handle both Claimed and Joined
+                                    if (mainClaimResult != EClaimResult::Conflict) {
+                                        ui64 effectiveMainVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                            mainTablePathId, mainTable->AlterVersion);
+
+                                        if (effectiveMainVersion > mainTable->AlterVersion) {
+                                            mainTable->AlterVersion = effectiveMainVersion;
+                                            context.SS->PersistTableAlterVersion(db, mainTablePathId, mainTable);
+                                            context.SS->PersistPendingVersionChange(db,
+                                                *context.SS->VersionRegistry.GetPendingChange(mainTablePathId));
+                                            LOG_I("SyncIndexSchemaVersions: Main table " << mainTablePathId
+                                                  << " version bumped from " << oldMainVersion << " to " << effectiveMainVersion);
+                                        }
                                     }
 
                                     context.SS->ClearDescribePathCaches(mainTablePath.Base());

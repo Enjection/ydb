@@ -402,18 +402,26 @@ public:
                         OperationId, parentPathId, oldIndexVersion, implTableVersion,
                         txState->TxType, "AlterTable impl table - sync parent index");
 
-                    if (indexClaimResult == EClaimResult::Claimed) {
-                        index->AlterVersion = implTableVersion;
-                        context.SS->PersistTableIndexAlterVersion(db, parentPathId, index);
-                        context.SS->PersistPendingVersionChange(db,
-                            *context.SS->VersionRegistry.GetPendingChange(parentPathId));
-                        context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+                    // Handle both Claimed and Joined - with MAX tracking, a joining sibling
+                    // might have updated the claimed version to a higher value
+                    if (indexClaimResult != EClaimResult::Conflict) {
+                        ui64 effectiveIndexVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                            parentPathId, index->AlterVersion);
 
-                        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                    "Synced parent index version for impl table alter"
-                                    << ", implTablePathId: " << pathId
-                                    << ", indexPathId: " << parentPathId
-                                    << ", newVersion: " << implTableVersion);
+                        if (effectiveIndexVersion > index->AlterVersion) {
+                            index->AlterVersion = effectiveIndexVersion;
+                            context.SS->PersistTableIndexAlterVersion(db, parentPathId, index);
+                            context.SS->PersistPendingVersionChange(db,
+                                *context.SS->VersionRegistry.GetPendingChange(parentPathId));
+                            context.OnComplete.PublishToSchemeBoard(OperationId, parentPathId);
+
+                            LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                        "Synced parent index version for impl table alter"
+                                        << ", implTablePathId: " << pathId
+                                        << ", indexPathId: " << parentPathId
+                                        << ", newVersion: " << effectiveIndexVersion
+                                        << ", claimResult: " << static_cast<int>(indexClaimResult));
+                        }
 
                         // Also bump grandparent (main table) to refresh scheme cache
                         const TPathId& grandParentPathId = parent->ParentPathId;
@@ -428,18 +436,23 @@ public:
                                     OperationId, grandParentPathId, oldMainVersion, newMainVersion,
                                     txState->TxType, "AlterTable impl table - bump main table");
 
-                                if (mainClaimResult == EClaimResult::Claimed) {
-                                    mainTable->AlterVersion = newMainVersion;
-                                    context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
-                                    context.SS->PersistPendingVersionChange(db,
-                                        *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
-                                    context.SS->ClearDescribePathCaches(grandParent);
-                                    context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+                                if (mainClaimResult != EClaimResult::Conflict) {
+                                    ui64 effectiveMainVersion = context.SS->VersionRegistry.GetEffectiveVersion(
+                                        grandParentPathId, mainTable->AlterVersion);
 
-                                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                                "Bumped main table version for impl table alter"
-                                                << ", mainTablePathId: " << grandParentPathId
-                                                << ", newVersion: " << newMainVersion);
+                                    if (effectiveMainVersion > mainTable->AlterVersion) {
+                                        mainTable->AlterVersion = effectiveMainVersion;
+                                        context.SS->PersistTableAlterVersion(db, grandParentPathId, mainTable);
+                                        context.SS->PersistPendingVersionChange(db,
+                                            *context.SS->VersionRegistry.GetPendingChange(grandParentPathId));
+                                        context.SS->ClearDescribePathCaches(grandParent);
+                                        context.OnComplete.PublishToSchemeBoard(OperationId, grandParentPathId);
+
+                                        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                                    "Bumped main table version for impl table alter"
+                                                    << ", mainTablePathId: " << grandParentPathId
+                                                    << ", newVersion: " << effectiveMainVersion);
+                                    }
                                 }
                             }
                         }
