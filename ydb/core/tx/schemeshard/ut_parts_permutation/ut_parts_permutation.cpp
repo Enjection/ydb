@@ -725,7 +725,9 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             auto txIds = blocker.GetCapturedTxIds();
             Cerr << "Captured " << txIds.size() << " operations" << Endl;
             for (auto txId : txIds) {
-                Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts" << Endl;
+                // CRITICAL: Sort parts by PartId for deterministic permutation behavior
+                blocker.SortPartsByPartId(txId);
+                Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts (sorted)" << Endl;
             }
 
             // Release parts for operations that have the expected part count
@@ -788,6 +790,10 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
     /**
      * Reproduction test for the failing permutation [3, 0, 1, 2].
      * Error: schema version mismatch during metadata loading for: /Root/Table2/idx2 expected 3 got 4
+     *
+     * NOTE: The original test uses PRI_WARN logging. The bug might be timing-sensitive
+     * and only manifest when there are more parts than expected (e.g., 6 parts captured
+     * but only 4 permuted, with remaining parts released after in capture order).
      */
     Y_UNIT_TEST(REPRO_MultiTableRestore_Permutation_3_0_1_2) {
         using namespace NDataShard;
@@ -808,8 +814,8 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         auto& runtime = *server->GetRuntime();
         const auto edgeActor = runtime.AllocateEdgeActor();
 
-        // Keep full logging for debugging
-        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_DEBUG);
+        // Use WARN logging like the original test (DEBUG might affect timing)
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_WARN);
 
         InitRoot(server, edgeActor);
 
@@ -895,7 +901,12 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         auto txIds = blocker.GetCapturedTxIds();
         Cerr << "Captured " << txIds.size() << " operations" << Endl;
         for (auto txId : txIds) {
-            Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts: ";
+            // CRITICAL: Sort parts by PartId for deterministic permutation behavior
+            // Without this, the same permutation index could mean different things
+            // depending on non-deterministic capture order
+            blocker.SortPartsByPartId(txId);
+
+            Cerr << "  TxId " << txId << " has " << blocker.GetPartCount(txId) << " parts (sorted): ";
             auto partIds = blocker.GetPartIds(txId);
             for (auto partId : partIds) {
                 Cerr << partId << " ";
@@ -908,21 +919,44 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         for (auto txId : txIds) {
             size_t partCount = blocker.GetPartCount(txId);
             if (partCount >= permutation.size()) {
-                Cerr << "Releasing parts for txId " << txId << " in order: "
+                auto partIds = blocker.GetPartIds(txId);
+                Cerr << "=== CRITICAL: txId " << txId << " has " << partCount << " parts, permuting first "
+                     << permutation.size() << " ===" << Endl;
+                Cerr << "Part IDs: ";
+                for (auto pid : partIds) Cerr << pid << " ";
+                Cerr << Endl;
+
+                // IMPORTANT: If partCount > permutation.size(), remaining parts are released AFTER
+                // in capture order. This might be the source of the bug!
+                if (partCount > permutation.size()) {
+                    Cerr << "!!! WARNING: " << (partCount - permutation.size())
+                         << " extra parts will be released AFTER permutation in capture order !!!" << Endl;
+                    Cerr << "Extra parts: ";
+                    for (size_t i = permutation.size(); i < partIds.size(); ++i) {
+                        Cerr << partIds[i] << " ";
+                    }
+                    Cerr << Endl;
+                }
+
+                Cerr << "Releasing in permutation order: "
                      << TPartsPermutationIterator::FormatPermutation(permutation) << Endl;
                 // Use permutation as indices into captured parts, not as part IDs
                 blocker.ReleaseByPermutationIndices(txId, permutation);
+
                 // Release any remaining parts that weren't in the permutation
+                size_t remainingBefore = blocker.GetUnreleasedCount(txId);
+                Cerr << "Releasing " << remainingBefore << " remaining parts..." << Endl;
                 blocker.ReleaseAll(txId);
                 foundMatchingOp = true;
             } else {
                 // Release other operations normally
+                Cerr << "Releasing all " << partCount << " parts for txId " << txId << " (< permutation size)" << Endl;
                 blocker.ReleaseAll(txId);
             }
         }
 
         if (!foundMatchingOp && !txIds.empty()) {
-            Cerr << "WARNING: No operation with exactly " << permutation.size()
+            Cerr << "WARNING: No operation with >= " << permutation.size()
                  << " parts found, releasing all normally" << Endl;
         }
 
@@ -960,6 +994,152 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
         UNIT_ASSERT_C(idx2Query.find("uint32_value: 3") != TString::npos,
             "Index idx2 should work with permutation " +
             TPartsPermutationIterator::FormatPermutation(permutation));
+    }
+
+    /**
+     * Run permutations 17-20 to see if the bug requires "warmup" permutations.
+     * The original failure was at permutation 19 [3,0,1,2] after running 18 prior permutations.
+     */
+    Y_UNIT_TEST(REPRO_MultiTableRestore_Permutations_17_to_20) {
+        using namespace NDataShard;
+        using namespace Tests;
+
+        // Run permutations starting from index 17 up to 20
+        TPartsPermutationIterator iter(4);
+        size_t idx = 0;
+        while (iter.Next()) {
+            if (idx < 17) {
+                ++idx;
+                continue;
+            }
+            if (idx > 20) {
+                break;
+            }
+
+            auto permutation = iter.Current();
+            Cerr << "\n\n========== PERMUTATION " << idx << ": "
+                 << TPartsPermutationIterator::FormatPermutation(permutation)
+                 << " ==========\n" << Endl;
+
+            TPortManager portManager;
+            TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+                .SetUseRealThreads(false)
+                .SetDomainName("Root")
+                .SetEnableChangefeedInitialScan(true)
+                .SetEnableBackupService(true)
+                .SetEnableRealSystemViewPaths(false)
+            );
+
+            auto& runtime = *server->GetRuntime();
+            const auto edgeActor = runtime.AllocateEdgeActor();
+            runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_WARN);
+
+            InitRoot(server, edgeActor);
+
+            CreateShardedTable(server, edgeActor, "/Root", "Table1",
+                TShardedTableOptions()
+                    .Columns({
+                        {"key", "Uint32", true, false},
+                        {"val1", "Uint32", false, false}
+                    })
+                    .Indexes({
+                        {"idx1", {"val1"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                    }));
+
+            CreateShardedTable(server, edgeActor, "/Root", "Table2",
+                TShardedTableOptions()
+                    .Columns({
+                        {"key", "Uint32", true, false},
+                        {"val2", "Uint32", false, false}
+                    })
+                    .Indexes({
+                        {"idx2", {"val2"}, {}, NKikimrSchemeOp::EIndexTypeGlobal}
+                    }));
+
+            ExecSQL(server, edgeActor, R"(
+                UPSERT INTO `/Root/Table1` (key, val1) VALUES (1, 100), (2, 200);
+                UPSERT INTO `/Root/Table2` (key, val2) VALUES (1, 1000), (2, 2000);
+            )");
+
+            ExecSQL(server, edgeActor, R"(
+                CREATE BACKUP COLLECTION `MultiTableCollection`
+                  ( TABLE `/Root/Table1`
+                  , TABLE `/Root/Table2`
+                  )
+                WITH
+                  ( STORAGE = 'cluster'
+                  , INCREMENTAL_BACKUP_ENABLED = 'true'
+                  );
+            )", false);
+
+            ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection`;)", false);
+            SimulateSleep(server, TDuration::Seconds(1));
+
+            ExecSQL(server, edgeActor, R"(
+                UPSERT INTO `/Root/Table1` (key, val1) VALUES (3, 300);
+                UPSERT INTO `/Root/Table2` (key, val2) VALUES (3, 3000);
+            )");
+
+            ExecSQL(server, edgeActor, R"(BACKUP `MultiTableCollection` INCREMENTAL;)", false);
+            SimulateSleep(server, TDuration::Seconds(5));
+
+            auto expected1 = KqpSimpleExecSuccess(runtime, R"(
+                SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+            )");
+            auto expected2 = KqpSimpleExecSuccess(runtime, R"(
+                SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+            )");
+
+            ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table1`;)", false);
+            ExecSQL(server, edgeActor, R"(DROP TABLE `/Root/Table2`;)", false);
+
+            TOperationPartsBlocker blocker(runtime);
+            ExecSQL(server, edgeActor, R"(RESTORE `MultiTableCollection`;)", false);
+            runtime.SimulateSleep(TDuration::Seconds(2));
+
+            auto txIds = blocker.GetCapturedTxIds();
+            Cerr << "Captured " << txIds.size() << " operations" << Endl;
+            for (auto txId : txIds) {
+                // Sort parts by PartId for deterministic behavior
+                blocker.SortPartsByPartId(txId);
+                auto partIds = blocker.GetPartIds(txId);
+                Cerr << "  TxId " << txId << " parts(" << partIds.size() << ", sorted): ";
+                for (auto pid : partIds) Cerr << pid << " ";
+                Cerr << Endl;
+            }
+
+            for (auto txId : txIds) {
+                size_t partCount = blocker.GetPartCount(txId);
+                if (partCount >= permutation.size()) {
+                    Cerr << "Releasing txId " << txId << " in order: "
+                         << TPartsPermutationIterator::FormatPermutation(permutation);
+                    if (partCount > permutation.size()) {
+                        Cerr << " + " << (partCount - permutation.size()) << " extra parts after";
+                    }
+                    Cerr << Endl;
+                    blocker.ReleaseByPermutationIndices(txId, permutation);
+                    blocker.ReleaseAll(txId);
+                } else {
+                    blocker.ReleaseAll(txId);
+                }
+            }
+
+            blocker.Stop();
+            blocker.ReleaseAllOperations();
+            runtime.SimulateSleep(TDuration::Seconds(10));
+
+            auto actual1 = KqpSimpleExecSuccess(runtime, R"(
+                SELECT key, val1 FROM `/Root/Table1` ORDER BY key
+            )");
+            auto actual2 = KqpSimpleExecSuccess(runtime, R"(
+                SELECT key, val2 FROM `/Root/Table2` ORDER BY key
+            )");
+
+            UNIT_ASSERT_VALUES_EQUAL(expected1, actual1);
+            UNIT_ASSERT_VALUES_EQUAL(expected2, actual2);
+
+            ++idx;
+        }
     }
 
 } // Y_UNIT_TEST_SUITE

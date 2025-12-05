@@ -10,6 +10,7 @@
 #include <util/generic/vector.h>
 #include <util/string/builder.h>
 
+#include <algorithm>
 #include <functional>
 
 namespace NSchemeShardUT_Private {
@@ -201,6 +202,7 @@ public:
     }
 
     // Wait until we capture expectedCount parts for txId
+    // After capturing, parts are SORTED BY PART ID for deterministic ordering
     void WaitForParts(TTxId txId, size_t expectedCount) {
         auto& op = Operations_[txId];
         op.ExpectedCount = expectedCount;
@@ -211,16 +213,53 @@ public:
                 return op.Parts.size() >= expectedCount;
             });
 
+        // Sort parts by PartId to ensure deterministic ordering regardless of capture order
+        // This is critical because event arrival order may vary between runs
+        SortPartsByPartId(txId);
+
         op.Complete = true;
     }
 
+    // Sort captured parts by their PartId for deterministic permutation behavior
+    void SortPartsByPartId(TTxId txId) {
+        auto opIt = Operations_.find(txId);
+        if (opIt == Operations_.end()) {
+            return;
+        }
+
+        auto& op = opIt->second;
+        if (op.Parts.empty()) {
+            return;
+        }
+
+        // Sort parts by PartId
+        std::sort(op.Parts.begin(), op.Parts.end(),
+            [](const TCapturedPart& a, const TCapturedPart& b) {
+                return a.PartId < b.PartId;
+            });
+
+        // Rebuild the index map after sorting
+        op.PartIdToIndex.clear();
+        for (size_t i = 0; i < op.Parts.size(); ++i) {
+            op.PartIdToIndex[op.Parts[i].PartId] = i;
+        }
+
+        Cerr << "... sorted parts for txId=" << txId << " by PartId: ";
+        for (const auto& p : op.Parts) {
+            Cerr << p.PartId << " ";
+        }
+        Cerr << Endl;
+    }
+
     // Wait for specified txId to have at least minParts captured
+    // After capturing, parts are SORTED BY PART ID for deterministic ordering
     bool WaitForPartsWithTimeout(TTxId txId, size_t minParts, TDuration timeout) {
         auto deadline = TInstant::Now() + timeout;
 
         while (TInstant::Now() < deadline) {
             auto it = Operations_.find(txId);
             if (it != Operations_.end() && it->second.Parts.size() >= minParts) {
+                SortPartsByPartId(txId);
                 return true;
             }
 
