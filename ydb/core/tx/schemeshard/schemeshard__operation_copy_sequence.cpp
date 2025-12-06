@@ -187,11 +187,13 @@ public:
             ++parentDir->DirAlterVersion;
             context.SS->PersistPathDirAlterVersion(db, parentDir);
         }
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
 
-        context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::CopyTableBarrier);
         return true;
@@ -734,11 +736,13 @@ public:
 
         ++parentPath->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentPath.Base());
-        context.SS->ClearDescribePathCaches(parentPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentPath->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentPath->PathId);
 
-        context.SS->ClearDescribePathCaches(dstPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, dstPath->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, dstPath->PathId);
 
         domainInfo->IncPathsInside(context.SS);
         IncAliveChildrenDirect(OperationId, parentPath, context); // for correct discard of ChildrenExist prop

@@ -178,8 +178,9 @@ public:
         context.SS->PersistTableAlterVersion(db, txState->TargetPathId, tableInfo);
 
         auto tablePath = context.SS->PathsById.at(txState->TargetPathId);
-        context.SS->ClearDescribePathCaches(tablePath);
-        context.OnComplete.PublishToSchemeBoard(OperationId, tablePath->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, tablePath->PathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;

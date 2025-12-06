@@ -165,8 +165,9 @@ TVector<ISubOperation::TPtr> CreateBackupBackupCollection(TOperationId opId, con
                             for (const auto& [implTableName, implTablePathId] : indexPath.Base()->GetChildren()) {
                                 auto implTablePath = context.SS->PathsById.at(implTablePathId);
                                 if (implTablePath->IsTable()) {
-                                    context.SS->ClearDescribePathCaches(implTablePath);
-                                    context.OnComplete.PublishToSchemeBoard(opId, implTablePathId);
+                                    // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+                                    // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+                                    context.OnComplete.DeferPublishToSchemeBoard(opId, implTablePathId);
                                 }
                             }
                         }

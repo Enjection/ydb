@@ -60,8 +60,9 @@ public:
 
         IncParentDirAlterVersionWithRepublish(OperationId, path, context);
 
-        context.SS->ClearDescribePathCaches(pathPtr);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;

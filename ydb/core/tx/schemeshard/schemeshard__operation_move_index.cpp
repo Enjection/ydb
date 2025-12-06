@@ -286,7 +286,9 @@ public:
 
         context.SS->PersistTableAlterVersion(db, path->PathId, table);
 
-        context.OnComplete.PublishToSchemeBoard(OperationId, path->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, path->PathId);
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;
     }

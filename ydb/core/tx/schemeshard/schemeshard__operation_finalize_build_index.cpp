@@ -179,8 +179,9 @@ public:
         context.SS->TabletCounters->Simple()[COUNTER_SNAPSHOTS_COUNT].Sub(1);
 
         auto tablePath = context.SS->PathsById.at(tableId);
-        context.SS->ClearDescribePathCaches(tablePath);
-        context.OnComplete.PublishToSchemeBoard(OperationId, tableId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, tableId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;

@@ -251,8 +251,9 @@ public:
             Y_ABORT_UNLESS(context.SS->PathsById.contains(txState->TargetPathId));
             auto targetPath = context.SS->PathsById.at(txState->TargetPathId);
             
-            context.SS->ClearDescribePathCaches(targetPath);
-            context.OnComplete.PublishToSchemeBoard(OperationId, txState->TargetPathId);
+            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, txState->TargetPathId);
             context.OnComplete.ReleasePathState(OperationId, txState->TargetPathId, TPathElement::EPathState::EPathStateNoChanges);
         }
 

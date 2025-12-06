@@ -48,14 +48,16 @@ public:
         context.SS->PersistTableIndex(db, path->PathId);
         context.SS->Indexes[path->PathId] = indexData->AlterData;
 
-        context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, path->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, path->PathId);
 
         auto parentDir = context.SS->PathsById.at(path->ParentPathId);
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;

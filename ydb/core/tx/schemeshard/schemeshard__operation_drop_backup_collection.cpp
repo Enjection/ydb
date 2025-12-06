@@ -227,12 +227,12 @@ public:
 
         ++parentDirPtr->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDirPtr);
-        context.SS->ClearDescribePathCaches(parentDirPtr);
-        context.SS->ClearDescribePathCaches(pathPtr);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
 
         if (!context.SS->DisablePublicationsOfDropping) {
-            context.OnComplete.PublishToSchemeBoard(OperationId, parentDirPtr->PathId);
-            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDirPtr->PathId);
+            context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
         }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);

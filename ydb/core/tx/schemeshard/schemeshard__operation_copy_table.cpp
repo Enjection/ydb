@@ -211,8 +211,9 @@ public:
         auto parentDir = context.SS->PathsById.at(path->ParentPathId); // TargetPathId has been created
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
-        context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
 
         if (txState->CdcPathId != InvalidPathId) {
             TPathId srcPathId = txState->SourcePathId;
@@ -275,8 +276,9 @@ public:
             context.OnComplete.DeferPublishToSchemeBoard(OperationId, srcPathId);
         }
 
-        context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
 
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;
@@ -727,11 +729,13 @@ public:
         context.OnComplete.ActivateTx(OperationId);
 
         ++parent.Base()->DirAlterVersion;
-        context.SS->ClearDescribePathCaches(parent.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parent.Base()->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parent.Base()->PathId);
 
-        context.SS->ClearDescribePathCaches(newTable);
-        context.OnComplete.PublishToSchemeBoard(OperationId, newTable->PathId);
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, newTable->PathId);
 
         const ui32 shardsToCreate = tableInfo->GetPartitions().size();
         Y_VERIFY_S(shardsToCreate <= maxShardsToCreate, "shardsToCreate: " << shardsToCreate << " maxShardsToCreate: " << maxShardsToCreate);
