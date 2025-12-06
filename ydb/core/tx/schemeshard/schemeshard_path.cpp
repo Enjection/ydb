@@ -1643,6 +1643,33 @@ bool TPath::IsUnderOutgoingIncrementalRestore() const {
         || Base()->PathState == NKikimrSchemeOp::EPathState::EPathStateAwaitingOutgoingIncrementalRestore;
 }
 
+bool TPath::IsUnderDropCdcStream() const {
+    Y_ABORT_UNLESS(IsResolved());
+
+    if (!IsUnderOperation()) {
+        return false;
+    }
+
+    TTxId txId = Base()->LastTxId;
+    if (txId == InvalidTxId) {
+        return false;
+    }
+
+    // Check if any sub-operation of this TxId is a DropCdcStream operation.
+    // If so, allow CDC rotate/alter operations to proceed - the drop will retry.
+    for (const auto& [opId, txState] : SS->TxInFlight) {
+        if (opId.GetTxId() == txId) {
+            if (txState.TxType == TTxState::TxDropCdcStreamAtTable ||
+                txState.TxType == TTxState::TxDropCdcStreamAtTableDropSnapshot ||
+                txState.TxType == TTxState::TxDropCdcStream) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 TPath& TPath::RiseUntilOlapStore() {
     size_t end = Elements.size();
     while (end > 0) {

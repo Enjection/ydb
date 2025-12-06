@@ -36,10 +36,7 @@ public:
             << " table# " << TableName
             << " stream# " << StreamName);
 
-        // Delay startup to give user operations a chance to proceed first.
-        // This prevents racing with user operations that arrive shortly after
-        // the orphan cleaner is triggered.
-        Schedule(TDuration::Seconds(3), new TEvents::TEvWakeup);
+        AllocateTxId();
         Become(&TContinuousBackupCleaner::StateWork);
     }
 
@@ -97,14 +94,8 @@ public:
         PassAway();
     }
 
-    void Retry() {
-        // If TxId is not yet allocated, this is the initial delayed start
-        if (!TxId) {
-            AllocateTxId();
-        } else {
-            // TxId is already allocated, this is a retry after StatusMultipleModifications
-            Send(SchemeShard, DropPropose());
-        }
+    void Retry() const {
+        Send(SchemeShard, DropPropose());
     }
 
     STATEFN(StateWork) {
