@@ -831,8 +831,15 @@ ISubOperation::TPtr RejectOnTablePathChecks(const TOperationId& opId, const TPat
         .IsResolved()
         .NotDeleted()
         .IsTable()
-        .NotUnderDeleting()
-        .NotUnderOperation();
+        .NotUnderDeleting();
+
+    // Allow CDC operations on tables that are under incremental backup/restore
+    // or under DropCdcStream cleanup (the drop operation will retry on conflict)
+    if (checks && tablePath.IsUnderOperation() &&
+        !tablePath.IsUnderOutgoingIncrementalRestore() &&
+        !tablePath.IsUnderDropCdcStream()) {
+        checks.NotUnderOperation();
+    }
 
     if (!restore) {
         checks
