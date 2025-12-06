@@ -1481,6 +1481,11 @@ public:
 
     TMap<ui64, TIncrementalBackupInfo::TPtr> IncrementalBackups;
 
+    // Tables that have pending CDC stream cleanup. User operations on these tables
+    // should fail with StatusMultipleModifications to avoid racing with cleanup.
+    // The cleanup actor will retry if it encounters conflicts.
+    THashSet<TPathId> TablesWithPendingCleanup;
+
     void PersistIncrementalBackup(NIceDb::TNiceDb& db, ui64 id);
     static void PersistIncrementalBackup(NIceDb::TNiceDb& db, const TIncrementalBackupInfo& info);
     static void PersistRemoveIncrementalBackup(NIceDb::TNiceDb& db, const TIncrementalBackupInfo& info);

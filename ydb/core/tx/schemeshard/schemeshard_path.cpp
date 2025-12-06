@@ -189,6 +189,19 @@ const TPath::TChecker& TPath::TChecker::NotUnderOperation(EStatus status) const 
         << " (" << BasicPathInfo(Path.Base()) << ")");
 }
 
+const TPath::TChecker& TPath::TChecker::NotUnderPendingCleanup(EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (!Path.SS->TablesWithPendingCleanup.contains(Path.Base()->PathId)) {
+        return *this;
+    }
+
+    return Fail(status, TStringBuilder() << "path has pending CDC stream cleanup"
+        << " (" << BasicPathInfo(Path.Base()) << ")");
+}
+
 const TPath::TChecker& TPath::TChecker::IsUnderCreating(EStatus status) const {
     if (Failed) {
         return *this;

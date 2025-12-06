@@ -55,6 +55,7 @@ public:
         const TChecker& IsUnderDeleting(EStatus status = EStatus::StatusMultipleModifications) const;
         const TChecker& IsUnderMoving(EStatus status = EStatus::StatusMultipleModifications) const;
         const TChecker& NotUnderOperation(EStatus status = EStatus::StatusMultipleModifications) const;
+        const TChecker& NotUnderPendingCleanup(EStatus status = EStatus::StatusMultipleModifications) const;
         const TChecker& IsUnderCreating(EStatus status = EStatus::StatusInvalidParameter) const;
         const TChecker& IsUnderOperation(EStatus status = EStatus::StatusMultipleModifications) const;
         const TChecker& IsUnderTheSameOperation(TTxId txId, EStatus status = EStatus::StatusMultipleModifications) const;

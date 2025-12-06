@@ -144,13 +144,12 @@ public:
                 .NotDeleted()
                 .IsTable()
                 .NotAsyncReplicaTable()
-                .NotUnderDeleting();
+                .NotUnderDeleting()
+                .NotUnderPendingCleanup();
 
             // Allow CDC operations on tables that are under incremental backup/restore
-            // or under DropCdcStream cleanup (the drop operation will retry on conflict)
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore() &&
-                !tablePath.IsUnderDropCdcStream()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore()) {
                 checks.NotUnderOperation();
             }
 
@@ -382,13 +381,12 @@ public:
                 .NotDeleted()
                 .IsTable()
                 .NotAsyncReplicaTable()
-                .NotUnderDeleting();
+                .NotUnderDeleting()
+                .NotUnderPendingCleanup();
 
             // Allow CDC operations on tables that are under incremental backup/restore
-            // or under DropCdcStream cleanup (the drop operation will retry on conflict)
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore() &&
-                !tablePath.IsUnderDropCdcStream()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore()) {
                 checks.NotUnderOperation();
             }
 
@@ -514,13 +512,12 @@ std::variant<TStreamPaths, ISubOperation::TPtr> DoAlterStreamPathChecks(
             .IsResolved()
             .NotDeleted()
             .IsTable()
-            .NotAsyncReplicaTable();
+            .NotAsyncReplicaTable()
+            .NotUnderPendingCleanup();
 
         // Allow CDC operations on tables that are under incremental backup/restore
-        // or under DropCdcStream cleanup (the drop operation will retry on conflict)
         if (checks && tablePath.IsUnderOperation() &&
-            !tablePath.IsUnderOutgoingIncrementalRestore() &&
-            !tablePath.IsUnderDropCdcStream()) {
+            !tablePath.IsUnderOutgoingIncrementalRestore()) {
             checks.NotUnderOperation();
         }
 

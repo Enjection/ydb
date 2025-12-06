@@ -52,6 +52,11 @@ public:
 
         const auto& workingDir = Self->PathToString(Self->PathsById.at(tablePath->ParentPathId));
 
+        // Mark table as having pending cleanup to prevent user CDC operations from racing.
+        // User operations will check this set and fail with StatusMultipleModifications.
+        // The set entry is cleared in OnCleanerResult when cleanup completes.
+        Self->TablesWithPendingCleanup.insert(tablePath->PathId);
+
         NewCleaners.emplace_back(
             CreateContinuousBackupCleaner(
                 Self->TxAllocatorClient,
@@ -93,6 +98,9 @@ public:
         }
 
         const auto& workingDir = Self->PathToString(Self->PathsById.at(tablePath->ParentPathId));
+
+        // Mark table as having pending cleanup to prevent user CDC operations from racing.
+        Self->TablesWithPendingCleanup.insert(tablePath->PathId);
 
         NewCleaners.emplace_back(
             CreateContinuousBackupCleaner(
@@ -194,6 +202,15 @@ public:
             << ", error# " << error);
 
         Self->RunningContinuousBackupCleaners.erase(CleanerResult->Sender);
+
+        // Clear pending cleanup marker for the table.
+        // itemPathId is the stream's PathId, we need to find the table's PathId.
+        if (Self->PathsById.contains(itemPathId)) {
+            const auto& streamPath = Self->PathsById.at(itemPathId);
+            if (Self->PathsById.contains(streamPath->ParentPathId)) {
+                Self->TablesWithPendingCleanup.erase(streamPath->ParentPathId);
+            }
+        }
 
         if (!success) {
             LOG_E("Continuous backup cleaner has failed: " << error);
