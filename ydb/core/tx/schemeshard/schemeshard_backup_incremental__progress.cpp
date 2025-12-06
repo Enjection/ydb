@@ -42,6 +42,14 @@ public:
 
         const auto& streamPath = Self->PathsById.at(item.PathId);
         const auto& tablePath = Self->PathsById.at(streamPath->ParentPathId);
+
+        // Skip cleanup if table is under operation to avoid racing with user operations.
+        // The item stays in Dropping state and will be retried via Resume() on restart.
+        if (tablePath->PathState != NKikimrSchemeOp::EPathState::EPathStateNoChanges) {
+            LOG_D("Cleaner for item pathId# " << item.PathId << " deferred - table is under operation");
+            return;
+        }
+
         const auto& workingDir = Self->PathToString(Self->PathsById.at(tablePath->ParentPathId));
 
         NewCleaners.emplace_back(
@@ -74,6 +82,13 @@ public:
 
         const auto& tablePath = Self->PathsById.at(streamPath->ParentPathId);
         if (!Self->PathsById.contains(tablePath->ParentPathId)) {
+            return;
+        }
+
+        // Skip orphan cleanup if table is under operation to avoid racing with user operations.
+        // The orphan stream will be cleaned up on next OffloadStatus or by manual intervention.
+        if (tablePath->PathState != NKikimrSchemeOp::EPathState::EPathStateNoChanges) {
+            LOG_D("Orphan cleaner for pathId# " << pathId << " deferred - table is under operation");
             return;
         }
 
