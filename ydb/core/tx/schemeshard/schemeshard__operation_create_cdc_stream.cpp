@@ -399,7 +399,7 @@ public:
 class TDoneWithInitialScan: public TDone {
 public:
     explicit TDoneWithInitialScan(const TOperationId& id)
-        : TDone(id)
+        : TDone(id, TPathElement::EPathState::EPathStateNoChanges)
     {
         auto events = AllIncomingEvents();
         events.erase(TEvPrivate::TEvCompleteBarrier::EventType);
@@ -496,7 +496,7 @@ class TNewCdcStreamAtTable: public TSubOperation {
             if (InitialScan) {
                 return MakeHolder<TDoneWithInitialScan>(OperationId);
             } else {
-                return MakeHolder<TDone>(OperationId);
+                return MakeHolder<TDone>(OperationId, TPathElement::EPathState::EPathStateNoChanges);
             }
         default:
             return nullptr;

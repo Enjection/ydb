@@ -320,7 +320,7 @@ class TDropCdcStreamAtTable: public TSubOperation {
         case TTxState::ProposedWaitParts:
             return MakeHolder<NTableState::TProposedWaitParts>(OperationId);
         case TTxState::Done:
-            return MakeHolder<TDone>(OperationId);
+            return MakeHolder<TDone>(OperationId, TPathElement::EPathState::EPathStateNoChanges);
         default:
             return nullptr;
         }
