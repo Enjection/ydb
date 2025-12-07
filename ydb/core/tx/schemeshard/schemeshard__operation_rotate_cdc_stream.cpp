@@ -170,10 +170,9 @@ public:
                 .NotAsyncReplicaTable()
                 .NotUnderDeleting();
 
-            // Allow CDC operations on tables that are under incremental backup/restore or cleanup
+            // Allow CDC operations on tables that are under incremental backup/restore
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore() &&
-                !tablePath.IsUnderDropCdcStream()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore()) {
                 checks.NotUnderOperation();
             }
 
@@ -554,10 +553,9 @@ public:
                 .NotAsyncReplicaTable()
                 .NotUnderDeleting();
 
-            // Allow CDC operations on tables that are under incremental backup/restore or cleanup
+            // Allow CDC operations on tables that are under incremental backup/restore
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore() &&
-                !tablePath.IsUnderDropCdcStream()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore()) {
                 checks.NotUnderOperation();
             }
 
@@ -752,10 +750,9 @@ TVector<ISubOperation::TPtr> CreateRotateCdcStream(TOperationId opId, const TTxT
             .NotAsyncReplicaTable()
             .NotUnderDeleting();
 
-        // Allow CDC operations on tables that are under incremental backup/restore or cleanup
+        // Allow CDC operations on tables that are under incremental backup/restore
         if (checks && tablePath.IsUnderOperation() &&
-            !tablePath.IsUnderOutgoingIncrementalRestore() &&
-            !tablePath.IsUnderDropCdcStream()) {
+            !tablePath.IsUnderOutgoingIncrementalRestore()) {
             checks.NotUnderOperation();
         }
 
