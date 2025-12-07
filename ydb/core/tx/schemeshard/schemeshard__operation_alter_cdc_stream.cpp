@@ -146,9 +146,10 @@ public:
                 .NotAsyncReplicaTable()
                 .NotUnderDeleting();
 
-            // Allow CDC operations on tables that are under incremental backup/restore
+            // Allow CDC operations on tables that are under incremental backup/restore or cleanup
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore() &&
+                !tablePath.IsUnderDropCdcStream()) {
                 checks.NotUnderOperation();
             }
 
@@ -382,9 +383,10 @@ public:
                 .NotAsyncReplicaTable()
                 .NotUnderDeleting();
 
-            // Allow CDC operations on tables that are under incremental backup/restore
+            // Allow CDC operations on tables that are under incremental backup/restore or cleanup
             if (checks && tablePath.IsUnderOperation() &&
-                !tablePath.IsUnderOutgoingIncrementalRestore()) {
+                !tablePath.IsUnderOutgoingIncrementalRestore() &&
+                !tablePath.IsUnderDropCdcStream()) {
                 checks.NotUnderOperation();
             }
 
@@ -512,9 +514,10 @@ std::variant<TStreamPaths, ISubOperation::TPtr> DoAlterStreamPathChecks(
             .IsTable()
             .NotAsyncReplicaTable();
 
-        // Allow CDC operations on tables that are under incremental backup/restore
+        // Allow CDC operations on tables that are under incremental backup/restore or cleanup
         if (checks && tablePath.IsUnderOperation() &&
-            !tablePath.IsUnderOutgoingIncrementalRestore()) {
+            !tablePath.IsUnderOutgoingIncrementalRestore() &&
+            !tablePath.IsUnderDropCdcStream()) {
             checks.NotUnderOperation();
         }
 
