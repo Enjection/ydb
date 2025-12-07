@@ -10,6 +10,7 @@ IActor* CreateContinuousBackupCleaner(TActorId txAllocatorClient,
                                       TActorId schemeShard,
                                       ui64 backupId,
                                       TPathId item,
+                                      TPathId tablePathId,
                                       const TString& workingDir,
                                       const TString& tableName,
                                       const TString& streamName);

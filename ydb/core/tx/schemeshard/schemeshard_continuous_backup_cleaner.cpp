@@ -17,6 +17,7 @@ public:
                              TActorId schemeShard,
                              ui64 backupId,
                              TPathId item,
+                             TPathId tablePathId,
                              const TString& workingDir,
                              const TString& tableName,
                              const TString& streamName)
@@ -24,6 +25,7 @@ public:
         , SchemeShard(schemeShard)
         , BackupId(backupId)
         , Item(item)
+        , TablePathId(tablePathId)
         , WorkingDir(workingDir)
         , TableName(tableName)
         , StreamName(streamName)
@@ -90,7 +92,7 @@ public:
     }
 
     void ReplyAndDie(bool success = true, const TString& error = "") {
-        Send(SchemeShard, new TEvPrivate::TEvContinuousBackupCleanerResult(BackupId, Item, success, error));
+        Send(SchemeShard, new TEvPrivate::TEvContinuousBackupCleanerResult(BackupId, Item, TablePathId, success, error));
         PassAway();
     }
 
@@ -113,6 +115,7 @@ private:
     TActorId SchemeShard;
     ui64 BackupId;
     TPathId Item;
+    TPathId TablePathId;
     TString WorkingDir;
     TString TableName;
     TString StreamName;
@@ -125,11 +128,12 @@ IActor* CreateContinuousBackupCleaner(TActorId txAllocatorClient,
                                       TActorId schemeShard,
                                       ui64 backupId,
                                       TPathId item,
+                                      TPathId tablePathId,
                                       const TString& workingDir,
                                       const TString& tableName,
                                       const TString& streamName)
 {
-    return new TContinuousBackupCleaner(txAllocatorClient, schemeShard, backupId, item, workingDir, tableName, streamName);
+    return new TContinuousBackupCleaner(txAllocatorClient, schemeShard, backupId, item, tablePathId, workingDir, tableName, streamName);
 }
 
 } // namespace NKikimr::NSchemeShard

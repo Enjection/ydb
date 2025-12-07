@@ -363,8 +363,133 @@ if (tablePath.IsUnderOperation()) {
 2. `TTestCaseShopDemoIncrementalBackupScenario` - Shop demo with backups
 3. New test: Concurrent backup and cleanup operations
 
+## Implemented Solution
+
+After investigating multiple approaches, **Solution 3 (Serialize Cleanup with Next Operation)** was implemented as it provides the most reliable fix without introducing DataShard conflicts.
+
+### Why Solution 2 Failed
+
+The initial attempt was to implement Solution 2 (allow internal operations to be preempted). This approach:
+1. Added `IsUnderDropCdcStream()` method to check if table is under a DropCdcStream operation
+2. Modified CDC operations to skip `NotUnderOperation()` check when table is under DropCdcStream
+
+**Problem**: This allowed BOTH operations to proceed to SchemeShard level, but they then conflicted at DataShard level with error:
+```
+Previous Tx 281474976715758 must be in a state where it only waits for Ack
+```
+
+DataShard cannot handle two concurrent schema transactions on the same table. The path state check at SchemeShard level is the gate that prevents this.
+
+### Implemented Fix: Track Tables with Pending Cleanup
+
+The fix adds a tracking mechanism that marks tables as having pending cleanup BEFORE the cleaner actor is created, eliminating the race window.
+
+#### Key Changes:
+
+1. **Added tracking set** (`schemeshard_impl.h`):
+```cpp
+// Tables that have pending CDC stream cleanup. User operations on these tables
+// should fail with StatusMultipleModifications to avoid racing with cleanup.
+// The cleanup actor will retry if it encounters conflicts.
+THashSet<TPathId> TablesWithPendingCleanup;
+```
+
+2. **Mark table when cleanup starts** (`schemeshard_backup_incremental__progress.cpp`):
+```cpp
+void TryStartCleaner(...) {
+    // ... existing checks ...
+
+    // Mark table as having pending cleanup to prevent user CDC operations from racing.
+    // User operations will check this set and fail with StatusMultipleModifications.
+    // The set entry is cleared in OnCleanerResult when cleanup completes.
+    Self->TablesWithPendingCleanup.insert(tablePath->PathId);
+
+    NewCleaners.emplace_back(CreateContinuousBackupCleaner(...));
+}
+```
+
+3. **Clear mark when cleanup completes** (`schemeshard_backup_incremental__progress.cpp`):
+```cpp
+void OnCleanerResult(TTransactionContext& txc) {
+    // ...
+
+    // Clear pending cleanup marker for the table.
+    // itemPathId is the stream's PathId, we need to find the table's PathId.
+    if (Self->PathsById.contains(itemPathId)) {
+        const auto& streamPath = Self->PathsById.at(itemPathId);
+        if (Self->PathsById.contains(streamPath->ParentPathId)) {
+            Self->TablesWithPendingCleanup.erase(streamPath->ParentPathId);
+        }
+    }
+
+    // ... rest of function
+}
+```
+
+4. **Added new checker** (`schemeshard_path.cpp`):
+```cpp
+const TPath::TChecker& TPath::TChecker::NotUnderPendingCleanup(EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (!Path.SS->TablesWithPendingCleanup.contains(Path.Base()->PathId)) {
+        return *this;
+    }
+
+    return Fail(status, TStringBuilder() << "path has pending CDC stream cleanup"
+        << " (" << BasicPathInfo(Path.Base()) << ")");
+}
+```
+
+5. **Updated CDC operations** to check pending cleanup:
+   - `schemeshard__operation_create_cdc_stream.cpp` - `RejectOnTablePathChecks()`
+   - `schemeshard__operation_rotate_cdc_stream.cpp` - 3 table check locations
+   - `schemeshard__operation_alter_cdc_stream.cpp` - 3 table check locations
+
+### How the Fix Eliminates the Race
+
+```
+Before (race condition):
+T0: TryStartCleaner called (table FREE)
+T1: [756ms gap] ← User operation can slip in here
+T2: DropCdcStream proposal locks table
+T3: User operation conflicts at DataShard
+
+After (no race):
+T0: TryStartCleaner called
+    - Immediately adds table to TablesWithPendingCleanup
+T1: User operation checks TablesWithPendingCleanup
+    - Sees pending cleanup → rejected with StatusMultipleModifications
+T2: DropCdcStream runs normally
+T3: Cleanup completes, removes from TablesWithPendingCleanup
+T4: User operation retries → succeeds
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `schemeshard_impl.h` | Added `TablesWithPendingCleanup` set |
+| `schemeshard_backup_incremental__progress.cpp` | Add to set in TryStartCleaner/TryStartOrphanCleaner, remove in OnCleanerResult |
+| `schemeshard_path.h` | Added `NotUnderPendingCleanup()` declaration |
+| `schemeshard_path.cpp` | Added `NotUnderPendingCleanup()` implementation |
+| `schemeshard__operation_create_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check |
+| `schemeshard__operation_rotate_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check (3 places) |
+| `schemeshard__operation_alter_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check (3 places) |
+
+### Behavior Notes
+
+1. **User operations get StatusMultipleModifications** when cleanup is pending - this is a retriable error
+2. **Cleanup retries on its own** if it encounters conflicts (10 second delay)
+3. **Set is cleared on both success and failure** in OnCleanerResult to allow user operations after cleanup attempt
+4. **On SchemeShard restart**, Resume() re-adds tables with items in Dropping state to the set
+
 ## References
 
-- Log file: `log13.log`, `log14.log`
+- Log files: `log13.log`, `log14.log`, `log15.log`, `log16.log`
 - Error: `StatusMultipleModifications` / `OVERLOADED`
-- Source location: `schemeshard__operation_alter_cdc_stream.cpp:505`
+- DataShard error: `Previous Tx must be in a state where it only waits for Ack`
+- Source locations:
+  - `schemeshard__operation_create_cdc_stream.cpp:836`
+  - `schemeshard_backup_incremental__progress.cpp:55-58`

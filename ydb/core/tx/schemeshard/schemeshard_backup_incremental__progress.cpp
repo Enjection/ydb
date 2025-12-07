@@ -63,6 +63,7 @@ public:
                 Self->SelfId(),
                 backupInfo.Id,
                 item.PathId,
+                tablePath->PathId,
                 workingDir,
                 tablePath->Name,
                 streamPath->Name
@@ -108,6 +109,7 @@ public:
                 Self->SelfId(),
                 0,
                 streamPathId,
+                tablePath->PathId,
                 workingDir,
                 tablePath->Name,
                 streamPath->Name
@@ -193,24 +195,20 @@ public:
     void OnCleanerResult(TTransactionContext& txc) {
         auto id = CleanerResult->Get()->BackupId;
         auto itemPathId = CleanerResult->Get()->Item;
+        auto tablePathId = CleanerResult->Get()->TablePathId;
         auto success = CleanerResult->Get()->Success;
         auto error = CleanerResult->Get()->Error;
 
         LOG_D("OnCleanerResult id# " << id
             << ", itemPathId# " << itemPathId
+            << ", tablePathId# " << tablePathId
             << ", success# " << success
             << ", error# " << error);
 
         Self->RunningContinuousBackupCleaners.erase(CleanerResult->Sender);
 
         // Clear pending cleanup marker for the table.
-        // itemPathId is the stream's PathId, we need to find the table's PathId.
-        if (Self->PathsById.contains(itemPathId)) {
-            const auto& streamPath = Self->PathsById.at(itemPathId);
-            if (Self->PathsById.contains(streamPath->ParentPathId)) {
-                Self->TablesWithPendingCleanup.erase(streamPath->ParentPathId);
-            }
-        }
+        Self->TablesWithPendingCleanup.erase(tablePathId);
 
         if (!success) {
             LOG_E("Continuous backup cleaner has failed: " << error);
