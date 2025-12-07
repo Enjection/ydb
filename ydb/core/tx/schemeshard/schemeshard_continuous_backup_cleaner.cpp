@@ -38,7 +38,9 @@ public:
             << " table# " << TableName
             << " stream# " << StreamName);
 
-        AllocateTxId();
+        // Delay cleanup start to allow pending backup operations to proceed first.
+        // This prevents race conditions where a new backup arrives just as cleanup starts.
+        Schedule(TDuration::MilliSeconds(100), new TEvents::TEvWakeup);
         Become(&TContinuousBackupCleaner::StateWork);
     }
 
@@ -96,8 +98,17 @@ public:
         PassAway();
     }
 
-    void Retry() const {
+    void Retry() {
         Send(SchemeShard, DropPropose());
+    }
+
+    void HandleWakeup() {
+        if (!Started) {
+            Started = true;
+            AllocateTxId();
+        } else {
+            Retry();
+        }
     }
 
     STATEFN(StateWork) {
@@ -105,7 +116,7 @@ public:
             hFunc(TEvTxAllocatorClient::TEvAllocateResult, Handle);
             hFunc(TEvSchemeShard::TEvModifySchemeTransactionResult, Handle);
             cFunc(TEvSchemeShard::TEvNotifyTxCompletionResult::EventType, ReplyAndDie);
-            cFunc(TEvents::TEvWakeup::EventType, Retry);
+            cFunc(TEvents::TEvWakeup::EventType, HandleWakeup);
             cFunc(TEvents::TEvPoisonPill::EventType, PassAway);
         }
     }
@@ -121,6 +132,7 @@ private:
     TString StreamName;
 
     TTxId TxId;
+    bool Started = false;
 
 }; // TContinuousBackupCleaner
 
