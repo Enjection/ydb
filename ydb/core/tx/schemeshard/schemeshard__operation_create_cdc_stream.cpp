@@ -831,9 +831,19 @@ ISubOperation::TPtr RejectOnTablePathChecks(const TOperationId& opId, const TPat
         .IsResolved()
         .NotDeleted()
         .IsTable()
-        .NotUnderDeleting()
-        .NotUnderOperation()
-        .NotUnderPendingCleanup();
+        .NotUnderDeleting();
+
+    // Allow CDC operations on tables that are under incremental backup/restore or cleanup
+    if (checks && tablePath.IsUnderOperation() &&
+        !tablePath.IsUnderOutgoingIncrementalRestore() &&
+        !tablePath.IsUnderDropCdcStream()) {
+        checks.NotUnderOperation();
+    }
+
+    // Block operations during pending cleanup race window (before DropCdcStream is proposed)
+    if (checks && !tablePath.IsUnderOperation()) {
+        checks.NotUnderPendingCleanup();
+    }
 
     if (!restore) {
         checks
