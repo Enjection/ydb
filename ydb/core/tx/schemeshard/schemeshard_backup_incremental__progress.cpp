@@ -52,11 +52,9 @@ public:
 
         const auto& workingDir = Self->PathToString(Self->PathsById.at(tablePath->ParentPathId));
 
-        // Mark table as having pending cleanup to prevent user CDC operations from racing.
-        // User operations will check this set and fail with StatusMultipleModifications.
-        // The set entry is cleared in OnCleanerResult when cleanup completes.
-        Self->TablesWithPendingCleanup.insert(tablePath->PathId);
-
+        // The cleaner has a startup delay (100ms) to allow pending backup operations to start first.
+        // If a backup starts during this delay, the cleaner will fail with StatusMultipleModifications
+        // when it tries to propose DropCdcStream, and will retry after 10 seconds.
         NewCleaners.emplace_back(
             CreateContinuousBackupCleaner(
                 Self->TxAllocatorClient,
@@ -100,9 +98,7 @@ public:
 
         const auto& workingDir = Self->PathToString(Self->PathsById.at(tablePath->ParentPathId));
 
-        // Mark table as having pending cleanup to prevent user CDC operations from racing.
-        Self->TablesWithPendingCleanup.insert(tablePath->PathId);
-
+        // The cleaner has a startup delay (100ms) to allow pending operations to start first.
         NewCleaners.emplace_back(
             CreateContinuousBackupCleaner(
                 Self->TxAllocatorClient,
