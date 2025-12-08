@@ -380,114 +380,96 @@ Previous Tx 281474976715758 must be in a state where it only waits for Ack
 
 DataShard cannot handle two concurrent schema transactions on the same table. The path state check at SchemeShard level is the gate that prevents this.
 
-### Implemented Fix: Track Tables with Pending Cleanup
+### Implemented Fix: Delayed Cleanup Start
 
-The fix adds a tracking mechanism that marks tables as having pending cleanup BEFORE the cleaner actor is created, eliminating the race window.
+The fix adds a startup delay to the cleanup actor, giving pending backup operations time to start executing first. This approach is simpler and more robust than tracking pending cleanups.
+
+#### Key Insight
+
+The race window exists between when cleanup is triggered (offload completion) and when DropCdcStream is proposed. If a new backup arrives in this window, both operations would conflict. By delaying the cleanup start, we ensure any pending backup operations execute first, and the cleanup can then safely defer via its existing retry mechanism.
 
 #### Key Changes:
 
-1. **Added tracking set** (`schemeshard_impl.h`):
+1. **Added startup delay to cleaner** (`schemeshard_continuous_backup_cleaner.cpp`):
 ```cpp
-// Tables that have pending CDC stream cleanup. User operations on these tables
-// should fail with StatusMultipleModifications to avoid racing with cleanup.
-// The cleanup actor will retry if it encounters conflicts.
-THashSet<TPathId> TablesWithPendingCleanup;
+void Bootstrap() {
+    LOG_DEBUG_S(..., "Starting continuous backup cleaner: ...");
+
+    // Delay cleanup start to allow pending backup operations to proceed first.
+    // This prevents race conditions where a new backup arrives just as cleanup starts.
+    Schedule(TDuration::MilliSeconds(100), new TEvents::TEvWakeup);
+    Become(&TContinuousBackupCleaner::StateWork);
+}
+
+void HandleWakeup() {
+    if (!Started) {
+        Started = true;
+        AllocateTxId();  // Now proceed with cleanup
+    } else {
+        Retry();  // StatusMultipleModifications retry
+    }
+}
 ```
 
-2. **Mark table when cleanup starts** (`schemeshard_backup_incremental__progress.cpp`):
+2. **Removed TablesWithPendingCleanup insertion** (`schemeshard_backup_incremental__progress.cpp`):
 ```cpp
 void TryStartCleaner(...) {
-    // ... existing checks ...
+    // ... existing operation check ...
 
-    // Mark table as having pending cleanup to prevent user CDC operations from racing.
-    // User operations will check this set and fail with StatusMultipleModifications.
-    // The set entry is cleared in OnCleanerResult when cleanup completes.
-    Self->TablesWithPendingCleanup.insert(tablePath->PathId);
-
+    // The cleaner has a startup delay (100ms) to allow pending backup operations
+    // to start first. If a backup starts during this delay, the cleaner will fail
+    // with StatusMultipleModifications when it tries to propose DropCdcStream,
+    // and will retry after 10 seconds.
     NewCleaners.emplace_back(CreateContinuousBackupCleaner(...));
 }
 ```
 
-3. **Clear mark when cleanup completes** (`schemeshard_backup_incremental__progress.cpp`):
-```cpp
-void OnCleanerResult(TTransactionContext& txc) {
-    // ...
-
-    // Clear pending cleanup marker for the table.
-    // itemPathId is the stream's PathId, we need to find the table's PathId.
-    if (Self->PathsById.contains(itemPathId)) {
-        const auto& streamPath = Self->PathsById.at(itemPathId);
-        if (Self->PathsById.contains(streamPath->ParentPathId)) {
-            Self->TablesWithPendingCleanup.erase(streamPath->ParentPathId);
-        }
-    }
-
-    // ... rest of function
-}
-```
-
-4. **Added new checker** (`schemeshard_path.cpp`):
-```cpp
-const TPath::TChecker& TPath::TChecker::NotUnderPendingCleanup(EStatus status) const {
-    if (Failed) {
-        return *this;
-    }
-
-    if (!Path.SS->TablesWithPendingCleanup.contains(Path.Base()->PathId)) {
-        return *this;
-    }
-
-    return Fail(status, TStringBuilder() << "path has pending CDC stream cleanup"
-        << " (" << BasicPathInfo(Path.Base()) << ")");
-}
-```
-
-5. **Updated CDC operations** to check pending cleanup:
-   - `schemeshard__operation_create_cdc_stream.cpp` - `RejectOnTablePathChecks()`
-   - `schemeshard__operation_rotate_cdc_stream.cpp` - 3 table check locations
-   - `schemeshard__operation_alter_cdc_stream.cpp` - 3 table check locations
+3. **Passed TablePathId through cleaner** for proper cleanup tracking in OnCleanerResult.
 
 ### How the Fix Eliminates the Race
 
 ```
 Before (race condition):
-T0: TryStartCleaner called (table FREE)
-T1: [756ms gap] ← User operation can slip in here
-T2: DropCdcStream proposal locks table
-T3: User operation conflicts at DataShard
+T0: OffloadStatus triggers TryStartCleaner
+T1: Cleaner immediately proposes DropCdcStream
+T2: Table becomes EPathStateAlter (under operation)
+T3: New backup arrives → blocked by NotUnderOperation
+T4: Backup fails with StatusMultipleModifications
 
 After (no race):
-T0: TryStartCleaner called
-    - Immediately adds table to TablesWithPendingCleanup
-T1: User operation checks TablesWithPendingCleanup
-    - Sees pending cleanup → rejected with StatusMultipleModifications
-T2: DropCdcStream runs normally
-T3: Cleanup completes, removes from TablesWithPendingCleanup
-T4: User operation retries → succeeds
+T0: OffloadStatus triggers TryStartCleaner
+T1: Cleaner waits 100ms (startup delay)
+T2: New backup arrives, table is FREE → backup proceeds
+T3: Table becomes under operation (CreateCdcStream/RotateCdcStream)
+T4: After 100ms, cleaner tries DropCdcStream → fails (table under operation)
+T5: Cleaner retries after 10s
+T6: Backup completes, table FREE
+T7: Cleaner retry succeeds
 ```
 
 ### Files Modified
 
 | File | Changes |
 |------|---------|
-| `schemeshard_impl.h` | Added `TablesWithPendingCleanup` set |
-| `schemeshard_backup_incremental__progress.cpp` | Add to set in TryStartCleaner/TryStartOrphanCleaner, remove in OnCleanerResult |
-| `schemeshard_path.h` | Added `NotUnderPendingCleanup()` declaration |
-| `schemeshard_path.cpp` | Added `NotUnderPendingCleanup()` implementation |
-| `schemeshard__operation_create_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check |
-| `schemeshard__operation_rotate_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check (3 places) |
-| `schemeshard__operation_alter_cdc_stream.cpp` | Added `.NotUnderPendingCleanup()` check (3 places) |
+| `schemeshard_continuous_backup_cleaner.cpp` | Added 100ms startup delay, HandleWakeup state tracking |
+| `schemeshard_backup_incremental__progress.cpp` | Removed TablesWithPendingCleanup insertion, updated comments |
+| `schemeshard_private.h` | Added TablePathId to TEvContinuousBackupCleanerResult |
 
 ### Behavior Notes
 
-1. **User operations get StatusMultipleModifications** when cleanup is pending - this is a retriable error
-2. **Cleanup retries on its own** if it encounters conflicts (10 second delay)
-3. **Set is cleared on both success and failure** in OnCleanerResult to allow user operations after cleanup attempt
-4. **On SchemeShard restart**, Resume() re-adds tables with items in Dropping state to the set
+1. **Backup operations take priority** - The 100ms delay ensures pending backups start before cleanup
+2. **Cleanup retries automatically** - If table is under operation, cleaner fails and retries after 10 seconds
+3. **No user-facing errors** - Backups succeed immediately; cleanup happens in background
+4. **Existing retry mechanism leveraged** - No new complexity, just a strategic delay
 
 ## References
 
-- Log files: `log13.log`, `log14.log`, `log15.log`, `log16.log`
+- Log files: `log13.log` through `log24.log` (investigation progression)
+- Key logs:
+  - `log21.log` - DataShard conflict when allowing both operations
+  - `log22.log` - NotUnderOperation blocking after revert
+  - `log23.log` - NotUnderPendingCleanup blocking during delay window
+  - `log24.log` - Final fix working (delayed cleanup without TablesWithPendingCleanup insertion)
 - Error: `StatusMultipleModifications` / `OVERLOADED`
 - DataShard error: `Previous Tx must be in a state where it only waits for Ack`
 - Source locations:
