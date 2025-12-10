@@ -1073,11 +1073,14 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
 
             if (!pathsToPublish.empty()) {
                 // Track these deferred publications - we need to wait for TEvUpdateAck
-                // before cleaning up. Use AddPublishingPath and PersistPublishingPath
-                // to properly track publications and maintain DbRefCount.
+                // before cleaning up. We cannot use AddPublishingPath() here because it
+                // asserts !IsReadyToNotify(), but at this point all parts are done.
+                // Instead, add directly to Publications and call PersistPublishingPath
+                // for proper DbRefCount tracking. The code below will move these to
+                // ss->Publications[txId] if they're still pending.
                 for (const TPathId& pathId : pathsToPublish) {
                     const ui64 version = ss->GetPathVersion(TPath::Init(pathId, ss)).GetGeneralVersion();
-                    if (operation->AddPublishingPath(pathId, version)) {
+                    if (operation->Publications.emplace(pathId, version).second) {
                         ss->PersistPublishingPath(db, txId, pathId, version);
                     }
                 }
