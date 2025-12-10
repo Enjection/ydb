@@ -284,6 +284,7 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
             // index appears multiple times in target paths (e.g., from different parts)
             THashSet<TPathId> processedImplTables;
             THashSet<TPathId> processedIndexes;
+            THashSet<TPathId> processedMainTables;
 
             // Iterate through all target table paths and finalize their alters
             for (const auto& tablePath : finalize.GetTargetTablePaths()) {
@@ -383,6 +384,19 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
 
                         // Defer publish until all operation parts complete
                         context.OnComplete.DeferPublishToSchemeBoard(OperationId, indexPathId);
+
+                        // Also defer publishing the main table that owns this index
+                        // The main table's TIndexDescription.SchemaVersion must match index's AlterVersion
+                        TPath mainTablePath = indexPath.Parent();
+                        if (mainTablePath.IsResolved() && mainTablePath.Base()->PathType == NKikimrSchemeOp::EPathTypeTable) {
+                            TPathId mainTablePathId = mainTablePath.Base()->PathId;
+                            if (!processedMainTables.contains(mainTablePathId)) {
+                                processedMainTables.insert(mainTablePathId);
+                                context.SS->ClearDescribePathCaches(mainTablePath.Base());
+                                context.OnComplete.DeferPublishToSchemeBoard(OperationId, mainTablePathId);
+                                LOG_I("SyncIndexSchemaVersions: Deferred publish for main table: " << mainTablePathId);
+                            }
+                        }
                     }
                 }
             }
