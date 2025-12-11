@@ -270,7 +270,7 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 // Also defer publish for the main table (grandparent) that owns this index
                 // The main table's TIndexDescription.SchemaVersion must match the index's AlterVersion
                 if (versionCtx.GrandParentPathId != InvalidPathId) {
-                    context.SS->ClearDescribePathCaches(context.SS->PathsById.at(versionCtx.GrandParentPathId).Get());
+                    context.SS->ClearDescribePathCaches(context.SS->PathsById.at(versionCtx.GrandParentPathId));
                     context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.GrandParentPathId);
                 }
                 break;
@@ -290,6 +290,12 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     if (versionCtx.IsContinuousBackupStream && !versionCtx.IsIndexImplTable) {
         ui64 effectiveTableVersion = context.SS->VersionRegistry.GetEffectiveVersion(pathId, table->AlterVersion);
 
+        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "DEBUG CDC child index sync: opId=" << OperationId
+                    << " mainTable=" << pathId
+                    << " effectiveTableVersion=" << effectiveTableVersion
+                    << " at schemeshard: " << context.SS->SelfTabletId());
+
         for (const auto& [childName, childPathId] : path->GetChildren()) {
             auto childPath = context.SS->PathsById.at(childPathId);
             if (!childPath->IsTableIndex() || childPath->Dropped()) {
@@ -300,11 +306,25 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 auto childIndex = context.SS->Indexes.at(childPathId);
                 ui64 oldChildVersion = childIndex->AlterVersion;
 
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                            "DEBUG CDC child index: opId=" << OperationId
+                            << " indexPath=" << childPathId
+                            << " indexName=" << childName
+                            << " oldVersion=" << oldChildVersion
+                            << " effectiveTableVersion=" << effectiveTableVersion
+                            << " at schemeshard: " << context.SS->SelfTabletId());
+
                 // Only claim if we'd be increasing the version
                 if (effectiveTableVersion > oldChildVersion) {
                     auto childClaimResult = context.SS->VersionRegistry.ClaimVersionChange(
                         OperationId, childPathId, oldChildVersion, effectiveTableVersion,
                         txState->TxType, "CDC stream child index sync");
+
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                "DEBUG CDC child index claim: opId=" << OperationId
+                                << " indexPath=" << childPathId
+                                << " claimResult=" << static_cast<int>(childClaimResult)
+                                << " at schemeshard: " << context.SS->SelfTabletId());
 
                     if (childClaimResult == EClaimResult::Claimed) {
                         childIndex->AlterVersion = effectiveTableVersion;
@@ -313,6 +333,12 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                             *context.SS->VersionRegistry.GetPendingChange(childPathId));
                         // Defer publish until all operation parts complete
                         context.OnComplete.DeferPublishToSchemeBoard(OperationId, childPathId);
+
+                        LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                    "DEBUG CDC child index CLAIMED & DEFERRED: opId=" << OperationId
+                                    << " indexPath=" << childPathId
+                                    << " newVersion=" << effectiveTableVersion
+                                    << " at schemeshard: " << context.SS->SelfTabletId());
                     }
                 }
             }
@@ -326,6 +352,14 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
     // called by DoDoneTransactions after all operation parts complete.
     // Defer publish until all operation parts complete for version convergence
     context.OnComplete.DeferPublishToSchemeBoard(OperationId, pathId);
+
+    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "DEBUG CDC main table DEFERRED: opId=" << OperationId
+                << " mainTable=" << pathId
+                << " tableAlterVersion=" << table->AlterVersion
+                << " isContinuousBackup=" << versionCtx.IsContinuousBackupStream
+                << " isImplTable=" << versionCtx.IsIndexImplTable
+                << " at schemeshard: " << context.SS->SelfTabletId());
 
     context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
     return true;

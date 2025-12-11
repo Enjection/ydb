@@ -1083,6 +1083,28 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     if (operation->Publications.emplace(pathId, version).second) {
                         ss->PersistPublishingPath(db, txId, pathId, version);
                     }
+
+                    // DEBUG: Log index versions for tables being published
+                    auto pathElement = ss->PathsById.at(pathId);
+                    if (pathElement->IsTable() && ss->Tables.contains(pathId)) {
+                        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                    "DEBUG DoDoneTransactions publishing table: txId=" << txId
+                                    << " pathId=" << pathId
+                                    << " tableAlterVersion=" << ss->Tables.at(pathId)->AlterVersion);
+
+                        // Log child index versions
+                        for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
+                            auto childPath = ss->PathsById.at(childPathId);
+                            if (childPath->IsTableIndex() && ss->Indexes.contains(childPathId)) {
+                                LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                            "DEBUG DoDoneTransactions table child index: txId=" << txId
+                                            << " tablePath=" << pathId
+                                            << " indexPath=" << childPathId
+                                            << " indexName=" << childName
+                                            << " indexAlterVersion=" << ss->Indexes.at(childPathId)->AlterVersion);
+                            }
+                        }
+                    }
                 }
 
                 ss->PublishToSchemeBoard(txId, std::move(pathsToPublish), ctx);

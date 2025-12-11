@@ -39,6 +39,18 @@ struct TSchemeShard::TTxPublishToSchemeBoard: public TSchemeShard::TRwTxBase {
                             << ", txId: " << txId
                             << ", path id: " << paths.front());
 
+            // DEBUG: Log path type and table alter version if it's a table
+            TPathId pathIdToDescribe = paths.front();
+            if (Self->PathsById.contains(pathIdToDescribe)) {
+                auto pathElem = Self->PathsById.at(pathIdToDescribe);
+                if (pathElem->IsTable() && Self->Tables.contains(pathIdToDescribe)) {
+                    LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                "DEBUG TTxPublishToSchemeBoard: publishing table, txId=" << txId
+                                << " pathId=" << pathIdToDescribe
+                                << " tableAlterVersion=" << Self->Tables.at(pathIdToDescribe)->AlterVersion);
+                }
+            }
+
             Descriptions[txId].emplace_back(DescribePath(Self, ctx, paths.front()));
             paths.pop_front();
 
