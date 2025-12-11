@@ -1438,6 +1438,10 @@ void TSchemeShard::DescribeTableIndex(const TPathId& pathId, const TString& name
     entry.SetState(indexInfo->State);
     entry.SetSchemaVersion(indexInfo->AlterVersion);
 
+    Cerr << "DEBUG DescribeTableIndex: indexPath=" << pathId
+         << " indexName=" << name
+         << " SchemaVersion=" << indexInfo->AlterVersion
+         << " at schemeshard: " << SelfTabletId() << Endl;
     LOG_DEBUG_S(TlsActivationContext->AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "DEBUG DescribeTableIndex: indexPath=" << pathId
                 << " indexName=" << name

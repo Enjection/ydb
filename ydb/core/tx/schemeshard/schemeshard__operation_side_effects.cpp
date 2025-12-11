@@ -160,6 +160,8 @@ void TSideEffects::RePublishToSchemeBoard(TOperationId opId, TPathId pathId) {
 }
 
 void TSideEffects::DeferPublishToSchemeBoard(TOperationId opId, TPathId pathId) {
+    Cerr << "DEBUG TSideEffects::DeferPublishToSchemeBoard: opId=" << opId
+         << " pathId=" << pathId << Endl;
     DeferredPublishPaths[opId.GetTxId()].push_back(pathId);
 }
 
@@ -656,10 +658,28 @@ void TSideEffects::DoPersistDeferredPublishPaths(TSchemeShard* ss, NTabletFlatEx
 
 void TSideEffects::DoPublishToSchemeBoard(TSchemeShard* ss, const TActorContext& ctx) {
     for (auto& kv : PublishPaths) {
+        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "DEBUG DoPublishToSchemeBoard (immediate): txId=" << kv.first
+                    << " pathCount=" << kv.second.size());
+        for (const TPathId& pathId : kv.second) {
+            if (ss->PathsById.contains(pathId)) {
+                auto pathElem = ss->PathsById.at(pathId);
+                if (pathElem->IsTable() && ss->Tables.contains(pathId)) {
+                    LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                "DEBUG DoPublishToSchemeBoard table: txId=" << kv.first
+                                << " pathId=" << pathId
+                                << " tableName=" << pathElem->Name
+                                << " tableAlterVersion=" << ss->Tables.at(pathId)->AlterVersion);
+                }
+            }
+        }
         ss->PublishToSchemeBoard(kv.first, std::move(kv.second), ctx);
     }
 
     for (auto& kv : RePublishPaths) {
+        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    "DEBUG DoPublishToSchemeBoard (republish): txId=" << kv.first
+                    << " pathCount=" << kv.second.size());
         ss->PublishToSchemeBoard(kv.first, std::move(kv.second), ctx);
     }
 }
@@ -1045,6 +1065,8 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
         // Publish all deferred paths with final versions now that operation is complete
         const auto& deferredPaths = operation->GetDeferredPublishPaths();
         if (!deferredPaths.empty()) {
+            Cerr << "DEBUG DoDoneTransactions: Publishing " << deferredPaths.size()
+                 << " deferred paths for txId=" << txId << Endl;
             LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                        "Publishing " << deferredPaths.size()
                            << " deferred paths for txId: " << txId);
@@ -1087,6 +1109,10 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     // DEBUG: Log index versions for tables being published
                     auto pathElement = ss->PathsById.at(pathId);
                     if (pathElement->IsTable() && ss->Tables.contains(pathId)) {
+                        Cerr << "DEBUG DoDoneTransactions: Publishing table txId=" << txId
+                             << " pathId=" << pathId
+                             << " tableName=" << pathElement->Name
+                             << " tableAlterVersion=" << ss->Tables.at(pathId)->AlterVersion << Endl;
                         LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                     "DEBUG DoDoneTransactions publishing table: txId=" << txId
                                     << " pathId=" << pathId
@@ -1096,6 +1122,11 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                         for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
                             auto childPath = ss->PathsById.at(childPathId);
                             if (childPath->IsTableIndex() && ss->Indexes.contains(childPathId)) {
+                                Cerr << "DEBUG DoDoneTransactions: Child index txId=" << txId
+                                     << " tablePath=" << pathId
+                                     << " indexPath=" << childPathId
+                                     << " indexName=" << childName
+                                     << " indexAlterVersion=" << ss->Indexes.at(childPathId)->AlterVersion << Endl;
                                 LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                             "DEBUG DoDoneTransactions table child index: txId=" << txId
                                             << " tablePath=" << pathId
@@ -1107,6 +1138,8 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     }
                 }
 
+                Cerr << "DEBUG DoDoneTransactions: Calling ss->PublishToSchemeBoard for txId=" << txId
+                     << " with " << pathsToPublish.size() << " paths" << Endl;
                 ss->PublishToSchemeBoard(txId, std::move(pathsToPublish), ctx);
             }
         }

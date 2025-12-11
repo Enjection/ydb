@@ -6,6 +6,7 @@
 
 #include <ydb/core/base/table_index.h>
 
+#define LOG_D(stream) LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_I(stream) LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_N(stream) LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_W(stream) LOG_WARN_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
@@ -370,12 +371,17 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                 context.SS->PersistTableIndexAlterVersion(db, indexPathId, index);
                                 context.SS->PersistPendingVersionChange(db,
                                     *context.SS->VersionRegistry.GetPendingChange(indexPathId));
+                                Cerr << "DEBUG SyncIndexSchemaVersions: Index " << indexPathId
+                                     << " AlterVersion " << oldVersion << " -> " << newVersion
+                                     << " (Claimed, opId=" << OperationId << ")" << Endl;
                                 LOG_I("SyncIndexSchemaVersions: Index AlterVersion incremented from "
                                       << oldVersion << " to " << newVersion << " (Claimed)");
                                 break;
 
                             case EClaimResult::Joined:
                                 // Sibling already claimed - use effective version
+                                Cerr << "DEBUG SyncIndexSchemaVersions: Index " << indexPathId
+                                     << " already claimed by sibling (opId=" << OperationId << ")" << Endl;
                                 LOG_I("SyncIndexSchemaVersions: Index " << indexPathId
                                       << " already claimed by sibling, effective version: "
                                       << context.SS->VersionRegistry.GetEffectiveVersion(indexPathId, oldVersion));
@@ -383,6 +389,7 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
 
                             case EClaimResult::Conflict:
                                 // Different operation claimed - should not happen
+                                Cerr << "DEBUG SyncIndexSchemaVersions: Conflict for index " << indexPathId << Endl;
                                 LOG_E("SyncIndexSchemaVersions: Unexpected conflict for index " << indexPathId);
                                 break;
                         }
@@ -399,6 +406,8 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                                 processedMainTables.insert(mainTablePathId);
                                 context.SS->ClearDescribePathCaches(mainTablePath.Base());
                                 context.OnComplete.DeferPublishToSchemeBoard(OperationId, mainTablePathId);
+                                Cerr << "DEBUG SyncIndexSchemaVersions: Deferred main table " << mainTablePathId
+                                     << " (opId=" << OperationId << ")" << Endl;
                                 LOG_I("SyncIndexSchemaVersions: Deferred publish for main table: " << mainTablePathId);
                             }
                         }
@@ -444,6 +453,8 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                 // the actual index AlterVersion after SyncIndexSchemaVersions bumped them
                 context.SS->ClearDescribePathCaches(path.Base());
                 context.OnComplete.DeferPublishToSchemeBoard(OperationId, tablePathId);
+                Cerr << "DEBUG EnsureMainTablesPublished: Deferred main table " << tablePathId
+                     << " tablePath=" << tablePath << " (opId=" << OperationId << ")" << Endl;
                 LOG_I("EnsureMainTablesPublished: Deferred publish for main table: " << tablePath << " (PathId: " << tablePathId << ")");
             }
 

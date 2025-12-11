@@ -639,8 +639,10 @@ Y_UNIT_TEST_SUITE(TPartsPermutationTests) {
             auto& runtime = *server->GetRuntime();
             const auto edgeActor = runtime.AllocateEdgeActor();
 
-            // Reduce logging for permutation tests
-            runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_WARN);
+            // Enable DEBUG logging to trace schema version changes
+            runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NLog::PRI_DEBUG);
+            runtime.SetLogPriority(NKikimrServices::KQP_GATEWAY, NLog::PRI_DEBUG);
+            runtime.SetLogPriority(NKikimrServices::SCHEME_BOARD_POPULATOR, NLog::PRI_DEBUG);
 
             InitRoot(server, edgeActor);
 
