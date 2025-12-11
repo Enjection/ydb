@@ -286,6 +286,27 @@ public:
 
         context.SS->PersistTableAlterVersion(db, path->PathId, table);
 
+        // Sync child indexes to match the new table version
+        // This ensures TIndexDescription.SchemaVersion matches index AlterVersion
+        for (const auto& [childName, childPathId] : path.Base()->GetChildren()) {
+            auto childPath = context.SS->PathsById.at(childPathId);
+            if (!childPath->IsTableIndex() || childPath->Dropped()) {
+                continue;
+            }
+
+            if (context.SS->Indexes.contains(childPathId)) {
+                auto childIndex = context.SS->Indexes.at(childPathId);
+                ui64 oldChildVersion = childIndex->AlterVersion;
+
+                // Sync child index version to match parent table version
+                if (table->AlterVersion > oldChildVersion) {
+                    childIndex->AlterVersion = table->AlterVersion;
+                    context.SS->PersistTableIndexAlterVersion(db, childPathId, childIndex);
+                    context.OnComplete.DeferPublishToSchemeBoard(OperationId, childPathId);
+                }
+            }
+        }
+
         // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
         // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
         context.OnComplete.DeferPublishToSchemeBoard(OperationId, path->PathId);

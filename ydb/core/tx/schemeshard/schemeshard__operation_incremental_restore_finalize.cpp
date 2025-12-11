@@ -237,6 +237,11 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
             // Sync schema versions for restored indexes before releasing path states
             SyncIndexSchemaVersions(finalize, context);
 
+            // Ensure all main tables are republished with updated index versions
+            // SyncIndexSchemaVersions only defers publish when processing index impl tables,
+            // but we need to ensure main tables are always republished after restore
+            EnsureMainTablesPublished(finalize, context);
+
             // Release all affected path states to EPathStateNoChanges
             TVector<TPathId> pathsToNormalize;
             CollectPathsToNormalize(finalize, context, pathsToNormalize);
@@ -402,6 +407,47 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
             }
 
             LOG_I("SyncIndexSchemaVersions: Finished schema version sync");
+        }
+
+        void EnsureMainTablesPublished(const NKikimrSchemeOp::TIncrementalRestoreFinalize& finalize,
+                                       TOperationContext& context) {
+            LOG_I("EnsureMainTablesPublished: Checking main tables for republishing");
+
+            THashSet<TPathId> publishedTables;
+            TString indexImplTableSuffix = TString("/") + NTableIndex::ImplTable;
+
+            // Iterate through target paths to find main tables (non-index-impl tables)
+            for (const auto& tablePath : finalize.GetTargetTablePaths()) {
+                // Skip index impl tables - they're handled by SyncIndexSchemaVersions
+                if (tablePath.Contains(indexImplTableSuffix)) {
+                    continue;
+                }
+
+                TPath path = TPath::Resolve(tablePath, context.SS);
+                if (!path.IsResolved()) {
+                    LOG_W("EnsureMainTablesPublished: Table not resolved: " << tablePath);
+                    continue;
+                }
+
+                if (path.Base()->PathType != NKikimrSchemeOp::EPathTypeTable) {
+                    continue;
+                }
+
+                TPathId tablePathId = path.Base()->PathId;
+                if (publishedTables.contains(tablePathId)) {
+                    continue;
+                }
+                publishedTables.insert(tablePathId);
+
+                // Clear cache and defer publish for this main table
+                // This ensures the table's TIndexDescription.SchemaVersion matches
+                // the actual index AlterVersion after SyncIndexSchemaVersions bumped them
+                context.SS->ClearDescribePathCaches(path.Base());
+                context.OnComplete.DeferPublishToSchemeBoard(OperationId, tablePathId);
+                LOG_I("EnsureMainTablesPublished: Deferred publish for main table: " << tablePath << " (PathId: " << tablePathId << ")");
+            }
+
+            LOG_I("EnsureMainTablesPublished: Published " << publishedTables.size() << " main tables");
         }
 
         void CollectPathsToNormalize(const NKikimrSchemeOp::TIncrementalRestoreFinalize& finalize, 

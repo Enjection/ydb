@@ -300,6 +300,11 @@ public:
         dstPath.Activate();
         IncParentDirAlterVersionWithRepublish(OperationId, dstPath, context);
 
+        // Publish the destination table itself so clients can see it with correct AlterVersion
+        // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
+        // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, dstPath.Base()->PathId);
+
         NextState = TTxState::WaitShadowPathPublication;
         context.SS->ChangeTxState(db, OperationId, TTxState::WaitShadowPathPublication);
         return true;

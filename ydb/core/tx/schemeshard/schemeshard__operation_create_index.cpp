@@ -56,6 +56,13 @@ public:
         // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
         context.OnComplete.DeferPublishToSchemeBoard(OperationId, path->PathId);
 
+        // Also publish the parent table so its TIndexDescription list includes this new index
+        // The parent table's metadata must reflect the new child index for schema consistency
+        auto parentDir = context.SS->PathsById.at(path->ParentPathId);
+        ++parentDir->DirAlterVersion;
+        context.SS->PersistPathDirAlterVersion(db, parentDir);
+        context.OnComplete.DeferPublishToSchemeBoard(OperationId, parentDir->PathId);
+
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;
     }
