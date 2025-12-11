@@ -250,10 +250,12 @@ public:
         if (txState->TargetPathId != InvalidPathId) {
             Y_ABORT_UNLESS(context.SS->PathsById.contains(txState->TargetPathId));
             auto targetPath = context.SS->PathsById.at(txState->TargetPathId);
-            
-            // NOTE: ClearDescribePathCaches is intentionally NOT called here when using deferred publishing.
-            // Cache will be cleared in DoDoneTransactions when the deferred path is actually published.
-            context.OnComplete.DeferPublishToSchemeBoard(OperationId, txState->TargetPathId);
+
+            // NOTE: Do NOT publish the table here. The TIncrementalRestoreFinalize operation
+            // (triggered after restore completes) will bump index versions and then publish
+            // the tables with correct TIndexDescription.SchemaVersion values.
+            // Publishing here would cause a race: table published with old index version,
+            // then finalize bumps index version, causing schema version mismatch errors.
             context.OnComplete.ReleasePathState(OperationId, txState->TargetPathId, TPathElement::EPathState::EPathStateNoChanges);
         }
 
