@@ -281,6 +281,7 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
     private:
         void SyncIndexSchemaVersions(const NKikimrSchemeOp::TIncrementalRestoreFinalize& finalize,
                                      TOperationContext& context) {
+            Cerr << "=== DEBUG BUILD MARKER: SyncIndexSchemaVersions called (incremental_restore_finalize.cpp) ===" << Endl;
             LOG_I("SyncIndexSchemaVersions: Starting schema version sync for restored indexes");
             LOG_I("SyncIndexSchemaVersions: Processing " << finalize.GetTargetTablePaths().size() << " target table paths");
 

@@ -174,6 +174,11 @@ void TSideEffects::Dependence(TTxId parent, TTxId child) {
 }
 
 void TSideEffects::ApplyOnExecute(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
+    static bool loggedOnce = false;
+    if (!loggedOnce) {
+        Cerr << "=== DEBUG BUILD MARKER: schemeshard__operation_side_effects.cpp is using NEW code ===" << Endl;
+        loggedOnce = true;
+    }
     LOG_TRACE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "TSideEffects ApplyOnExecute"
                 << " at tablet# " << ss->TabletID());
