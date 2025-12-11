@@ -1105,7 +1105,53 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                 // Instead, add directly to Publications and call PersistPublishingPath
                 // for proper DbRefCount tracking. The code below will move these to
                 // ss->Publications[txId] if they're still pending.
+
+                // First pass: filter out tables whose child indexes have pending version
+                // changes from OTHER transactions. Those tables should be published by
+                // the other transaction with the correct index version.
+                TDeque<TPathId> filteredPathsToPublish;
                 for (const TPathId& pathId : pathsToPublish) {
+                    bool skipThisTable = false;
+
+                    if (ss->PathsById.contains(pathId)) {
+                        auto pathElement = ss->PathsById.at(pathId);
+                        if (pathElement->IsTable()) {
+                            // Check if any child index has pending version change from different txId
+                            for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
+                                auto childPath = ss->PathsById.at(childPathId);
+                                if (childPath->IsTableIndex()) {
+                                    if (ss->VersionRegistry.HasPendingChange(childPathId)) {
+                                        auto claimingTxId = ss->VersionRegistry.GetClaimingTxId(childPathId);
+                                        if (claimingTxId && *claimingTxId != txId) {
+                                            // Another transaction will modify this index version
+                                            // Let that transaction publish the table instead
+                                            Cerr << "DEBUG DoDoneTransactions: Skipping table " << pathId
+                                                 << " (" << pathElement->Name << ")"
+                                                 << " because child index " << childPathId
+                                                 << " (" << childName << ")"
+                                                 << " has pending version change from txId=" << *claimingTxId
+                                                 << " (we are txId=" << txId << ")" << Endl;
+                                            LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                                        "Skipping table " << pathId
+                                                        << " publish because child index " << childPathId
+                                                        << " has pending version from txId=" << *claimingTxId
+                                                        << " (current txId=" << txId << ")");
+                                            skipThisTable = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!skipThisTable) {
+                        filteredPathsToPublish.push_back(pathId);
+                    }
+                }
+
+                // Second pass: publish the filtered paths
+                for (const TPathId& pathId : filteredPathsToPublish) {
                     const ui64 version = ss->GetPathVersion(TPath::Init(pathId, ss)).GetGeneralVersion();
                     if (operation->Publications.emplace(pathId, version).second) {
                         ss->PersistPublishingPath(db, txId, pathId, version);
@@ -1144,8 +1190,10 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                 }
 
                 Cerr << "DEBUG DoDoneTransactions: Calling ss->PublishToSchemeBoard for txId=" << txId
-                     << " with " << pathsToPublish.size() << " paths" << Endl;
-                ss->PublishToSchemeBoard(txId, std::move(pathsToPublish), ctx);
+                     << " with " << filteredPathsToPublish.size() << " paths (filtered from " << pathsToPublish.size() << ")" << Endl;
+                if (!filteredPathsToPublish.empty()) {
+                    ss->PublishToSchemeBoard(txId, std::move(filteredPathsToPublish), ctx);
+                }
             }
         }
 
