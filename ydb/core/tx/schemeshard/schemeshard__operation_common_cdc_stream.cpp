@@ -267,6 +267,12 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                     *context.SS->VersionRegistry.GetPendingChange(versionCtx.ParentPathId));
                 // Defer publish until all operation parts complete
                 context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
+                // Also defer publish for the main table (grandparent) that owns this index
+                // The main table's TIndexDescription.SchemaVersion must match the index's AlterVersion
+                if (versionCtx.GrandParentPathId != InvalidPathId) {
+                    context.SS->ClearDescribePathCaches(context.SS->PathsById.at(versionCtx.GrandParentPathId).Get());
+                    context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.GrandParentPathId);
+                }
                 break;
 
             case EClaimResult::Joined:
