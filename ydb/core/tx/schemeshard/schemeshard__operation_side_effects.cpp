@@ -1003,6 +1003,12 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
     // where one transaction checks for pending claims from another transaction in the same batch
     TVector<TTxId> transactionsToCleanup;
 
+    Cerr << "DEBUG DoDoneTransactions: === START === with " << DoneTransactions.size() << " transactions:";
+    for (auto& t : DoneTransactions) {
+        Cerr << " " << t;
+    }
+    Cerr << Endl;
+
     for (auto& txId: DoneTransactions) {
 
         if (!ss->Operations.contains(txId)) {
@@ -1067,11 +1073,16 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
         // We need to keep claims in the registry until ALL transactions in this batch are processed
         // so that the filtering logic below can check for pending claims from other transactions
         if (auto* claimedPaths = ss->VersionRegistry.GetClaimedPaths(txId)) {
+            Cerr << "DEBUG DoDoneTransactions: txId=" << txId << " has " << claimedPaths->size() << " claimed paths:";
             for (const TPathId& pathId : *claimedPaths) {
+                Cerr << " " << pathId;
                 ss->PersistRemovePendingVersionChange(db, pathId);
             }
+            Cerr << Endl;
             ss->VersionRegistry.MarkApplied(txId);
             transactionsToCleanup.push_back(txId);  // Schedule for cleanup after all tx processing
+        } else {
+            Cerr << "DEBUG DoDoneTransactions: txId=" << txId << " has NO claimed paths" << Endl;
         }
 
         // Publish all deferred paths with final versions now that operation is complete
@@ -1241,9 +1252,12 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
     // we can safely remove version claims from the registry. This is done last to ensure
     // that the filtering logic above can check for pending claims from other transactions
     // in the same batch (e.g., when txId=715759 checks if txId=715758 claimed a child index).
+    Cerr << "DEBUG DoDoneTransactions: Cleanup phase - removing " << transactionsToCleanup.size() << " transactions from registry" << Endl;
     for (TTxId txId : transactionsToCleanup) {
+        Cerr << "DEBUG DoDoneTransactions: RemoveTransaction txId=" << txId << Endl;
         ss->VersionRegistry.RemoveTransaction(txId);
     }
+    Cerr << "DEBUG DoDoneTransactions: === END ===" << Endl;
 }
 
 void TSideEffects::DoWaitShardCreated(TSchemeShard* ss, const TActorContext&) {
