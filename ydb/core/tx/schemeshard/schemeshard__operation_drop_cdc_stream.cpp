@@ -3,6 +3,7 @@
 #include "schemeshard__operation_common.h"
 #include "schemeshard__operation_part.h"
 #include "schemeshard_utils.h"  // for TransactionTemplate
+#include "schemeshard_version_registry.h"  // for EClaimResult
 
 #define LOG_D(stream) LOG_DEBUG_S (context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
 #define LOG_I(stream) LOG_INFO_S  (context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "[" << context.SS->TabletID() << "] " << stream)
@@ -592,6 +593,38 @@ void DoDropStream(
         if (streamPath.Base()->Name.EndsWith("_continuousBackupImpl")) {
             hasContinuousBackupStream = true;
             break;
+        }
+    }
+
+    // Register early version claim for index impl tables with continuous backup streams.
+    // This claim is registered at Propose time (before coordinator assigns steps) so that
+    // other transactions can see it and avoid publishing the main table with stale index versions.
+    if (workingDirPath.IsTableIndex() && hasContinuousBackupStream) {
+        const auto& indexPathId = workingDirPath.Base()->PathId;
+        if (context.SS->Indexes.contains(indexPathId)) {
+            auto index = context.SS->Indexes.at(indexPathId);
+            ui64 oldIndexVersion = index->AlterVersion;
+            ui64 newIndexVersion = oldIndexVersion + 1;
+
+            Cerr << "DEBUG DoDropStream: Registering early version claim for index " << indexPathId
+                 << " oldVersion=" << oldIndexVersion
+                 << " newVersion=" << newIndexVersion
+                 << " txId=" << opId.GetTxId() << Endl;
+
+            auto claimResult = context.SS->VersionRegistry.ClaimVersionChange(
+                opId, indexPathId, oldIndexVersion, newIndexVersion,
+                ETxType::TxDropCdcStreamAtTable, "Early CDC stream drop index version claim");
+
+            if (claimResult == EClaimResult::Claimed) {
+                // Persist the claim so it survives restarts
+                NIceDb::TNiceDb db(context.GetDB());
+                context.SS->PersistPendingVersionChange(db,
+                    *context.SS->VersionRegistry.GetPendingChange(indexPathId));
+
+                Cerr << "DEBUG DoDropStream: Claimed version for index " << indexPathId << Endl;
+            } else if (claimResult == EClaimResult::Joined) {
+                Cerr << "DEBUG DoDropStream: Joined existing claim for index " << indexPathId << Endl;
+            }
         }
     }
 
