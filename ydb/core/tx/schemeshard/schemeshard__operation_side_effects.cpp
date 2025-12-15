@@ -1157,10 +1157,11 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     if (operation->Publications.emplace(pathId, version).second) {
                         ss->PersistPublishingPath(db, txId, pathId, version);
                     }
-                }
-
-                if (!filteredPathsToPublish.empty()) {
-                    ss->PublishToSchemeBoard(txId, std::move(filteredPathsToPublish), ctx);
+                    // Add to PublishPaths for proper handling during init.
+                    // During init, these will be extracted by ExtractPublicationsToSchemeBoard()
+                    // and sent via DelayPublications. During normal operation, DoPublish()
+                    // will send them immediately.
+                    PublishPaths[txId].push_back(pathId);
                 }
             }
         }
