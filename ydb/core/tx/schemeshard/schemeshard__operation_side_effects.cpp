@@ -998,6 +998,11 @@ void TSideEffects::DoDoneParts(TSchemeShard *ss, const TActorContext &ctx) {
 }
 
 void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTransactionContext &txc, const TActorContext &ctx) {
+    // Collect transactions that need version claim cleanup
+    // We'll clear claims AFTER all transactions are processed to avoid race conditions
+    // where one transaction checks for pending claims from another transaction in the same batch
+    TVector<TTxId> transactionsToCleanup;
+
     for (auto& txId: DoneTransactions) {
 
         if (!ss->Operations.contains(txId)) {
@@ -1058,13 +1063,15 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
             ss->RemoveTx(ctx, db, TOperationId(txId, partId), nullptr);
         }
 
-        // Apply and cleanup pending version changes for this transaction
+        // Mark version changes as applied and persist cleanup, but DON'T remove from registry yet
+        // We need to keep claims in the registry until ALL transactions in this batch are processed
+        // so that the filtering logic below can check for pending claims from other transactions
         if (auto* claimedPaths = ss->VersionRegistry.GetClaimedPaths(txId)) {
             for (const TPathId& pathId : *claimedPaths) {
                 ss->PersistRemovePendingVersionChange(db, pathId);
             }
             ss->VersionRegistry.MarkApplied(txId);
-            ss->VersionRegistry.RemoveTransaction(txId);
+            transactionsToCleanup.push_back(txId);  // Schedule for cleanup after all tx processing
         }
 
         // Publish all deferred paths with final versions now that operation is complete
@@ -1116,12 +1123,21 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     if (ss->PathsById.contains(pathId)) {
                         auto pathElement = ss->PathsById.at(pathId);
                         if (pathElement->IsTable()) {
+                            Cerr << "DEBUG DoDoneTransactions: Checking table " << pathId
+                                 << " (" << pathElement->Name << ") for child index claims, txId=" << txId << Endl;
                             // Check if any child index has pending version change from different txId
                             for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
                                 auto childPath = ss->PathsById.at(childPathId);
+                                Cerr << "DEBUG DoDoneTransactions: Child " << childPathId
+                                     << " (" << childName << ") IsTableIndex=" << childPath->IsTableIndex() << Endl;
                                 if (childPath->IsTableIndex()) {
-                                    if (ss->VersionRegistry.HasPendingChange(childPathId)) {
-                                        auto claimingTxId = ss->VersionRegistry.GetClaimingTxId(childPathId);
+                                    bool hasPending = ss->VersionRegistry.HasPendingChange(childPathId);
+                                    auto claimingTxId = ss->VersionRegistry.GetClaimingTxId(childPathId);
+                                    Cerr << "DEBUG DoDoneTransactions: Index " << childPathId
+                                         << " HasPendingChange=" << hasPending
+                                         << " ClaimingTxId=" << (claimingTxId ? ToString(*claimingTxId) : "None")
+                                         << " ourTxId=" << txId << Endl;
+                                    if (hasPending) {
                                         if (claimingTxId && *claimingTxId != txId) {
                                             // Another transaction will modify this index version
                                             // Let that transaction publish the table instead
@@ -1219,6 +1235,14 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
         }
 
         ss->Operations.erase(txId);
+    }
+
+    // Now that ALL transactions have been processed and their deferred paths published,
+    // we can safely remove version claims from the registry. This is done last to ensure
+    // that the filtering logic above can check for pending claims from other transactions
+    // in the same batch (e.g., when txId=715759 checks if txId=715758 claimed a child index).
+    for (TTxId txId : transactionsToCleanup) {
+        ss->VersionRegistry.RemoveTransaction(txId);
     }
 }
 
