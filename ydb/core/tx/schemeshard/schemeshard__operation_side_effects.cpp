@@ -160,8 +160,6 @@ void TSideEffects::RePublishToSchemeBoard(TOperationId opId, TPathId pathId) {
 }
 
 void TSideEffects::DeferPublishToSchemeBoard(TOperationId opId, TPathId pathId) {
-    Cerr << "DEBUG TSideEffects::DeferPublishToSchemeBoard: opId=" << opId
-         << " pathId=" << pathId << Endl;
     DeferredPublishPaths[opId.GetTxId()].push_back(pathId);
 }
 
@@ -174,11 +172,6 @@ void TSideEffects::Dependence(TTxId parent, TTxId child) {
 }
 
 void TSideEffects::ApplyOnExecute(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
-    static bool loggedOnce = false;
-    if (!loggedOnce) {
-        Cerr << "=== DEBUG BUILD MARKER: schemeshard__operation_side_effects.cpp is using NEW code ===" << Endl;
-        loggedOnce = true;
-    }
     LOG_TRACE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "TSideEffects ApplyOnExecute"
                 << " at tablet# " << ss->TabletID());
@@ -1003,12 +996,6 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
     // where one transaction checks for pending claims from another transaction in the same batch
     TVector<TTxId> transactionsToCleanup;
 
-    Cerr << "DEBUG DoDoneTransactions: === START === with " << DoneTransactions.size() << " transactions:";
-    for (auto& t : DoneTransactions) {
-        Cerr << " " << t;
-    }
-    Cerr << Endl;
-
     for (auto& txId: DoneTransactions) {
 
         if (!ss->Operations.contains(txId)) {
@@ -1073,23 +1060,16 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
         // We need to keep claims in the registry until ALL transactions in this batch are processed
         // so that the filtering logic below can check for pending claims from other transactions
         if (auto* claimedPaths = ss->VersionRegistry.GetClaimedPaths(txId)) {
-            Cerr << "DEBUG DoDoneTransactions: txId=" << txId << " has " << claimedPaths->size() << " claimed paths:";
             for (const TPathId& pathId : *claimedPaths) {
-                Cerr << " " << pathId;
                 ss->PersistRemovePendingVersionChange(db, pathId);
             }
-            Cerr << Endl;
             ss->VersionRegistry.MarkApplied(txId);
             transactionsToCleanup.push_back(txId);  // Schedule for cleanup after all tx processing
-        } else {
-            Cerr << "DEBUG DoDoneTransactions: txId=" << txId << " has NO claimed paths" << Endl;
         }
 
         // Publish all deferred paths with final versions now that operation is complete
         const auto& deferredPaths = operation->GetDeferredPublishPaths();
         if (!deferredPaths.empty()) {
-            Cerr << "DEBUG DoDoneTransactions: Publishing " << deferredPaths.size()
-                 << " deferred paths for txId=" << txId << Endl;
             LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                        "Publishing " << deferredPaths.size()
                            << " deferred paths for txId: " << txId);
@@ -1124,9 +1104,10 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                 // for proper DbRefCount tracking. The code below will move these to
                 // ss->Publications[txId] if they're still pending.
 
-                // First pass: filter out tables whose child indexes have pending version
+                // First pass: filter out tables whose child indexes have pending CDC-related version
                 // changes from OTHER transactions. Those tables should be published by
                 // the other transaction with the correct index version.
+                // Note: This filtering only applies to CDC operations to avoid affecting other operations.
                 TDeque<TPathId> filteredPathsToPublish;
                 for (const TPathId& pathId : pathsToPublish) {
                     bool skipThisTable = false;
@@ -1134,34 +1115,27 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     if (ss->PathsById.contains(pathId)) {
                         auto pathElement = ss->PathsById.at(pathId);
                         if (pathElement->IsTable()) {
-                            Cerr << "DEBUG DoDoneTransactions: Checking table " << pathId
-                                 << " (" << pathElement->Name << ") for child index claims, txId=" << txId << Endl;
-                            // Check if any child index has pending version change from different txId
+                            // Check if any child index has pending CDC-related version change from different txId
                             for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
                                 auto childPath = ss->PathsById.at(childPathId);
-                                Cerr << "DEBUG DoDoneTransactions: Child " << childPathId
-                                     << " (" << childName << ") IsTableIndex=" << childPath->IsTableIndex() << Endl;
                                 if (childPath->IsTableIndex()) {
-                                    bool hasPending = ss->VersionRegistry.HasPendingChange(childPathId);
-                                    auto claimingTxId = ss->VersionRegistry.GetClaimingTxId(childPathId);
-                                    Cerr << "DEBUG DoDoneTransactions: Index " << childPathId
-                                         << " HasPendingChange=" << hasPending
-                                         << " ClaimingTxId=" << (claimingTxId ? ToString(*claimingTxId) : "None")
-                                         << " ourTxId=" << txId << Endl;
-                                    if (hasPending) {
-                                        if (claimingTxId && *claimingTxId != txId) {
-                                            // Another transaction will modify this index version
+                                    if (auto* pendingChange = ss->VersionRegistry.GetPendingChange(childPathId)) {
+                                        // Only apply filtering for CDC-related operations
+                                        bool isCdcRelated =
+                                            pendingChange->OperationType == ETxType::TxDropCdcStreamAtTable ||
+                                            pendingChange->OperationType == ETxType::TxDropCdcStream ||
+                                            pendingChange->OperationType == ETxType::TxDropCdcStreamAtTableDropSnapshot ||
+                                            pendingChange->OperationType == ETxType::TxCreateCdcStreamAtTable ||
+                                            pendingChange->OperationType == ETxType::TxCreateCdcStream ||
+                                            pendingChange->OperationType == ETxType::TxCreateCdcStreamAtTableWithInitialScan;
+
+                                        if (isCdcRelated && pendingChange->ClaimingTxId != txId) {
+                                            // Another CDC transaction will modify this index version
                                             // Let that transaction publish the table instead
-                                            Cerr << "DEBUG DoDoneTransactions: Skipping table " << pathId
-                                                 << " (" << pathElement->Name << ")"
-                                                 << " because child index " << childPathId
-                                                 << " (" << childName << ")"
-                                                 << " has pending version change from txId=" << *claimingTxId
-                                                 << " (we are txId=" << txId << ")" << Endl;
                                             LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                                                         "Skipping table " << pathId
                                                         << " publish because child index " << childPathId
-                                                        << " has pending version from txId=" << *claimingTxId
+                                                        << " has pending CDC version from txId=" << pendingChange->ClaimingTxId
                                                         << " (current txId=" << txId << ")");
                                             skipThisTable = true;
                                             break;
@@ -1183,41 +1157,8 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
                     if (operation->Publications.emplace(pathId, version).second) {
                         ss->PersistPublishingPath(db, txId, pathId, version);
                     }
-
-                    // DEBUG: Log index versions for tables being published
-                    auto pathElement = ss->PathsById.at(pathId);
-                    if (pathElement->IsTable() && ss->Tables.contains(pathId)) {
-                        Cerr << "DEBUG DoDoneTransactions: Publishing table txId=" << txId
-                             << " pathId=" << pathId
-                             << " tableName=" << pathElement->Name
-                             << " tableAlterVersion=" << ss->Tables.at(pathId)->AlterVersion << Endl;
-                        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                    "DEBUG DoDoneTransactions publishing table: txId=" << txId
-                                    << " pathId=" << pathId
-                                    << " tableAlterVersion=" << ss->Tables.at(pathId)->AlterVersion);
-
-                        // Log child index versions
-                        for (const auto& [childName, childPathId] : pathElement->GetChildren()) {
-                            auto childPath = ss->PathsById.at(childPathId);
-                            if (childPath->IsTableIndex() && ss->Indexes.contains(childPathId)) {
-                                Cerr << "DEBUG DoDoneTransactions: Child index txId=" << txId
-                                     << " tablePath=" << pathId
-                                     << " indexPath=" << childPathId
-                                     << " indexName=" << childName
-                                     << " indexAlterVersion=" << ss->Indexes.at(childPathId)->AlterVersion << Endl;
-                                LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                                            "DEBUG DoDoneTransactions table child index: txId=" << txId
-                                            << " tablePath=" << pathId
-                                            << " indexPath=" << childPathId
-                                            << " indexName=" << childName
-                                            << " indexAlterVersion=" << ss->Indexes.at(childPathId)->AlterVersion);
-                            }
-                        }
-                    }
                 }
 
-                Cerr << "DEBUG DoDoneTransactions: Calling ss->PublishToSchemeBoard for txId=" << txId
-                     << " with " << filteredPathsToPublish.size() << " paths (filtered from " << pathsToPublish.size() << ")" << Endl;
                 if (!filteredPathsToPublish.empty()) {
                     ss->PublishToSchemeBoard(txId, std::move(filteredPathsToPublish), ctx);
                 }
@@ -1252,12 +1193,9 @@ void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTr
     // we can safely remove version claims from the registry. This is done last to ensure
     // that the filtering logic above can check for pending claims from other transactions
     // in the same batch (e.g., when txId=715759 checks if txId=715758 claimed a child index).
-    Cerr << "DEBUG DoDoneTransactions: Cleanup phase - removing " << transactionsToCleanup.size() << " transactions from registry" << Endl;
     for (TTxId txId : transactionsToCleanup) {
-        Cerr << "DEBUG DoDoneTransactions: RemoveTransaction txId=" << txId << Endl;
         ss->VersionRegistry.RemoveTransaction(txId);
     }
-    Cerr << "DEBUG DoDoneTransactions: === END ===" << Endl;
 }
 
 void TSideEffects::DoWaitShardCreated(TSchemeShard* ss, const TActorContext&) {

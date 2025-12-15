@@ -606,11 +606,6 @@ void DoDropStream(
             ui64 oldIndexVersion = index->AlterVersion;
             ui64 newIndexVersion = oldIndexVersion + 1;
 
-            Cerr << "DEBUG DoDropStream: Registering early version claim for index " << indexPathId
-                 << " oldVersion=" << oldIndexVersion
-                 << " newVersion=" << newIndexVersion
-                 << " txId=" << opId.GetTxId() << Endl;
-
             auto claimResult = context.SS->VersionRegistry.ClaimVersionChange(
                 opId, indexPathId, oldIndexVersion, newIndexVersion,
                 ETxType::TxDropCdcStreamAtTable, "Early CDC stream drop index version claim");
@@ -620,10 +615,6 @@ void DoDropStream(
                 NIceDb::TNiceDb db(context.GetDB());
                 context.SS->PersistPendingVersionChange(db,
                     *context.SS->VersionRegistry.GetPendingChange(indexPathId));
-
-                Cerr << "DEBUG DoDropStream: Claimed version for index " << indexPathId << Endl;
-            } else if (claimResult == EClaimResult::Joined) {
-                Cerr << "DEBUG DoDropStream: Joined existing claim for index " << indexPathId << Endl;
             }
         }
     }
