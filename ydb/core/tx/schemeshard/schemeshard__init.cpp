@@ -4028,6 +4028,36 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
 
                 if (Self->Operations.contains(txId)) {
                     Self->Operations.at(txId)->AddDeferredPublishPath(pathId);
+                } else {
+                    // Operation doesn't exist anymore - it must have completed.
+                    // Convert deferred path to a regular publication so it gets sent to SchemeBoard.
+                    // Delete the deferred path record and add to publications.
+                    db.Table<Schema::DeferredPublishPaths>()
+                        .Key(txId, pathId.OwnerId, pathId.LocalPathId)
+                        .Delete();
+
+                    if (Self->PathsById.contains(pathId) && !Self->PathsById.at(pathId)->Dropped()) {
+                        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                    "Converting orphaned deferred path to publication"
+                                        << ", txId: " << txId
+                                        << ", pathId: " << pathId
+                                        << ", at schemeshard: " << Self->TabletID());
+
+                        // Add to publications so it gets sent to SchemeBoard
+                        const ui64 version = Self->GetPathVersion(TPath::Init(pathId, Self)).GetGeneralVersion();
+                        Self->Publications[txId].Paths.emplace(pathId, version);
+                        Self->PersistPublishingPath(db, txId, pathId, version);
+
+                        Publications[txId].push_back(pathId);
+                        Self->IncrementPathDbRefCount(pathId);
+                    } else {
+                        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                                    "Dropping orphaned deferred path"
+                                        << " (path non-existent or dropped)"
+                                        << ", txId: " << txId
+                                        << ", pathId: " << pathId
+                                        << ", at schemeshard: " << Self->TabletID());
+                    }
                 }
             }
         }
