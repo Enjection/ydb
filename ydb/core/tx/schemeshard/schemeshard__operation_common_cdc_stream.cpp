@@ -276,7 +276,17 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 break;
 
             case EClaimResult::Joined:
-                // Sibling already handled
+                // Sibling or early claim already registered the claim, but we still need to bump version
+                // if it hasn't been bumped yet (e.g., early claim at Propose time doesn't bump)
+                if (index->AlterVersion < newIndexVersion) {
+                    index->AlterVersion = newIndexVersion;
+                    context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
+                    // Defer publish for grandparent since we're modifying the index version
+                    if (versionCtx.GrandParentPathId != InvalidPathId) {
+                        context.SS->ClearDescribePathCaches(context.SS->PathsById.at(versionCtx.GrandParentPathId));
+                        context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.GrandParentPathId);
+                    }
+                }
                 break;
 
             case EClaimResult::Conflict:
