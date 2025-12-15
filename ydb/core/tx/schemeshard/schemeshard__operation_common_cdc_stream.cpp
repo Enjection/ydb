@@ -281,7 +281,9 @@ bool TProposeAtTable::HandleReply(TEvPrivate::TEvOperationPlan::TPtr& ev, TOpera
                 if (index->AlterVersion < newIndexVersion) {
                     index->AlterVersion = newIndexVersion;
                     context.SS->PersistTableIndexAlterVersion(db, versionCtx.ParentPathId, index);
-                    // Defer publish for grandparent since we're modifying the index version
+                    // Defer publish for the index itself
+                    context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.ParentPathId);
+                    // Also defer publish for grandparent since we're modifying the index version
                     if (versionCtx.GrandParentPathId != InvalidPathId) {
                         context.SS->ClearDescribePathCaches(context.SS->PathsById.at(versionCtx.GrandParentPathId));
                         context.OnComplete.DeferPublishToSchemeBoard(OperationId, versionCtx.GrandParentPathId);
