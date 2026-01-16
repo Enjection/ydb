@@ -57,6 +57,10 @@ void TStorageChanges::Apply(TSchemeShard* ss, NTabletFlatExecutor::TTransactionC
         ss->PersistTable(db, pId);
     }
 
+    for (const auto& [pathId, alter] : AddAlterTables) {
+        ss->PersistAddAlterTable(db, pathId, alter);
+    }
+
     for (const auto& [pId, snapshotTxId] : TableSnapshots) {
         ss->PersistSnapshotTable(db, snapshotTxId, pId);
     }

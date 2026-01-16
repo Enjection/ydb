@@ -147,8 +147,7 @@ public:
                 srcTable->InitAlterData(OperationId);
                 ui64 coordVersion = srcTable->AlterData->CoordinatedSchemaVersion.GetOrElse(srcTable->AlterVersion + 1);
 
-                NIceDb::TNiceDb db(context.GetDB());
-                context.SS->PersistAddAlterTable(db, txState->SourcePathId, srcTable->AlterData);
+                context.DbChanges.PersistAddAlterTable(txState->SourcePathId, srcTable->AlterData);
 
                 if (hasDrop) {
                     auto& dropNotice = *combined.MutableDropCdcStreamNotice();

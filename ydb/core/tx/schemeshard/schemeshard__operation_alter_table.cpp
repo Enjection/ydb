@@ -216,7 +216,7 @@ void PrepareChanges(TOperationId opId, TPathElement::TPtr path, TTableInfo::TPtr
         context.SS->PersistShardTx(db, shardIdx, opId.GetTxId());
     }
 
-    context.SS->PersistAddAlterTable(db, path->PathId, table->AlterData);
+    context.DbChanges.PersistAddAlterTable(path->PathId, table->AlterData);
     context.SS->PersistTxState(db, opId);
 
 

@@ -374,8 +374,7 @@ protected:
         table->InitAlterData(OperationId);
         notice.SetTableSchemaVersion(*table->AlterData->CoordinatedSchemaVersion);
 
-        NIceDb::TNiceDb db(context.GetDB());
-        context.SS->PersistAddAlterTable(db, pathId, table->AlterData);
+        context.DbChanges.PersistAddAlterTable(pathId, table->AlterData);
     }
 
 public:

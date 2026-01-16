@@ -59,6 +59,8 @@ class TStorageChanges: public TSimpleRefCount<TStorageChanges> {
     TDeque<std::pair<TPathId, TTopicInfo::TPtr>> PersQueueGroup;
     TDeque<std::pair<TPathId, TTopicInfo::TPtr>> AddPersQueueGroupAlter;
 
+    TDeque<std::pair<TPathId, TTableInfo::TAlterDataPtr>> AddAlterTables;
+
 public:
     ~TStorageChanges() = default;
 
@@ -80,6 +82,10 @@ public:
 
     void PersistTable(const TPathId& pathId) {
         Tables.push_back(pathId);
+    }
+
+    void PersistAddAlterTable(const TPathId& pathId, const TTableInfo::TAlterDataPtr& alter) {
+        AddAlterTables.emplace_back(pathId, alter);
     }
 
     void PersistTableSnapshot(const TPathId& pathId, TTxId snapshotTxId) {
