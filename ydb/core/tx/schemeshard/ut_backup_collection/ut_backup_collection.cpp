@@ -2685,7 +2685,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         UNIT_ASSERT_VALUES_EQUAL(tableDesc4.GetPathDescription().GetTable().CdcStreamsSize(), 1);
     }
 
-    Y_UNIT_TEST(AlterTableInBackupCollectionProtection) {
+    Y_UNIT_TEST(DropCollectionAfterIncrementalRestore) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
         ui64 txId = 100;
@@ -2736,7 +2736,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
 
         runtime.SimulateSleep(TDuration::MilliSeconds(100));
 
-        TestDropBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections", 
+        TestDropBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections",
             "Name: \"" DEFAULT_NAME_1 "\"");
         env.TestWaitNotification(runtime, txId);
 
