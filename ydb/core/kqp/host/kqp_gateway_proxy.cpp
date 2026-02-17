@@ -1644,6 +1644,19 @@ public:
                 phyTx.SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
                 phyTx.MutableSchemeOperation()->MutableBackup()->Swap(&tx);
 
+                auto txIndex = phyQuery.TransactionsSize() - 1;
+                auto& queryBinding = *phyQuery.AddResultBindings();
+                auto& txBinding = *queryBinding.MutableTxResultBinding();
+                txBinding.SetTxIndex(txIndex);
+                txBinding.SetResultIndex(0);
+
+                auto* meta = queryBinding.MutableResultSetMeta();
+                auto* col = meta->add_columns();
+                col->set_name("operation_id");
+                col->mutable_type()->set_type_id(Ydb::Type::UTF8);
+
+                SessionCtx->Query().PreparingQuery->AddResults();
+
                 TGenericResult result;
                 result.SetSuccess();
                 return MakeFuture(result);
@@ -1687,6 +1700,19 @@ public:
                 phyTx.SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
                 phyTx.MutableSchemeOperation()->MutableBackupIncremental()->Swap(&tx);
 
+                auto txIndex = phyQuery.TransactionsSize() - 1;
+                auto& queryBinding = *phyQuery.AddResultBindings();
+                auto& txBinding = *queryBinding.MutableTxResultBinding();
+                txBinding.SetTxIndex(txIndex);
+                txBinding.SetResultIndex(0);
+
+                auto* meta = queryBinding.MutableResultSetMeta();
+                auto* col = meta->add_columns();
+                col->set_name("operation_id");
+                col->mutable_type()->set_type_id(Ydb::Type::UTF8);
+
+                SessionCtx->Query().PreparingQuery->AddResults();
+
                 TGenericResult result;
                 result.SetSuccess();
                 return MakeFuture(result);
@@ -1729,6 +1755,19 @@ public:
                 auto& phyTx = *phyQuery.AddTransactions();
                 phyTx.SetType(NKqpProto::TKqpPhyTx::TYPE_SCHEME);
                 phyTx.MutableSchemeOperation()->MutableRestore()->Swap(&tx);
+
+                auto txIndex = phyQuery.TransactionsSize() - 1;
+                auto& queryBinding = *phyQuery.AddResultBindings();
+                auto& txBinding = *queryBinding.MutableTxResultBinding();
+                txBinding.SetTxIndex(txIndex);
+                txBinding.SetResultIndex(0);
+
+                auto* meta = queryBinding.MutableResultSetMeta();
+                auto* col = meta->add_columns();
+                col->set_name("operation_id");
+                col->mutable_type()->set_type_id(Ydb::Type::UTF8);
+
+                SessionCtx->Query().PreparingQuery->AddResults();
 
                 TGenericResult result;
                 result.SetSuccess();

@@ -207,6 +207,7 @@ private:
     TVector<TVector<TKqpPhyTxHolder::TConstPtr>> TxHolders;
     TTxAllocatorState::TPtr AllocState;
     THashSet<ui32> BuiltResultIndexes;
+
     mutable TPartitionedParamMap PartitionedParams;
 
 public:

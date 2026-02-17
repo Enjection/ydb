@@ -15462,6 +15462,149 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         testHelper.ReadData("SELECT * FROM `/Root/ColumnTableTest` WHERE id=3",
             "[[#;#;#;#;#;3]]");
     }
+
+    Y_UNIT_TEST(BackupReturnsOperationId) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
+            .SetEnableBackupService(true));
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        // Create backup collection (uses existing /Root/KeyValue table from TKikimrRunner)
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE BACKUP COLLECTION `my_backup`
+                    (TABLE `/Root/KeyValue`)
+                WITH(
+                    STORAGE = 'cluster'
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        // Execute BACKUP via query service (returns result sets)
+        auto queryClient = kikimr.GetQueryClient();
+        auto result = queryClient.ExecuteQuery(R"(
+            BACKUP `my_backup`
+        )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        // Verify result set with operation_id
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+        auto rs = result.GetResultSet(0);
+        TResultSetParser parser(rs);
+        UNIT_ASSERT(parser.TryNextRow());
+        auto operationId = parser.ColumnParser("operation_id").GetUtf8();
+        UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+    }
+
+    Y_UNIT_TEST(BackupIncrementalReturnsOperationId) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
+            .SetEnableBackupService(true));
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE BACKUP COLLECTION `my_backup_inc`
+                    (TABLE `/Root/KeyValue`)
+                WITH(
+                    STORAGE = 'cluster',
+                    INCREMENTAL_BACKUP_ENABLED = 'true'
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        // Full backup first (required before incremental)
+        auto queryClient = kikimr.GetQueryClient();
+        {
+            auto result = queryClient.ExecuteQuery(R"(
+                BACKUP `my_backup_inc`
+            )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        Sleep(TDuration::Seconds(1));
+
+        // Now do incremental backup
+        auto result = queryClient.ExecuteQuery(R"(
+            BACKUP `my_backup_inc` INCREMENTAL
+        )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+        auto rs = result.GetResultSet(0);
+        TResultSetParser parser(rs);
+        UNIT_ASSERT(parser.TryNextRow());
+        auto operationId = parser.ColumnParser("operation_id").GetUtf8();
+        UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+    }
+
+    Y_UNIT_TEST(RestoreReturnsOperationId) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
+            .SetEnableBackupService(true));
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE BACKUP COLLECTION `my_backup_restore`
+                    (TABLE `/Root/KeyValue`)
+                WITH(
+                    STORAGE = 'cluster'
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        // Run backup first (needed before restore)
+        auto queryClient = kikimr.GetQueryClient();
+        {
+            auto result = queryClient.ExecuteQuery(R"(
+                BACKUP `my_backup_restore`
+            )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        // Drop the original table before restore (restore doesn't overwrite)
+        {
+            auto result = session.ExecuteSchemeQuery(R"(
+                DROP TABLE `/Root/KeyValue`;
+            )").GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        // Execute RESTORE
+        auto result = queryClient.ExecuteQuery(R"(
+            RESTORE `my_backup_restore`
+        )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+        auto rs = result.GetResultSet(0);
+        TResultSetParser parser(rs);
+        UNIT_ASSERT(parser.TryNextRow());
+        auto operationId = parser.ColumnParser("operation_id").GetUtf8();
+        UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+    }
 }
 
 } // namespace NKqp

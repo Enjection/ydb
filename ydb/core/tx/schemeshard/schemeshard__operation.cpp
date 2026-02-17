@@ -184,6 +184,8 @@ bool TSchemeShard::ProcessOperationParts(
         }
     }
 
+    response->Record.SetOperationId(ToString(ui64(txId)));
+
     return true;
 }
 

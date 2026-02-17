@@ -1862,7 +1862,8 @@ public:
         auto executerActor = CreateKqpSchemeExecuter(
             tx, QueryState->GetType(), SelfId(), requestType, Settings.Database, userToken, clientAddress,
             temporary, /* createTmpDir */ temporary && !TempTablesState.NeedCleaning,
-            QueryState->IsCreateTableAs(), TempTablesState.TempDirName, QueryState->UserRequestContext, KqpTempTablesAgentActor);
+            QueryState->IsCreateTableAs(), TempTablesState.TempDirName, QueryState->UserRequestContext,
+            QueryState->QueryData->GetAllocState(), KqpTempTablesAgentActor);
 
         ExecuterId = RegisterWithSameMailbox(executerActor);
 

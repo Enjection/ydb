@@ -1199,6 +1199,8 @@ public:
     using TPtr = TIntrusivePtr<IKikimrGateway>;
 
     struct TGenericResult : public NCommon::TOperationResult {
+        TMaybe<ui64> SchemeOpTxId;    // TxProxy TxId (kept for backward compat)
+        TMaybe<TString> SchemeOpId;   // SchemeShard-provided operation ID
     };
 
     struct TListPathResult : public TGenericResult {
