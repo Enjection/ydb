@@ -2281,6 +2281,13 @@ public:
         if (!ev->GetTxResults().empty()) {
             QueryState->QueryData->AddTxResults(QueryState->CurrentTx - 1, std::move(ev->GetTxResults()));
         }
+        // Store direct Ydb results from scheme operations (bypass MiniKQL pipeline)
+        if (!ev->DirectYdbResults.empty()) {
+            for (auto& [resultIndex, resultSet] : ev->DirectYdbResults) {
+                QueryState->QueryData->AddDirectYdbResult(
+                    QueryState->CurrentTx - 1, resultIndex, std::move(resultSet));
+            }
+        }
         QueryState->QueryData->AddTxHolders(std::move(ev->GetTxHolders()));
 
         QueryState->TxCtx->AcceptIncomingSnapshot(ev->Snapshot);

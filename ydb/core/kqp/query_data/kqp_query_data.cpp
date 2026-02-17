@@ -209,6 +209,12 @@ NKikimrMiniKQL::TResult* TQueryData::GetMkqlTxResult(const NKqpProto::TKqpPhyRes
 bool TQueryData::HasTrailingTxResult(const NKqpProto::TKqpPhyResultBinding& rb) {
     auto txIndex = rb.GetTxResultBinding().GetTxIndex();
     auto resultIndex = rb.GetTxResultBinding().GetResultIndex();
+
+    if (HasDirectYdbResult(txIndex, resultIndex)) {
+        return true;
+    }
+
+    YQL_ENSURE(HasResult(txIndex, resultIndex));
     return TxResults[txIndex][resultIndex].HasTrailingResults();
 }
 
@@ -216,6 +222,11 @@ Ydb::ResultSet* TQueryData::GetYdbTxResult(const NKqpProto::TKqpPhyResultBinding
 {
     auto txIndex = rb.GetTxResultBinding().GetTxIndex();
     auto resultIndex = rb.GetTxResultBinding().GetResultIndex();
+
+    // Check for direct (pre-built) results first (from scheme operations)
+    if (auto* directResult = GetDirectYdbResult(txIndex, resultIndex, arena)) {
+        return directResult;
+    }
 
     YQL_ENSURE(HasResult(txIndex, resultIndex));
 

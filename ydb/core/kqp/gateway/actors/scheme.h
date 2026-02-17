@@ -57,11 +57,12 @@ public:
                 ui64 schemeShardTabletId = response.GetSchemeShardTabletId();
                 IActor* pipeActor = NTabletPipe::CreateClient(ctx.SelfID, schemeShardTabletId);
                 Y_ABORT_UNLESS(pipeActor);
-                ShemePipeActorId = ctx.Register(pipeActor);
+                SchemePipeActorId = ctx.Register(pipeActor);
 
                 auto request = MakeHolder<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletion>();
                 request->Record.SetTxId(response.GetTxId());
-                NTabletPipe::SendData(ctx, ShemePipeActorId, request.Release());
+                TxId_ = response.GetTxId();
+                NTabletPipe::SendData(ctx, SchemePipeActorId, request.Release());
 
                 LOG_DEBUG_S(ctx, NKikimrServices::KQP_GATEWAY, "Sent TEvNotifyTxCompletion request"
                     << ", TxId: " << response.GetTxId());
@@ -90,10 +91,13 @@ public:
                     if (!response.GetIssues().empty()) {
                         NYql::TIssues issues;
                         NYql::IssuesFromMessage(response.GetIssues(), issues);
-                        Promise.SetValue(NYql::NCommon::ResultFromIssues<TResult>(NYql::TIssuesIds::SUCCESS, "", issues));
+                        auto result = NYql::NCommon::ResultFromIssues<TResult>(NYql::TIssuesIds::SUCCESS, "", issues);
+                        result.SchemeOpTxId = response.GetTxId();
+                        Promise.SetValue(std::move(result));
                     } else {
                         TResult result;
                         result.SetSuccess();
+                        result.SchemeOpTxId = response.GetTxId();
                         Promise.SetValue(std::move(result));
                     }
 
@@ -198,9 +202,9 @@ public:
 
         TResult result;
         result.SetSuccess();
-
+        result.SchemeOpTxId = TxId_;
         Promise.SetValue(std::move(result));
-        NTabletPipe::CloseClient(ctx, ShemePipeActorId);
+        NTabletPipe::CloseClient(ctx, SchemePipeActorId);
         this->Die(ctx);
     }
 
@@ -219,7 +223,8 @@ public:
     }
 
 private:
-    TActorId ShemePipeActorId;
+    TActorId SchemePipeActorId;
+    ui64 TxId_ = 0;
     bool FailedOnAlreadyExists = false;
     bool SuccessOnNotExist = false;
 };

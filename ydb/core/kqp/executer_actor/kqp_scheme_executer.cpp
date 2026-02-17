@@ -681,6 +681,7 @@ public:
             const auto& value = future.GetValue();
             auto ev = MakeHolder<TEvPrivate::TEvResult>();
             ev->Result.SetStatus(value.Status());
+            ev->Result.SchemeOpTxId = value.SchemeOpTxId;
 
             if (value.Issues()) {
                 NYql::TIssue rootIssue(TStringBuilder() << "Executing " << NKikimrSchemeOp::EOperationType_Name(operationType));
@@ -1021,11 +1022,39 @@ public:
         NTabletPipe::SendData(SelfId(), SchemePipeActorId_, ev.release());
     }
 
+    static bool IsBackupRestoreOp(const NKqpProto::TKqpSchemeOperation& schemeOp) {
+        switch (schemeOp.GetOperationCase()) {
+            case NKqpProto::TKqpSchemeOperation::kBackup:
+            case NKqpProto::TKqpSchemeOperation::kBackupIncremental:
+            case NKqpProto::TKqpSchemeOperation::kRestore:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     void HandleExecute(TEvPrivate::TEvResult::TPtr& ev) {
         auto& response = *ResponseEv->Record.MutableResponse();
 
         response.SetStatus(GetYdbStatus(ev->Get()->Result));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
+
+        // For backup/restore operations, attach operation_id result set
+        if (GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.SchemeOpTxId) {
+            const auto& schemeOp = PhyTx->GetSchemeOperation();
+            if (IsBackupRestoreOp(schemeOp)) {
+                Ydb::ResultSet resultSet;
+
+                auto* col = resultSet.add_columns();
+                col->set_name("operation_id");
+                col->mutable_type()->set_type_id(Ydb::Type::UTF8);
+
+                auto* row = resultSet.add_rows();
+                row->add_items()->set_text_value(ToString(*ev->Get()->Result.SchemeOpTxId));
+
+                ResponseEv->DirectYdbResults.emplace_back(0, std::move(resultSet));
+            }
+        }
 
         Send(Target, ResponseEv.release());
         PassAway();

@@ -207,6 +207,10 @@ private:
     TVector<TVector<TKqpPhyTxHolder::TConstPtr>> TxHolders;
     TTxAllocatorState::TPtr AllocState;
     THashSet<ui32> BuiltResultIndexes;
+
+    // Direct Ydb::ResultSet storage (for scheme ops that bypass MiniKQL pipeline)
+    THashMap<ui32, THashMap<ui32, Ydb::ResultSet>> DirectYdbResults;  // txIndex -> resultIndex -> ResultSet
+
     mutable TPartitionedParamMap PartitionedParams;
 
 public:
@@ -245,6 +249,26 @@ public:
 
     void AddBuiltResultIndex(ui32 resultIndex) {
         BuiltResultIndexes.insert(resultIndex);
+    }
+
+    void AddDirectYdbResult(ui32 txIndex, ui32 resultIndex, Ydb::ResultSet&& result) {
+        DirectYdbResults[txIndex][resultIndex] = std::move(result);
+    }
+
+    bool HasDirectYdbResult(ui32 txIndex, ui32 resultIndex) const {
+        auto txIt = DirectYdbResults.find(txIndex);
+        if (txIt == DirectYdbResults.end()) return false;
+        return txIt->second.contains(resultIndex);
+    }
+
+    Ydb::ResultSet* GetDirectYdbResult(ui32 txIndex, ui32 resultIndex, google::protobuf::Arena* arena) {
+        auto txIt = DirectYdbResults.find(txIndex);
+        if (txIt == DirectYdbResults.end()) return nullptr;
+        auto resIt = txIt->second.find(resultIndex);
+        if (resIt == txIt->second.end()) return nullptr;
+        auto* result = google::protobuf::Arena::Create<Ydb::ResultSet>(arena);
+        *result = resIt->second;
+        return result;
     }
 
     void ValidateParameter(const TString& name, const NKikimrMiniKQL::TType& type, NMiniKQL::TTypeEnvironment& txTypeEnv);

@@ -14,6 +14,7 @@
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io_factory.h>
 #include <ydb/library/yql/dq/runtime/dq_channel_service.h>
 #include <ydb/core/protos/table_service_config.pb.h>
+#include <ydb/public/api/protos/ydb_value.pb.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -44,6 +45,9 @@ struct TEvKqpExecuter {
         // For BATCH operations only
         TVector<TSerializedCellVec> BatchOperationMaxKeys;
         TVector<ui32> BatchOperationKeyIds;
+
+        // Direct Ydb::ResultSet results (for scheme ops that bypass MiniKQL pipeline)
+        TVector<std::pair<ui32, Ydb::ResultSet>> DirectYdbResults;
 
         enum class EExecutionType {
             Data,

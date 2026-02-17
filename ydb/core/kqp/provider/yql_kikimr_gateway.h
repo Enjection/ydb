@@ -1199,6 +1199,7 @@ public:
     using TPtr = TIntrusivePtr<IKikimrGateway>;
 
     struct TGenericResult : public NCommon::TOperationResult {
+        TMaybe<ui64> SchemeOpTxId;  // SchemeShard TxId for long operations (backup/restore)
     };
 
     struct TListPathResult : public TGenericResult {
