@@ -61,8 +61,9 @@ public:
 
                 auto request = MakeHolder<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletion>();
                 request->Record.SetTxId(response.GetTxId());
-                TxId_ = response.GetTxId();
-                OperationId_ = response.GetSchemeShardOperationId();
+                if (response.HasSchemeShardOperationId()) {
+                    OperationId_ = response.GetSchemeShardOperationId();
+                }
                 NTabletPipe::SendData(ctx, ShemePipeActorId, request.Release());
 
                 LOG_DEBUG_S(ctx, NKikimrServices::KQP_GATEWAY, "Sent TEvNotifyTxCompletion request"
@@ -93,14 +94,16 @@ public:
                         NYql::TIssues issues;
                         NYql::IssuesFromMessage(response.GetIssues(), issues);
                         auto result = NYql::NCommon::ResultFromIssues<TResult>(NYql::TIssuesIds::SUCCESS, "", issues);
-                        result.SchemeOpTxId = response.GetTxId();
-                        result.SchemeOpId = response.GetSchemeShardOperationId();
+                        if (response.HasSchemeShardOperationId()) {
+                            result.OperationId = response.GetSchemeShardOperationId();
+                        }
                         Promise.SetValue(std::move(result));
                     } else {
                         TResult result;
                         result.SetSuccess();
-                        result.SchemeOpTxId = response.GetTxId();
-                        result.SchemeOpId = response.GetSchemeShardOperationId();
+                        if (response.HasSchemeShardOperationId()) {
+                            result.OperationId = response.GetSchemeShardOperationId();
+                        }
                         Promise.SetValue(std::move(result));
                     }
 
@@ -205,8 +208,9 @@ public:
 
         TResult result;
         result.SetSuccess();
-        result.SchemeOpTxId = TxId_;
-        result.SchemeOpId = OperationId_;
+        if (!OperationId_.empty()) {
+            result.OperationId = OperationId_;
+        }
         Promise.SetValue(std::move(result));
         NTabletPipe::CloseClient(ctx, ShemePipeActorId);
         this->Die(ctx);
@@ -228,7 +232,6 @@ public:
 
 private:
     TActorId ShemePipeActorId;
-    ui64 TxId_ = 0;
     TString OperationId_;
     bool FailedOnAlreadyExists = false;
     bool SuccessOnNotExist = false;

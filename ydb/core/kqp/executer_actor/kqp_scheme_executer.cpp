@@ -686,8 +686,7 @@ public:
             const auto& value = future.GetValue();
             auto ev = MakeHolder<TEvPrivate::TEvResult>();
             ev->Result.SetStatus(value.Status());
-            ev->Result.SchemeOpTxId = value.SchemeOpTxId;
-            ev->Result.SchemeOpId = value.SchemeOpId;
+            ev->Result.OperationId = value.OperationId;
 
             if (value.Issues()) {
                 NYql::TIssue rootIssue(TStringBuilder() << "Executing " << NKikimrSchemeOp::EOperationType_Name(operationType));
@@ -1028,60 +1027,45 @@ public:
         NTabletPipe::SendData(SelfId(), SchemePipeActorId_, ev.release());
     }
 
-    static bool IsBackupRestoreOp(const NKqpProto::TKqpSchemeOperation& schemeOp) {
-        switch (schemeOp.GetOperationCase()) {
-            case NKqpProto::TKqpSchemeOperation::kBackup:
-            case NKqpProto::TKqpSchemeOperation::kBackupIncremental:
-            case NKqpProto::TKqpSchemeOperation::kRestore:
-                return true;
-            default:
-                return false;
-        }
-    }
-
     void HandleExecute(TEvPrivate::TEvResult::TPtr& ev) {
         auto& response = *ResponseEv->Record.MutableResponse();
 
         response.SetStatus(GetYdbStatus(ev->Get()->Result));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
-        // For backup/restore operations, attach operation_id as a proper MiniKQL TxResult
-        if (TxAlloc && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.SchemeOpId) {
-            const auto& schemeOp = PhyTx->GetSchemeOperation();
-            if (IsBackupRestoreOp(schemeOp)) {
-                auto guard = TxAlloc->TypeEnv.BindAllocator();
+        // If the SchemeShard provided an OperationId, attach it as a MiniKQL TxResult.
+        // Which operations carry an OperationId is decided by the SchemeShard;
+        // the executer just forwards whatever it receives.
+        if (TxAlloc && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
+            auto guard = TxAlloc->TypeEnv.BindAllocator();
 
-                // Build MiniKQL struct type: Struct<'operation_id': Utf8>
-                auto* utf8Type = NMiniKQL::TDataType::Create(
-                    NUdf::TDataType<NUdf::TUtf8>::Id, TxAlloc->TypeEnv);
-                std::pair<TString, NMiniKQL::TType*> members[] = {
-                    {"operation_id", utf8Type}
-                };
-                auto* structType = NMiniKQL::TStructType::Create(
-                    members, 1, TxAlloc->TypeEnv);
+            auto* utf8Type = NMiniKQL::TDataType::Create(
+                NUdf::TDataType<NUdf::TUtf8>::Id, TxAlloc->TypeEnv);
+            std::pair<TString, NMiniKQL::TType*> members[] = {
+                {"operation_id", utf8Type}
+            };
+            auto* structType = NMiniKQL::TStructType::Create(
+                members, 1, TxAlloc->TypeEnv);
 
-                // Create unboxed value row — use SchemeShard-provided operation ID
-                const TString& opIdStr = *ev->Get()->Result.SchemeOpId;
-                NUdf::TUnboxedValue* items = nullptr;
-                auto row = TxAlloc->HolderFactory.CreateDirectArrayHolder(1, items);
-                items[0] = NMiniKQL::MakeString(NUdf::TStringRef(opIdStr.data(), opIdStr.size()));
+            const TString& opIdStr = *ev->Get()->Result.OperationId;
+            NUdf::TUnboxedValue* items = nullptr;
+            auto row = TxAlloc->HolderFactory.CreateDirectArrayHolder(1, items);
+            items[0] = NMiniKQL::MakeString(NUdf::TStringRef(opIdStr.data(), opIdStr.size()));
 
-                // Build TxResult
-                TKqpExecuterTxResult txResult(
-                    /*isStream=*/false,
-                    structType,
-                    /*columnOrder=*/nullptr,
-                    /*columnHints=*/nullptr,
-                    /*queryResultIndex=*/TMaybe<ui32>(0));
-                NMiniKQL::TUnboxedValueBatch batch(structType);
-                batch.emplace_back(std::move(row));
-                txResult.Rows.swap(batch);
-                txResult.HasTrailingResult = true;
+            TKqpExecuterTxResult txResult(
+                /*isStream=*/false,
+                structType,
+                /*columnOrder=*/nullptr,
+                /*columnHints=*/nullptr,
+                /*queryResultIndex=*/TMaybe<ui32>(0));
+            NMiniKQL::TUnboxedValueBatch batch(structType);
+            batch.emplace_back(std::move(row));
+            txResult.Rows.swap(batch);
+            txResult.HasTrailingResult = true;
 
-                TVector<TKqpExecuterTxResult> results;
-                results.emplace_back(std::move(txResult));
-                ResponseEv->TxResults = std::move(results);
-            }
+            TVector<TKqpExecuterTxResult> results;
+            results.emplace_back(std::move(txResult));
+            ResponseEv->TxResults = std::move(results);
         }
 
         Send(Target, ResponseEv.release());

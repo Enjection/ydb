@@ -184,6 +184,8 @@ bool TSchemeShard::ProcessOperationParts(
         }
     }
 
+    // Expose txId as a string-formatted OperationId — used as a user-visible
+    // identifier (e.g. for backup/restore progress tracking).
     response->Record.SetOperationId(ToString(ui64(txId)));
 
     return true;
