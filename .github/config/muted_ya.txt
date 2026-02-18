@@ -59,6 +59,7 @@ ydb/core/transfer/ut/large TransferLarge.Transfer100KM_10P_LocalRead_TopicAutoPa
 ydb/core/transfer/ut/large TransferLarge.Transfer100KM_10P_RowTable_TopicAutoPartitioning
 ydb/core/transfer/ut/large TransferLarge.Transfer1KM_1KP_ColumnTable
 ydb/core/transfer/ut/large TransferLarge.Transfer1KM_1KP_RowTable
+ydb/core/tx/datashard/ut_incremental_backup IncrementalBackup.E2EBackupCollection
 ydb/core/tx/schemeshard/ut_base_reboots TTablesWithReboots.CopyAlterWithReboots
 ydb/core/tx/schemeshard/ut_base_reboots TTablesWithReboots.LostBorrowAckWithReboots
 ydb/core/tx/schemeshard/ut_base_reboots unittest.[*/*] chunk
