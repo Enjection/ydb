@@ -62,7 +62,7 @@ public:
                 auto request = MakeHolder<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletion>();
                 request->Record.SetTxId(response.GetTxId());
                 if (response.HasSchemeShardOperationId()) {
-                    OperationId_ = response.GetSchemeShardOperationId();
+                    OperationId = response.GetSchemeShardOperationId();
                 }
                 NTabletPipe::SendData(ctx, ShemePipeActorId, request.Release());
 
@@ -208,8 +208,8 @@ public:
 
         TResult result;
         result.SetSuccess();
-        if (!OperationId_.empty()) {
-            result.OperationId = OperationId_;
+        if (!OperationId.empty()) {
+            result.OperationId = OperationId;
         }
         Promise.SetValue(std::move(result));
         NTabletPipe::CloseClient(ctx, ShemePipeActorId);
@@ -232,7 +232,7 @@ public:
 
 private:
     TActorId ShemePipeActorId;
-    TString OperationId_;
+    TString OperationId;
     bool FailedOnAlreadyExists = false;
     bool SuccessOnNotExist = false;
 };

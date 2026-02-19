@@ -1033,9 +1033,6 @@ public:
         response.SetStatus(GetYdbStatus(ev->Get()->Result));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
-        // If the SchemeShard provided an OperationId, attach it as a MiniKQL TxResult.
-        // Which operations carry an OperationId is decided by the SchemeShard;
-        // the executer just forwards whatever it receives.
         if (TxAlloc && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
             auto guard = TxAlloc->TypeEnv.BindAllocator();
 

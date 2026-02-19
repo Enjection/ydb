@@ -184,10 +184,6 @@ bool TSchemeShard::ProcessOperationParts(
         }
     }
 
-    // Expose txId as a string-formatted OperationId — used as a user-visible
-    // identifier (e.g. for backup/restore progress tracking).
-    response->Record.SetOperationId(ToString(ui64(txId)));
-
     return true;
 }
 
@@ -298,7 +294,17 @@ THolder<TProposeResponse> TSchemeShard::IgniteOperation(TProposeRequest& request
         }
     }
 
-    //
+    for (const auto& transaction : record.GetTransaction()) {
+        switch (transaction.GetOperationType()) {
+            case NKikimrSchemeOp::ESchemeOpBackupBackupCollection:
+            case NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection:
+            case NKikimrSchemeOp::ESchemeOpRestoreBackupCollection:
+                response->Record.SetOperationId(ToString(ui64(txId)));
+                break;
+            default:
+                break;
+        }
+    }
 
     return std::move(response);
 }
