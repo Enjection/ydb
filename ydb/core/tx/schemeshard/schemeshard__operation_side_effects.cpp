@@ -935,7 +935,76 @@ void TSideEffects::DoDoneParts(TSchemeShard *ss, const TActorContext &ctx) {
     }
 }
 
+void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
+    if (ReadyToNotifyOperations.empty()) {
+        return;
+    }
+
+    NIceDb::TNiceDb db(txc.DB);
+    THashSet<TTxId> processedTxIds;
+
+    for (const auto& opId : ReadyToNotifyOperations) {
+        TTxId txId = opId.GetTxId();
+        if (!processedTxIds.insert(txId).second) {
+            continue; // Already processed this TxId (multi-part ops)
+        }
+
+        auto it = ss->Operations.find(txId);
+        if (it == ss->Operations.end()) {
+            continue;
+        }
+
+        TOperation::TPtr operation = it->second;
+        if (!operation->IsReadyToNotify()) {
+            continue; // Not all parts ready yet
+        }
+
+        // Use first part's TxState to get path and operation type
+        for (ui32 partIdx = 0; partIdx < operation->Parts.size(); ++partIdx) {
+            TOperationId partOpId(txId, partIdx);
+
+            auto txStateIt = ss->TxInFlight.find(partOpId);
+            if (txStateIt == ss->TxInFlight.end()) {
+                continue;
+            }
+
+            const TTxState& txState = txStateIt->second;
+
+            TPathId pathId = txState.TargetPathId;
+            if (!ss->PathsById.contains(pathId)) {
+                continue;
+            }
+
+            TPathElement::TPtr path = ss->PathsById.at(pathId);
+
+            ui64 seqId = ss->AllocateNotificationSequenceId(db);
+
+            TString pathName = path->Name;
+            NKikimrSchemeOp::EPathType objectType = path->PathType;
+            TString userSid = path->Owner;
+            ui64 schemaVersion = path->DirAlterVersion;
+
+            ss->PersistNotificationLogEntry(
+                db, seqId, txId, txState.TxType, pathId,
+                pathName, objectType, NKikimrScheme::StatusSuccess,
+                userSid, schemaVersion,
+                TString(), // description - deferred
+                ctx.Now());
+
+            LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "DoPersistNotifications: logged entry"
+                    << " seqId=" << seqId
+                    << " txId=" << txId
+                    << " path=" << pathName
+                    << " type=" << ui32(TSchemeShard::CollapseOperationType(txState.TxType)));
+
+            break; // One entry per transaction, using first part's path
+        }
+    }
+}
+
 void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTransactionContext &txc, const TActorContext &ctx) {
+    DoPersistNotifications(ss, txc, ctx);  // persist notification log entries before operations are erased
     for (auto& txId: DoneTransactions) {
 
         if (!ss->Operations.contains(txId)) {

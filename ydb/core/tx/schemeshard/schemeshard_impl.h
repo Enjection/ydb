@@ -95,6 +95,16 @@ struct TIncrementalRestoreState;
 struct TIndexBuildInfo;
 struct TIndexBuildShardStatus;
 
+enum class ENotificationOperationType : ui32 {
+    Create = 1,
+    Alter = 2,
+    Drop = 3,
+    BuildIndex = 4,
+    Backup = 5,
+    Restore = 6,
+    Other = 255,
+};
+
 class TSchemeShard
     : public TActor<TSchemeShard>
     , public NTabletFlatExecutor::TTabletExecutedFlat
@@ -250,6 +260,9 @@ public:
     ui64 MaxIncompatibleChange = 0;
     THashMap<TPathId, TPathElement::TPtr> PathsById;
     TLocalPathId NextLocalPathId = 0;
+    ui64 NextNotificationSequenceId = 0;
+    ui64 NotificationLogEntryCount = 0;
+    ui64 MaxNotificationLogEntries = 100000;
 
     THashMap<TPathId, TTableInfo::TPtr> Tables;
     THashMap<TPathId, TTableInfo::TPtr> TTLEnabledTables;
@@ -804,6 +817,39 @@ public:
     void PersistShardTx(NIceDb::TNiceDb& db, TShardIdx shardIdx, TTxId txId);
     void PersistUpdateNextPathId(NIceDb::TNiceDb& db) const;
     void PersistUpdateNextShardIdx(NIceDb::TNiceDb& db) const;
+    void PersistUpdateNextNotificationSequenceId(NIceDb::TNiceDb& db) const;
+    void PersistUpdateNotificationLogEntryCount(NIceDb::TNiceDb& db) const;
+    ui64 AllocateNotificationSequenceId(NIceDb::TNiceDb& db);
+    void PersistNotificationLogEntry(
+        NIceDb::TNiceDb& db,
+        ui64 sequenceId,
+        TTxId txId,
+        TTxState::ETxType txType,
+        TPathId pathId,
+        const TString& pathName,
+        NKikimrSchemeOp::EPathType objectType,
+        NKikimrScheme::EStatus status,
+        const TString& userSid,
+        ui64 schemaVersion,
+        const TString& description,
+        TInstant completedAt);
+    static ENotificationOperationType CollapseOperationType(TTxState::ETxType txType);
+    NTabletFlatExecutor::ITransaction* CreateTxInternalReadNotificationLog(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev);
+    void Handle(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev, const TActorContext& ctx);
+    NTabletFlatExecutor::ITransaction* CreateTxRegisterSubscriber(TEvSchemeShard::TEvRegisterSubscriber::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreateTxFetchNotifications(TEvSchemeShard::TEvFetchNotifications::TPtr& ev);
+    NTabletFlatExecutor::ITransaction* CreateTxAckNotifications(TEvSchemeShard::TEvAckNotifications::TPtr& ev);
+    void Handle(TEvSchemeShard::TEvRegisterSubscriber::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvSchemeShard::TEvFetchNotifications::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvSchemeShard::TEvAckNotifications::TPtr& ev, const TActorContext& ctx);
+    // Notification log cleanup & backpressure
+    NTabletFlatExecutor::ITransaction* CreateTxNotificationLogCleanup();
+    NTabletFlatExecutor::ITransaction* CreateTxForceAdvanceSubscriber(TEvSchemeShard::TEvForceAdvanceSubscriber::TPtr& ev);
+    void Handle(TEvSchemeShard::TEvForceAdvanceSubscriber::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvSchemeShard::TEvWakeupToRunNotificationLogCleanup::TPtr& ev, const TActorContext& ctx);
+    void HandleWakeupToRunNotificationLogCleanup(const TActorContext& ctx);
+    void ScheduleNotificationLogCleanup(const TActorContext& ctx);
+    bool CheckNotificationLogOverflow(TString& errStr) const;
     void PersistParentDomain(NIceDb::TNiceDb& db, TPathId parentDomain) const;
     void PersistParentDomainEffectiveACL(NIceDb::TNiceDb& db, const TString& owner, const TString& effectiveACL, ui64 effectiveACLVersion) const;
     void PersistShardsToDelete(NIceDb::TNiceDb& db, const THashSet<TShardIdx>& shardsIdxs);

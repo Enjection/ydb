@@ -232,6 +232,8 @@ void TSchemeShard::ActivateAfterInitialization(const TActorContext& ctx, TActiva
 
     StartStopShred();
 
+    ScheduleNotificationLogCleanup(ctx);
+
     ctx.Send(TxAllocatorClient, MakeHolder<TEvTxAllocatorClient::TEvAllocate>(InitiateCachedTxIdsCount));
 
     InitializeStatistics(ctx);
@@ -3668,6 +3670,27 @@ void TSchemeShard::PersistUpdateNextShardIdx(NIceDb::TNiceDb& db) const {
                 NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NextLocalShardIdx)));
 }
 
+void TSchemeShard::PersistUpdateNextNotificationSequenceId(NIceDb::TNiceDb& db) const {
+    db.Table<Schema::SysParams>().Key(Schema::SysParam_NextNotificationSequenceId).Update(
+        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NextNotificationSequenceId)));
+}
+
+void TSchemeShard::PersistUpdateNotificationLogEntryCount(NIceDb::TNiceDb& db) const {
+    db.Table<Schema::SysParams>().Key(Schema::SysParam_NotificationLogEntryCount).Update(
+        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NotificationLogEntryCount)));
+}
+
+bool TSchemeShard::CheckNotificationLogOverflow(TString& errStr) const {
+    if (NotificationLogEntryCount >= MaxNotificationLogEntries) {
+        errStr = TStringBuilder()
+            << "notification log is full: " << NotificationLogEntryCount
+            << " entries (limit: " << MaxNotificationLogEntries << ")."
+            << " Subscribers may not be draining. Use ForceAdvanceSubscriber to unblock.";
+        return false;
+    }
+    return true;
+}
+
 void TSchemeShard::PersistParentDomain(NIceDb::TNiceDb& db, TPathId parentDomain) const {
     db.Table<Schema::SysParams>().Key(Schema::SysParam_ParentDomainSchemeShard).Update(
         NIceDb::TUpdate<Schema::SysParams::Value>(ToString(parentDomain.OwnerId)));
@@ -5512,6 +5535,12 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
         HFuncTraced(TEvSchemeShard::TEvShredManualStartupRequest, Handle);
         HFuncTraced(TEvBlobStorage::TEvControllerShredResponse, Handle);
         HFuncTraced(TEvSchemeShard::TEvWakeupToRunShredBSC, Handle);
+        HFuncTraced(TEvSchemeShard::TEvInternalReadNotificationLog, Handle);
+        HFuncTraced(TEvSchemeShard::TEvRegisterSubscriber, Handle);
+        HFuncTraced(TEvSchemeShard::TEvFetchNotifications, Handle);
+        HFuncTraced(TEvSchemeShard::TEvAckNotifications, Handle);
+        HFuncTraced(TEvSchemeShard::TEvForceAdvanceSubscriber, Handle);
+        HFuncTraced(TEvSchemeShard::TEvWakeupToRunNotificationLogCleanup, Handle);
 
         HFuncTraced(TEvPersQueue::TEvOffloadStatus, Handle);
         HFuncTraced(TEvPrivate::TEvContinuousBackupCleanerResult, Handle);
