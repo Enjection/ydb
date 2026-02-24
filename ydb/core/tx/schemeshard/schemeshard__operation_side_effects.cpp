@@ -996,7 +996,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
                     << " seqId=" << seqId
                     << " txId=" << txId
                     << " path=" << pathName
-                    << " type=" << ui32(TSchemeShard::CollapseOperationType(txState.TxType)));
+                    << " type=" << ui32(txState.TxType));
 
             break; // One entry per transaction, using first part's path
         }

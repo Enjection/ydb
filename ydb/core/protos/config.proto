@@ -2577,6 +2577,10 @@ message TSchemeShardConfig {
     // database level default for TTL mechanics
     // 0 means no limit
     optional uint32 MaxTTLShardsInFlight = 7 [default = 0];
+
+    // notification log overflow threshold
+    // new schema operations are rejected when this limit is reached
+    optional uint64 MaxNotificationLogEntries = 8 [default = 100000];
 }
 
 message TCompactionConfig {

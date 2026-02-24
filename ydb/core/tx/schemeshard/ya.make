@@ -38,6 +38,7 @@ RECURSE_FOR_TESTS(
     ut_move
     ut_move_reboots
     ut_notification_log
+    ut_notification_log_reboots
     ut_olap
     ut_olap_reboots
     ut_partition_stats

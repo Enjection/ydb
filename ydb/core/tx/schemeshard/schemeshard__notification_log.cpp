@@ -1,5 +1,4 @@
 #include "schemeshard_impl.h"
-#include "schemeshard_subop_types.h"
 
 namespace NKikimr::NSchemeShard {
 
@@ -26,7 +25,7 @@ void TSchemeShard::PersistNotificationLogEntry(
     using T = Schema::NotificationLog;
     db.Table<T>().Key(sequenceId).Update(
         NIceDb::TUpdate<T::TxId>(ui64(txId)),
-        NIceDb::TUpdate<T::OperationType>(ui32(CollapseOperationType(txType))),
+        NIceDb::TUpdate<T::OperationType>(ui32(txType)),
         NIceDb::TUpdate<T::PathOwnerId>(pathId.OwnerId),
         NIceDb::TUpdate<T::PathLocalId>(pathId.LocalPathId),
         NIceDb::TUpdate<T::PathName>(pathName),
@@ -40,26 +39,6 @@ void TSchemeShard::PersistNotificationLogEntry(
     );
     ++NotificationLogEntryCount;
     PersistUpdateNotificationLogEntryCount(db);
-}
-
-ENotificationOperationType TSchemeShard::CollapseOperationType(TTxState::ETxType txType) {
-    if (IsCreate(txType)) return ENotificationOperationType::Create;
-    if (IsDrop(txType))   return ENotificationOperationType::Drop;
-    if (IsAlter(txType))  return ENotificationOperationType::Alter;
-    switch (txType) {
-        case TTxState::TxInitializeBuildIndex:
-        case TTxState::TxFinalizeBuildIndex:
-        case TTxState::TxFillIndex:
-            return ENotificationOperationType::BuildIndex;
-        case TTxState::TxBackup:
-            return ENotificationOperationType::Backup;
-        case TTxState::TxRestore:
-        case TTxState::TxRestoreIncrementalBackupAtTable:
-        case TTxState::TxIncrementalRestoreFinalize:
-            return ENotificationOperationType::Restore;
-        default:
-            return ENotificationOperationType::Other;
-    }
 }
 
 // Test-only: handle internal read of notification log

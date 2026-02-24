@@ -95,16 +95,6 @@ struct TIncrementalRestoreState;
 struct TIndexBuildInfo;
 struct TIndexBuildShardStatus;
 
-enum class ENotificationOperationType : ui32 {
-    Create = 1,
-    Alter = 2,
-    Drop = 3,
-    BuildIndex = 4,
-    Backup = 5,
-    Restore = 6,
-    Other = 255,
-};
-
 class TSchemeShard
     : public TActor<TSchemeShard>
     , public NTabletFlatExecutor::TTabletExecutedFlat
@@ -825,7 +815,6 @@ public:
         ui64 schemaVersion,
         const TString& description,
         TInstant completedAt);
-    static ENotificationOperationType CollapseOperationType(TTxState::ETxType txType);
     NTabletFlatExecutor::ITransaction* CreateTxInternalReadNotificationLog(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev);
     void Handle(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev, const TActorContext& ctx);
     NTabletFlatExecutor::ITransaction* CreateTxRegisterSubscriber(TEvSchemeShard::TEvRegisterSubscriber::TPtr& ev);

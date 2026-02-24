@@ -7852,6 +7852,7 @@ void TSchemeShard::ApplyConsoleConfigs(const NKikimrConfig::TAppConfig& appConfi
         MaxCdcInitialScanShardsInFlight = schemeShardConfig.GetMaxCdcInitialScanShardsInFlight();
         MaxRestoreBuildIndexShardsInFlight = schemeShardConfig.GetMaxRestoreBuildIndexShardsInFlight();
         MaxTTLShardsInFlight = schemeShardConfig.GetMaxTTLShardsInFlight();
+        MaxNotificationLogEntries = schemeShardConfig.GetMaxNotificationLogEntries();
     }
 
     if (appConfig.HasTableProfilesConfig()) {
