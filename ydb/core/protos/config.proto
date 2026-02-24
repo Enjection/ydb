@@ -1812,7 +1812,7 @@ message TImmediateControlsConfig {
             Description: "Enable new FullSync protocol which allows to send PhantomFlags",
             MinValue: 0,
             MaxValue: 1,
-            DefaultValue: 1,
+            DefaultValue: 0,
         }];
 
         optional uint64 PhantomFlagStorageLimitPerVDiskBytes = 39 [(ControlOptions) = {
