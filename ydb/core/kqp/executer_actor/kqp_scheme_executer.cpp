@@ -80,7 +80,7 @@ public:
         TKqpPhyTxHolder::TConstPtr phyTx, NKikimrKqp::EQueryType queryType, const TActorId& target, const TMaybe<TString>& requestType,
         const TString& database, TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
         bool temporary, bool createTmpDir, bool isCreateTableAs, TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
-        TTxAllocatorState::TPtr txAlloc,
+        bool expectsResult, TTxAllocatorState::TPtr txAlloc,
         const TActorId& kqpTempTablesAgentActor)
         : PhyTx(phyTx)
         , QueryType(queryType)
@@ -94,6 +94,7 @@ public:
         , TempDirName(tempDirName)
         , RequestContext(std::move(ctx))
         , RequestType(requestType)
+        , ExpectsResult(expectsResult)
         , TxAlloc(std::move(txAlloc))
         , KqpTempTablesAgentActor(kqpTempTablesAgentActor)
     {
@@ -1033,7 +1034,8 @@ public:
         response.SetStatus(GetYdbStatus(ev->Get()->Result));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
-        if (TxAlloc && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
+        if (ExpectsResult && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
+            YQL_ENSURE(TxAlloc);
             auto guard = TxAlloc->TypeEnv.BindAllocator();
 
             auto* utf8Type = NMiniKQL::TDataType::Create(
@@ -1166,6 +1168,7 @@ private:
     ui64 SchemeShardTabletId = 0;
     TIntrusivePtr<TUserRequestContext> RequestContext;
     const TMaybe<TString> RequestType;
+    bool ExpectsResult = false;
     TTxAllocatorState::TPtr TxAlloc;
     const TActorId KqpTempTablesAgentActor;
     TActorId AnalyzeActorId;
@@ -1179,12 +1182,12 @@ IActor* CreateKqpSchemeExecuter(
     TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
     bool temporary, bool createTmpDir, bool isCreateTableAs,
     TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
-    TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor)
+    bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor)
 {
     return new TKqpSchemeExecuter(
         phyTx, queryType, target, requestType, database, userToken, clientAddress,
         temporary, createTmpDir, isCreateTableAs, tempDirName, std::move(ctx),
-        std::move(txAlloc), kqpTempTablesAgentActor);
+        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor);
 }
 
 } // namespace NKikimr::NKqp

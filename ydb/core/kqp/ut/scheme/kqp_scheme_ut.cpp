@@ -18,7 +18,9 @@
 #include <ydb/library/yql/utils/actor_log/log.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/draft/ydb_replication.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/operation/operation.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/arrow/accessor.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/draft/accessor.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/draft/ydb_backup.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/scheme/scheme.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/topic/client.h>
 
@@ -15501,6 +15503,107 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         UNIT_ASSERT(parser.TryNextRow());
         auto operationId = parser.ColumnParser("operation_id").GetUtf8();
         UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+        // Verify operation_id is a valid number (SchemeShard txId)
+        UNIT_ASSERT_NO_EXCEPTION(FromString<ui64>(operationId));
+    }
+
+    Y_UNIT_TEST(BackupOperationIdCanBeUsedForGet) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
+            .SetEnableBackupService(true));
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE BACKUP COLLECTION `my_backup_e2e`
+                    (TABLE `/Root/KeyValue`)
+                WITH(
+                    STORAGE = 'cluster',
+                    INCREMENTAL_BACKUP_ENABLED = 'true'
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        auto queryClient = kikimr.GetQueryClient();
+
+        // Full backup first (required before incremental)
+        {
+            auto result = queryClient.ExecuteQuery(R"(
+                BACKUP `my_backup_e2e`
+            )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        Sleep(TDuration::Seconds(1));
+
+        // Incremental backup — returns operation_id usable for Get
+        auto result = queryClient.ExecuteQuery(R"(
+            BACKUP `my_backup_e2e` INCREMENTAL
+        )", NYdb::NQuery::TTxControl::NoTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+        auto rs = result.GetResultSet(0);
+        TResultSetParser parser(rs);
+        UNIT_ASSERT(parser.TryNextRow());
+        auto operationId = parser.ColumnParser("operation_id").GetUtf8();
+        UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+
+        // Construct a proper TOperationId and verify it can be fetched via operation client
+        std::string opIdStr = "ydb://incbackup/11?id=" + std::string(operationId);
+        NYdb::TOperation::TOperationId opId(opIdStr);
+
+        NYdb::NOperation::TOperationClient opClient(kikimr.GetDriver());
+        auto backupOp = opClient.Get<NYdb::NBackup::TIncrementalBackupResponse>(opId).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(backupOp.Status().GetStatus(), EStatus::SUCCESS, backupOp.Status().GetIssues().ToString());
+    }
+
+    Y_UNIT_TEST(BackupReturnsOperationIdArrowFormat) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+        config.MutableFeatureFlags()->SetEnableArrowResultSetFormat(true);
+
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
+            .SetEnableBackupService(true));
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE BACKUP COLLECTION `my_backup_arrow`
+                    (TABLE `/Root/KeyValue`)
+                WITH(
+                    STORAGE = 'cluster'
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        auto queryClient = kikimr.GetQueryClient();
+        auto settings = NYdb::NQuery::TExecuteQuerySettings()
+            .Format(NYdb::TResultSet::EFormat::Arrow);
+        auto result = queryClient.ExecuteQuery(R"(
+            BACKUP `my_backup_arrow`
+        )", NYdb::NQuery::TTxControl::NoTx(), settings).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+        auto rs = result.GetResultSet(0);
+
+        auto schema = NArrow::DeserializeSchema(TString(TArrowAccessor::GetArrowSchema(rs)));
+        UNIT_ASSERT_C(schema, "Arrow schema must be deserialized");
+        UNIT_ASSERT_VALUES_EQUAL(schema->num_fields(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(schema->field(0)->name(), "operation_id");
     }
 
     Y_UNIT_TEST(BackupIncrementalReturnsOperationId) {
@@ -15550,6 +15653,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         UNIT_ASSERT(parser.TryNextRow());
         auto operationId = parser.ColumnParser("operation_id").GetUtf8();
         UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+        UNIT_ASSERT_NO_EXCEPTION(FromString<ui64>(operationId));
     }
 
     Y_UNIT_TEST(RestoreReturnsOperationId) {
@@ -15604,6 +15708,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         UNIT_ASSERT(parser.TryNextRow());
         auto operationId = parser.ColumnParser("operation_id").GetUtf8();
         UNIT_ASSERT_C(!operationId.empty(), "operation_id should not be empty");
+        UNIT_ASSERT_NO_EXCEPTION(FromString<ui64>(operationId));
     }
 }
 
