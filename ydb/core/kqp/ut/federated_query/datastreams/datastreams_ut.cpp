@@ -119,6 +119,7 @@ public:
             auto& featureFlags = *AppConfig->MutableFeatureFlags();
             featureFlags.SetEnableStreamingQueries(true);
             featureFlags.SetEnableSchemaSecrets(true);
+            featureFlags.SetEnableResourcePools(true);
 
             auto& queryServiceConfig = *AppConfig->MutableQueryServiceConfig();
             queryServiceConfig.SetEnableMatchRecognize(true);
@@ -143,6 +144,7 @@ public:
 
             Kikimr->GetTestServer().GetRuntime()->GetAppData(0).FeatureFlags.SetEnableSchemaSecrets(true);
             Kikimr->GetTestServer().GetRuntime()->GetAppData(0).FeatureFlags.SetEnableStreamingQueries(true);
+            Kikimr->GetTestServer().GetRuntime()->GetAppData(0).FeatureFlags.SetEnableResourcePools(true);
         }
 
         return Kikimr;
@@ -1871,7 +1873,11 @@ Y_UNIT_TEST_SUITE(KqpFederatedQueryDatastreams) {
         ), EStatus::SCHEME_ERROR, "Cannot find table '/Root/unknown-datasource.[unknown-topic]' because it does not exist or you do not have access permissions");
     }
 
+
     Y_UNIT_TEST_TWIN_F(ReplicatedFederativeWriting, UseColumnTable, TStreamingTestFixture) {
+        auto& config = SetupAppConfig();
+        config.MutableTableServiceConfig()->SetEnableDataShardCreateTableAs(true);
+        config.MutableTableServiceConfig()->SetEnableHtapTx(true);
         constexpr char firstOutputTopic[] = "replicatedWritingOutputTopicName1";
         constexpr char secondOutputTopic[] = "replicatedWritingOutputTopicName2";
         constexpr char pqSource[] = "pqSourceName";
@@ -2046,6 +2052,7 @@ Y_UNIT_TEST_SUITE(KqpFederatedQueryDatastreams) {
 
         auto& config = SetupAppConfig();
         config.MutableFeatureFlags()->SetEnableTopicsSqlIoOperations(true);
+        config.MutableTableServiceConfig()->SetEnableDataShardCreateTableAs(true);
         config.MutablePQConfig()->SetRequireCredentialsInNewProtocol(true);
 
         constexpr char inputTopic[] = "inputTopicName";
@@ -3166,6 +3173,10 @@ Y_UNIT_TEST_SUITE(KqpStreamingQueriesDdl) {
     }
 
     Y_UNIT_TEST_F(StreamingQueryWithLocalYdbJoin, TStreamingTestFixture) {
+        auto& config = SetupAppConfig();
+        config.MutableTableServiceConfig()->SetEnableDataShardCreateTableAs(true);
+        config.MutableTableServiceConfig()->SetEnableHtapTx(true);
+
         constexpr char inputTopicName[] = "streamingQueryWithLocalYdbJoinInputTopic";
         constexpr char outputTopicName[] = "streamingQueryWithLocalYdbJoinOutputTopic";
         constexpr char pqSourceName[] = "pqSourceName";
@@ -4566,6 +4577,10 @@ Y_UNIT_TEST_SUITE(KqpStreamingQueriesDdl) {
     }
 
     Y_UNIT_TEST_F(StreamingQueryWithMultipleWrites, TStreamingWithSchemaSecretsTestFixture) {
+        auto& config = SetupAppConfig();
+        config.MutableTableServiceConfig()->SetEnableDataShardCreateTableAs(true);
+        config.MutableTableServiceConfig()->SetEnableHtapTx(true);
+
         constexpr char inputTopic[] = "createStreamingQueryWithMultipleWritesInputTopic";
         constexpr char outputTopic1[] = "createStreamingQueryWithMultipleWritesOutputTopic1";
         constexpr char outputTopic2[] = "createStreamingQueryWithMultipleWritesOutputTopic2";
