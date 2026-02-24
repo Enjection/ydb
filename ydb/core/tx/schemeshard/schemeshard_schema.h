@@ -2276,6 +2276,36 @@ struct Schema : NIceDb::Schema {
         using TColumns = TableColumns<OwnerPathId, LocalPathId, AlterVersion, Properties>;
     };
 
+    struct NotificationLog : Table<130> {
+        struct SequenceId :    Column<1, NScheme::NTypeIds::Uint64> {};
+        struct TxId :          Column<2, NScheme::NTypeIds::Uint64> {};
+        struct OperationType : Column<3, NScheme::NTypeIds::Uint32> {};
+        struct PathOwnerId :   Column<4, NScheme::NTypeIds::Uint64> { using Type = TOwnerId; };
+        struct PathLocalId :   Column<5, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
+        struct PathName :      Column<6, NScheme::NTypeIds::Utf8> {};
+        struct ObjectType :    Column<7, NScheme::NTypeIds::Uint32> {};
+        struct Status :        Column<8, NScheme::NTypeIds::Uint32> {};
+        struct UserSID :       Column<9, NScheme::NTypeIds::Utf8> {};
+        struct SchemaVersion : Column<10, NScheme::NTypeIds::Uint64> {};
+        struct ChangeDetails : Column<11, NScheme::NTypeIds::String> {};
+        struct Description :   Column<12, NScheme::NTypeIds::String> {};
+        struct CompletedAt :   Column<13, NScheme::NTypeIds::Uint64> {};
+
+        using TKey = TableKey<SequenceId>;
+        using TColumns = TableColumns<SequenceId, TxId, OperationType, PathOwnerId, PathLocalId,
+                                      PathName, ObjectType, Status, UserSID, SchemaVersion,
+                                      ChangeDetails, Description, CompletedAt>;
+    };
+
+    struct SubscriberCursors : Table<131> {
+        struct SubscriberId :        Column<1, NScheme::NTypeIds::Utf8> {};
+        struct LastAckedSequenceId : Column<2, NScheme::NTypeIds::Uint64> {};
+        struct LastActivityAt :      Column<3, NScheme::NTypeIds::Uint64> {};
+
+        using TKey = TableKey<SubscriberId>;
+        using TColumns = TableColumns<SubscriberId, LastAckedSequenceId, LastActivityAt>;
+    };
+
     using TTables = SchemaTables<
         Paths,
         TxInFlight,
@@ -2403,7 +2433,9 @@ struct Schema : NIceDb::Schema {
         IncrementalBackupItems,
         Secrets,
         SecretsAlterData,
-        StreamingQueryState
+        StreamingQueryState,
+        NotificationLog,
+        SubscriberCursors
     >;
 
     static constexpr ui64 SysParam_NextPathId = 1;
@@ -2417,6 +2449,8 @@ struct Schema : NIceDb::Schema {
     static constexpr ui64 SysParam_TenantInitState = 9;
     static constexpr ui64 SysParam_ServerlessStorageLastBillTime = 10;
     static constexpr ui64 SysParam_MaxIncompatibleChange = 11;
+    static constexpr ui64 SysParam_NextNotificationSequenceId = 12;
+    static constexpr ui64 SysParam_NotificationLogEntryCount = 13;
 
     // List of incompatible changes:
     // * Change 1: store migrated shards of local tables (e.g. after a rename) as a migrated record

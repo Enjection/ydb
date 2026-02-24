@@ -1,0 +1,30 @@
+UNITTEST_FOR(ydb/core/tx/schemeshard)
+
+FORK_SUBTESTS()
+
+IF (WITH_VALGRIND)
+    SPLIT_FACTOR(20)
+ENDIF()
+
+SIZE(MEDIUM)
+
+PEERDIR(
+    library/cpp/getopt
+    library/cpp/regex/pcre
+    library/cpp/svnversion
+    ydb/core/kqp/ut/common
+    ydb/core/testlib/pg
+    ydb/core/tx
+    ydb/core/tx/schemeshard/ut_helpers
+    yql/essentials/public/udf/service/exception_policy
+)
+
+YQL_LAST_ABI_VERSION()
+
+SRCS(
+    ut_notification_log.cpp
+    ut_notification_log_protocol.cpp
+    ut_notification_log_subscriber.cpp
+)
+
+END()

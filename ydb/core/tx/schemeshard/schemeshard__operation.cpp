@@ -113,6 +113,9 @@ bool TSchemeShard::ProcessOperationParts(
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
             response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+        } else if (!context.SS->CheckNotificationLogOverflow(errStr)) {
+            response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
+            response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
         } else {
             response = part->Propose(owner, context);
         }
