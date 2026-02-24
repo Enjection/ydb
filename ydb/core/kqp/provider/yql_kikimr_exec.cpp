@@ -2097,6 +2097,37 @@ public:
                                     << "Unknown operation in changeColumnConstraints"));
                                 return SyncError();
                             }
+                        } else if (alterColumnAction == "setDefaultValue") {
+                            if (table.Metadata->Kind == EKikimrTableKind::Olap) {
+                                ctx.AddError(TIssue(ctx.GetPosition(alterColumnList.Pos()),
+                                    "Default values are not supported in column tables"));
+                                return SyncError();
+                            }
+
+                            auto defaultExpr = TExprBase(alterColumnList.Item(1));
+
+                            if (auto maybeJust = defaultExpr.Maybe<TCoJust>()) {
+                                defaultExpr = maybeJust.Cast().Input();
+                            }
+
+                            bool isNull = defaultExpr.Maybe<TCoNull>().IsValid() || IsPgNullExprNode(defaultExpr);
+                            if (isNull) {
+                                alter_columns->set_empty_default(google::protobuf::NullValue());
+                            } else {
+                                auto err = FillLiteralProto(defaultExpr, nullptr, *alter_columns->mutable_from_literal());
+                                if (err) {
+                                    ctx.AddError(TIssue(ctx.GetPosition(defaultExpr.Pos()), *err));
+                                    return SyncError();
+                                }
+                            }
+                        } else if (alterColumnAction == "dropDefault") {
+                            if (table.Metadata->Kind == EKikimrTableKind::Olap) {
+                                ctx.AddError(TIssue(ctx.GetPosition(alterColumnList.Pos()),
+                                    "Default values are not supported in column tables"));
+                                return SyncError();
+                            }
+
+                            alter_columns->set_empty_default(google::protobuf::NullValue());
                         } else if (alterColumnAction == "changeCompression") {
                             if (!ParseCompressionSettings(alterColumnList, alter_columns, ctx)) {
                                 return SyncError();
@@ -2586,6 +2617,12 @@ public:
                                     );
 
                                     add_changefeed->set_initial_scan(FromString<bool>(to_lower(value)));
+                                } else if (name == "user_sids") {
+                                    auto value = TString(
+                                        setting.Value().Cast<TCoDataCtor>().Literal().Cast<TCoAtom>().Value()
+                                    );
+
+                                    add_changefeed->set_user_sids(FromString<bool>(to_lower(value)));
                                 } else if (name == "virtual_timestamps") {
                                     auto value = TString(
                                         setting.Value().Cast<TCoDataCtor>().Literal().Cast<TCoAtom>().Value()
