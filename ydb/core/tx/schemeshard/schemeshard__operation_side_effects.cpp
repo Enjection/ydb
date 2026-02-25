@@ -960,6 +960,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
         }
 
         // Use first part's TxState to get path and operation type
+        bool logged = false;
         for (ui32 partIdx = 0; partIdx < operation->Parts.size(); ++partIdx) {
             TOperationId partOpId(txId, partIdx);
 
@@ -982,14 +983,20 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
             TString pathName = path->Name;
             NKikimrSchemeOp::EPathType objectType = path->PathType;
             TString userSid = path->Owner;
-            ui64 schemaVersion = path->DirAlterVersion;
+            ui64 schemaVersion = ss->GetTypeSpecificAlterVersion(pathId, path->PathType);
 
-            ss->PersistNotificationLogEntry(
-                db, seqId, txId, txState.TxType, pathId,
-                pathName, objectType, NKikimrScheme::StatusSuccess,
-                userSid, schemaVersion,
-                TString(), // description - deferred
-                ctx.Now());
+            ss->PersistNotificationLogEntry(db, {
+                .SequenceId = seqId,
+                .TxId = txId,
+                .TxType = txState.TxType,
+                .PathId = pathId,
+                .PathName = pathName,
+                .ObjectType = objectType,
+                .Status = NKikimrScheme::StatusSuccess,
+                .UserSid = userSid,
+                .SchemaVersion = schemaVersion,
+                .CompletedAt = ctx.Now(),
+            });
 
             LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "DoPersistNotifications: logged entry"
@@ -998,7 +1005,15 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
                     << " path=" << pathName
                     << " type=" << ui32(txState.TxType));
 
+            logged = true;
             break; // One entry per transaction, using first part's path
+        }
+
+        if (!logged) {
+            LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                "DoPersistNotifications: no notification logged for txId=" << txId
+                    << ", no TxInFlight entry or valid TargetPathId found"
+                    << " across " << operation->Parts.size() << " parts");
         }
     }
 }

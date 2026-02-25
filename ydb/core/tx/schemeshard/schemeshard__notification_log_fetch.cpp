@@ -97,7 +97,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         }
 
         // Read entries from NotificationLog starting after effectiveAfterSeqId
-        // Use GreaterOrEqual with effectiveAfterSeqId + 1
+        Y_ENSURE(effectiveAfterSeqId < Max<ui64>(), "effectiveAfterSeqId overflow");
         auto rowset = db.Table<Schema::NotificationLog>().GreaterOrEqual(effectiveAfterSeqId + 1).Select();
         if (!rowset.IsReady()) {
             return false;

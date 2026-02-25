@@ -802,19 +802,23 @@ public:
     void PersistUpdateNextNotificationSequenceId(NIceDb::TNiceDb& db) const;
     void PersistUpdateNotificationLogEntryCount(NIceDb::TNiceDb& db) const;
     ui64 AllocateNotificationSequenceId(NIceDb::TNiceDb& db);
-    void PersistNotificationLogEntry(
-        NIceDb::TNiceDb& db,
-        ui64 sequenceId,
-        TTxId txId,
-        TTxState::ETxType txType,
-        TPathId pathId,
-        const TString& pathName,
-        NKikimrSchemeOp::EPathType objectType,
-        NKikimrScheme::EStatus status,
-        const TString& userSid,
-        ui64 schemaVersion,
-        const TString& description,
-        TInstant completedAt);
+
+    struct TNotificationLogEntryData {
+        ui64 SequenceId = 0;
+        TTxId TxId = InvalidTxId;
+        TTxState::ETxType TxType = TTxState::TxInvalid;
+        TPathId PathId;
+        TString PathName;
+        NKikimrSchemeOp::EPathType ObjectType = NKikimrSchemeOp::EPathTypeInvalid;
+        NKikimrScheme::EStatus Status = NKikimrScheme::StatusSuccess;
+        TString UserSid;
+        ui64 SchemaVersion = 0;
+        TString Description;
+        TInstant CompletedAt;
+    };
+
+    ui64 GetTypeSpecificAlterVersion(TPathId pathId, NKikimrSchemeOp::EPathType pathType) const;
+    void PersistNotificationLogEntry(NIceDb::TNiceDb& db, const TNotificationLogEntryData& entry);
     NTabletFlatExecutor::ITransaction* CreateTxInternalReadNotificationLog(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev);
     void Handle(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev, const TActorContext& ctx);
     NTabletFlatExecutor::ITransaction* CreateTxRegisterSubscriber(TEvSchemeShard::TEvRegisterSubscriber::TPtr& ev);

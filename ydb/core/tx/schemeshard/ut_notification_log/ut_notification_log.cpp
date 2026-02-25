@@ -110,7 +110,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         auto entries = ReadNotificationLog(runtime);
         bool found = false;
         for (const auto& e : entries) {
-            if (e.OperationType == (ui32)TTxState::TxDropTable) {
+            if (e.OperationType == (ui32)TTxState::TxDropTable && e.PathName == "Table1") {
                 found = true;
                 break;
             }

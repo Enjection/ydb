@@ -8,37 +8,148 @@ ui64 TSchemeShard::AllocateNotificationSequenceId(NIceDb::TNiceDb& db) {
     return id;
 }
 
-void TSchemeShard::PersistNotificationLogEntry(
-    NIceDb::TNiceDb& db,
-    ui64 sequenceId,
-    TTxId txId,
-    TTxState::ETxType txType,
-    TPathId pathId,
-    const TString& pathName,
-    NKikimrSchemeOp::EPathType objectType,
-    NKikimrScheme::EStatus status,
-    const TString& userSid,
-    ui64 schemaVersion,
-    const TString& description,
-    TInstant completedAt)
+void TSchemeShard::PersistNotificationLogEntry(NIceDb::TNiceDb& db, const TNotificationLogEntryData& entry)
 {
     using T = Schema::NotificationLog;
-    db.Table<T>().Key(sequenceId).Update(
-        NIceDb::TUpdate<T::TxId>(ui64(txId)),
-        NIceDb::TUpdate<T::OperationType>(ui32(txType)),
-        NIceDb::TUpdate<T::PathOwnerId>(pathId.OwnerId),
-        NIceDb::TUpdate<T::PathLocalId>(pathId.LocalPathId),
-        NIceDb::TUpdate<T::PathName>(pathName),
-        NIceDb::TUpdate<T::ObjectType>(ui32(objectType)),
-        NIceDb::TUpdate<T::Status>(ui32(status)),
-        NIceDb::TUpdate<T::UserSID>(userSid),
-        NIceDb::TUpdate<T::SchemaVersion>(schemaVersion),
+    db.Table<T>().Key(entry.SequenceId).Update(
+        NIceDb::TUpdate<T::TxId>(ui64(entry.TxId)),
+        NIceDb::TUpdate<T::OperationType>(ui32(entry.TxType)),
+        NIceDb::TUpdate<T::PathOwnerId>(entry.PathId.OwnerId),
+        NIceDb::TUpdate<T::PathLocalId>(entry.PathId.LocalPathId),
+        NIceDb::TUpdate<T::PathName>(entry.PathName),
+        NIceDb::TUpdate<T::ObjectType>(ui32(entry.ObjectType)),
+        NIceDb::TUpdate<T::Status>(ui32(entry.Status)),
+        NIceDb::TUpdate<T::UserSID>(entry.UserSid),
+        NIceDb::TUpdate<T::SchemaVersion>(entry.SchemaVersion),
         NIceDb::TUpdate<T::ChangeDetails>(TString()),
-        NIceDb::TUpdate<T::Description>(description),
-        NIceDb::TUpdate<T::CompletedAt>(completedAt.MicroSeconds())
+        NIceDb::TUpdate<T::Description>(entry.Description),
+        NIceDb::TUpdate<T::CompletedAt>(entry.CompletedAt.MicroSeconds())
     );
     ++NotificationLogEntryCount;
     PersistUpdateNotificationLogEntryCount(db);
+}
+
+ui64 TSchemeShard::GetTypeSpecificAlterVersion(TPathId pathId, NKikimrSchemeOp::EPathType pathType) const {
+    switch (pathType) {
+        case NKikimrSchemeOp::EPathTypeTable:
+            if (auto it = Tables.find(pathId); it != Tables.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypePersQueueGroup:
+            if (auto it = Topics.find(pathId); it != Topics.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeBlockStoreVolume:
+            if (auto it = BlockStoreVolumes.find(pathId); it != BlockStoreVolumes.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeFileStore:
+            if (auto it = FileStoreInfos.find(pathId); it != FileStoreInfos.end()) {
+                return it->second->Version;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeKesus:
+            if (auto it = KesusInfos.find(pathId); it != KesusInfos.end()) {
+                return it->second->Version;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeSolomonVolume:
+            if (auto it = SolomonVolumes.find(pathId); it != SolomonVolumes.end()) {
+                return it->second->Version;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeTableIndex:
+            if (auto it = Indexes.find(pathId); it != Indexes.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeColumnStore:
+            if (auto it = OlapStores.find(pathId); it != OlapStores.end()) {
+                return it->second->GetAlterVersion();
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeColumnTable:
+            if (ColumnTables.contains(pathId)) {
+                return ColumnTables.at(pathId)->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeCdcStream:
+            if (auto it = CdcStreams.find(pathId); it != CdcStreams.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeSequence:
+            if (auto it = Sequences.find(pathId); it != Sequences.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeReplication:
+        case NKikimrSchemeOp::EPathTypeTransfer:
+            if (auto it = Replications.find(pathId); it != Replications.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeBlobDepot:
+            if (auto it = BlobDepots.find(pathId); it != BlobDepots.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeExternalTable:
+            if (auto it = ExternalTables.find(pathId); it != ExternalTables.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeExternalDataSource:
+            if (auto it = ExternalDataSources.find(pathId); it != ExternalDataSources.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeView:
+            if (auto it = Views.find(pathId); it != Views.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeResourcePool:
+            if (auto it = ResourcePools.find(pathId); it != ResourcePools.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeBackupCollection:
+            if (auto it = BackupCollections.find(pathId); it != BackupCollections.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeSysView:
+            if (auto it = SysViews.find(pathId); it != SysViews.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeStreamingQuery:
+            if (auto it = StreamingQueries.find(pathId); it != StreamingQueries.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeSecret:
+            if (auto it = Secrets.find(pathId); it != Secrets.end()) {
+                return it->second->AlterVersion;
+            }
+            break;
+        case NKikimrSchemeOp::EPathTypeDir:
+        case NKikimrSchemeOp::EPathTypeSubDomain:
+        case NKikimrSchemeOp::EPathTypeExtSubDomain:
+            if (SubDomains.contains(pathId)) {
+                return SubDomains.at(pathId)->GetVersion();
+            }
+            return 0;
+        case NKikimrSchemeOp::EPathTypeRtmrVolume:
+            return 1;
+        case NKikimrSchemeOp::EPathTypeInvalid:
+            return 0;
+    }
+    return 0;
 }
 
 // Test-only: handle internal read of notification log
