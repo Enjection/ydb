@@ -23,7 +23,8 @@ void TSchemeShard::PersistNotificationLogEntry(NIceDb::TNiceDb& db, const TNotif
         NIceDb::TUpdate<T::SchemaVersion>(entry.SchemaVersion),
         NIceDb::TUpdate<T::ChangeDetails>(TString()),
         NIceDb::TUpdate<T::Description>(entry.Description),
-        NIceDb::TUpdate<T::CompletedAt>(entry.CompletedAt.MicroSeconds())
+        NIceDb::TUpdate<T::CompletedAt>(entry.CompletedAt.MicroSeconds()),
+        NIceDb::TUpdate<T::PlanStep>(ui64(entry.PlanStep))
     );
     ++NotificationLogEntryCount;
     PersistUpdateNotificationLogEntryCount(db);
@@ -191,12 +192,30 @@ struct TTxInternalReadNotificationLog : public NTabletFlatExecutor::TTransaction
             entry.SchemaVersion = rowset.GetValue<NL::SchemaVersion>();
             entry.Description   = rowset.GetValue<NL::Description>();
             entry.CompletedAt   = rowset.GetValue<NL::CompletedAt>();
+            entry.PlanStep      = rowset.GetValueOrDefault<NL::PlanStep>(0);
             Result->Entries.push_back(std::move(entry));
 
             if (!rowset.Next()) {
                 return false;
             }
         }
+
+        // Compute MinInFlightPlanStep watermark
+        // This is the minimum PlanStep among all in-flight coordinated operations
+        // (those that have received a PlanStep but haven't reached terminal state).
+        // 0 means no coordinated operations are in-flight.
+        ui64 minInFlightPlanStep = 0;
+        for (const auto& [opId, txState] : Self->TxInFlight) {
+            if (txState.PlanStep != InvalidStepId
+                && txState.State != TTxState::Done
+                && txState.State != TTxState::Aborted) {
+                ui64 ps = ui64(txState.PlanStep.GetValue());
+                if (minInFlightPlanStep == 0 || ps < minInFlightPlanStep) {
+                    minInFlightPlanStep = ps;
+                }
+            }
+        }
+        Result->MinInFlightPlanStep = minInFlightPlanStep;
 
         return true;
     }

@@ -22,6 +22,21 @@ TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> ReadNotifi
     return event->Entries;
 }
 
+struct TNotificationLogReadResult {
+    TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> Entries;
+    ui64 MinInFlightPlanStep = 0;
+};
+
+TNotificationLogReadResult ReadNotificationLogFull(TTestBasicRuntime& runtime) {
+    auto sender = runtime.AllocateEdgeActor();
+    ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender,
+        new TEvSchemeShard::TEvInternalReadNotificationLog());
+    TAutoPtr<IEventHandle> handle;
+    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadNotificationLogResult>(handle);
+    UNIT_ASSERT(event);
+    return {event->Entries, event->MinInFlightPlanStep};
+}
+
 } // anonymous namespace
 
 Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
@@ -279,6 +294,112 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )", {NKikimrScheme::StatusResourceExhausted});
     }
 
+    Y_UNIT_TEST(PlanStepIsRecordedForCoordinatedOps) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        // CreateTable goes through coordinator and gets a valid PlanStep
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto entries = ReadNotificationLog(runtime);
+        UNIT_ASSERT(!entries.empty());
+
+        bool found = false;
+        for (const auto& e : entries) {
+            if (e.PathName == "Table1" && e.OperationType == (ui32)TTxState::TxCreateTable) {
+                found = true;
+                // Coordinated operations must have a non-zero PlanStep
+                UNIT_ASSERT_C(e.PlanStep > 0,
+                    "CreateTable should have a valid PlanStep, got: " << e.PlanStep);
+                break;
+            }
+        }
+        UNIT_ASSERT_C(found, "CREATE TABLE entry not found in notification log");
+    }
+
+    Y_UNIT_TEST(PlanStepIsRecordedForAlterTable) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "key"   Type: "Uint64" }
+            Columns { Name: "value" Type: "Utf8" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestAlterTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "extra" Type: "Uint32" }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto entries = ReadNotificationLog(runtime);
+        // Both CREATE and ALTER should have valid PlanSteps
+        for (const auto& e : entries) {
+            if (e.PathName == "Table1") {
+                UNIT_ASSERT_C(e.PlanStep > 0,
+                    "Table1 entry (opType=" << e.OperationType << ") should have a valid PlanStep, got: " << e.PlanStep);
+            }
+        }
+    }
+
+    Y_UNIT_TEST(PlanStepMonotonicAcrossOperations) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "T1"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "T2"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto entries = ReadNotificationLog(runtime);
+        UNIT_ASSERT(entries.size() >= 2);
+
+        // PlanSteps should be monotonically non-decreasing
+        // (can be equal if batched in same coordinator step)
+        ui64 prevPlanStep = 0;
+        for (const auto& e : entries) {
+            UNIT_ASSERT_C(e.PlanStep >= prevPlanStep,
+                "PlanStep should be monotonically non-decreasing: prev=" << prevPlanStep
+                    << " current=" << e.PlanStep << " path=" << e.PathName);
+            prevPlanStep = e.PlanStep;
+        }
+
+        // Stronger assertion: (PlanStep, TxId) ordering must match SequenceId ordering
+        // This verifies that DoPersistNotifications sorts by (PlanStep, TxId) before
+        // assigning SequenceIds within a single tablet transaction
+        for (size_t i = 1; i < entries.size(); ++i) {
+            const auto& prev = entries[i-1];
+            const auto& curr = entries[i];
+            if (curr.PlanStep != prev.PlanStep || curr.TxId != prev.TxId) {
+                bool planStepTxIdOrdering = std::tie(curr.PlanStep, curr.TxId) > std::tie(prev.PlanStep, prev.TxId);
+                UNIT_ASSERT_C(planStepTxIdOrdering,
+                    "(PlanStep, TxId) ordering must match SequenceId ordering:"
+                        << " prev=(" << prev.PlanStep << "," << prev.TxId << ") seqId=" << prev.SequenceId
+                        << " curr=(" << curr.PlanStep << "," << curr.TxId << ") seqId=" << curr.SequenceId);
+            }
+        }
+    }
+
     Y_UNIT_TEST(MkDirDoesNotWriteLogEntry) {
         // MkDir is a simple operation that doesn't go through
         // the multi-part ReadyToNotify path, so no notification is written
@@ -298,5 +419,92 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
             }
         }
         UNIT_ASSERT_C(!found, "MkDir should not produce a notification log entry");
+    }
+
+    Y_UNIT_TEST(WatermarkIsZeroWhenNoInFlightOps) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto result = ReadNotificationLogFull(runtime);
+        UNIT_ASSERT(!result.Entries.empty());
+        UNIT_ASSERT_VALUES_EQUAL(result.MinInFlightPlanStep, 0u);
+    }
+
+    Y_UNIT_TEST(WatermarkReflectsInFlightPlanStep) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        // We'll hold TEvSchemaChanged for the first CreateTable to keep it in-flight
+        TVector<THolder<IEventHandle>> heldEvents;
+        ui64 firstTxId = txId + 1;
+        bool captured = false;
+
+        auto observer = [&](TAutoPtr<IEventHandle>& ev) {
+            if (ev->GetTypeRewrite() == TEvDataShard::EvSchemaChanged) {
+                auto* msg = ev->Get<TEvDataShard::TEvSchemaChanged>();
+                if (msg->Record.GetTxId() == firstTxId) {
+                    captured = true;
+                    heldEvents.push_back(THolder<IEventHandle>(ev.Release()));
+                    return TTestActorRuntime::EEventAction::DROP;
+                }
+            }
+            return TTestActorRuntime::EEventAction::PROCESS;
+        };
+        runtime.SetObserverFunc(observer);
+
+        // Start Table1 creation - it will get a PlanStep but stay in-flight
+        // because we hold the TEvSchemaChanged responses
+        AsyncCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+
+        // Wait until we capture a TEvSchemaChanged for Table1
+        // This means the operation reached the datashard and got a PlanStep
+        {
+            TDispatchOptions opts;
+            opts.CustomFinalCondition = [&]() { return captured; };
+            runtime.DispatchEvents(opts);
+        }
+
+        // Create Table2 and let it complete normally
+        // The observer only matches firstTxId, so Table2's events pass through
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table2"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // Read notification log — Table2 should be present, Table1 still in-flight
+        auto result = ReadNotificationLogFull(runtime);
+
+        // Watermark should reflect Table1's PlanStep (it's still in-flight)
+        UNIT_ASSERT_C(result.MinInFlightPlanStep > 0,
+            "MinInFlightPlanStep should be > 0 while Table1 is still in-flight, got: "
+                << result.MinInFlightPlanStep);
+
+        // Now release held events to let Table1 complete
+        for (auto& ev : heldEvents) {
+            runtime.Send(ev.Release());
+        }
+        heldEvents.clear();
+        env.TestWaitNotification(runtime, firstTxId);
+
+        // After Table1 completes, watermark should be 0
+        auto result2 = ReadNotificationLogFull(runtime);
+        UNIT_ASSERT_VALUES_EQUAL_C(result2.MinInFlightPlanStep, 0u,
+            "MinInFlightPlanStep should be 0 after all ops complete, got: "
+                << result2.MinInFlightPlanStep);
     }
 }

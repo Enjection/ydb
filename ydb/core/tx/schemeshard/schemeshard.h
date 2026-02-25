@@ -780,8 +780,10 @@ namespace TEvSchemeShard {
             ui64 SchemaVersion = 0;
             TString Description;
             ui64 CompletedAt = 0;
+            ui64 PlanStep = 0;
         };
         TVector<TEntry> Entries;
+        ui64 MinInFlightPlanStep = 0;
     };
 };
 

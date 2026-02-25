@@ -127,6 +127,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             entry->SetSchemaVersion(rowset.GetValue<Schema::NotificationLog::SchemaVersion>());
             entry->SetDescription(rowset.GetValue<Schema::NotificationLog::Description>());
             entry->SetCompletedAt(rowset.GetValue<Schema::NotificationLog::CompletedAt>());
+            entry->SetPlanStep(rowset.GetValueOrDefault<Schema::NotificationLog::PlanStep>(0));
 
             lastSeqId = seqId;
             ++count;
@@ -145,6 +146,20 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         Result->Record.SetLastSequenceId(lastSeqId);
         Result->Record.SetHasMore(hasMore);
         Result->Record.SetSkippedEntries(skippedEntries);
+
+        // Compute MinInFlightPlanStep watermark
+        ui64 minInFlightPlanStep = 0;
+        for (const auto& [opId, txState] : Self->TxInFlight) {
+            if (txState.PlanStep != InvalidStepId
+                && txState.State != TTxState::Done
+                && txState.State != TTxState::Aborted) {
+                ui64 ps = ui64(txState.PlanStep.GetValue());
+                if (minInFlightPlanStep == 0 || ps < minInFlightPlanStep) {
+                    minInFlightPlanStep = ps;
+                }
+            }
+        }
+        Result->Record.SetMinInFlightPlanStep(minInFlightPlanStep);
 
         return true;
     }

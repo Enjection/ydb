@@ -815,6 +815,7 @@ public:
         ui64 SchemaVersion = 0;
         TString Description;
         TInstant CompletedAt;
+        TStepId PlanStep = InvalidStepId;
     };
 
     ui64 GetTypeSpecificAlterVersion(TPathId pathId, NKikimrSchemeOp::EPathType pathType) const;

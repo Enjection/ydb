@@ -719,6 +719,12 @@ struct TSchemeShard::TTxOperationPlanStep: public NTabletFlatExecutor::TTransact
                     continue;
                 }
 
+                // Set PlanStep on txState before HandleReply so it's available
+                // for notification log persistence (not all operations set it themselves)
+                if (auto* txState = Self->FindTx(opId)) {
+                    txState->PlanStep = step;
+                }
+
                 TOperationContext context{Self, txc, ctx, OnComplete, MemChanges, DbChanges};
                 THolder<TEvPrivate::TEvOperationPlan> msg = MakeHolder<TEvPrivate::TEvOperationPlan>(ui64(step), ui64(txId));
                 TEvPrivate::TEvOperationPlan::TPtr personalEv = (TEventHandle<TEvPrivate::TEvOperationPlan>*) new IEventHandle(

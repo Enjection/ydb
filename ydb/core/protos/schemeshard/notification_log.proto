@@ -28,6 +28,7 @@ message TNotificationLogEntry {
     bytes ChangeDetails = 11;
     bytes Description = 12;
     uint64 CompletedAt = 13;
+    uint64 PlanStep = 14;
 }
 
 message TEvFetchNotifications {
@@ -43,6 +44,11 @@ message TEvFetchNotificationsResult {
     uint64 LastSequenceId = 4;
     bool HasMore = 5;
     uint64 SkippedEntries = 6;
+    // Minimum PlanStep among all in-flight coordinated operations (those that have
+    // received a PlanStep but haven't completed or aborted). Consumers can safely
+    // process entries with PlanStep < this value knowing all operations with lower
+    // PlanSteps have completed. 0 means no coordinated operations are in-flight.
+    uint64 MinInFlightPlanStep = 7;
 }
 
 message TEvAckNotifications {

@@ -936,12 +936,23 @@ void TSideEffects::DoDoneParts(TSchemeShard *ss, const TActorContext &ctx) {
 }
 
 void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
+    // Notification log ordering contract:
+    // Within a single tablet transaction, SequenceIds are assigned in (PlanStep, TxId) order.
+    // This ensures deterministic ordering for operations completing in the same batch.
+    // Cross-tablet-transaction ordering may still diverge — consumers should use
+    // MinInFlightPlanStep watermark for safe processing boundaries.
     if (ReadyToNotifyOperations.empty()) {
         return;
     }
 
-    NIceDb::TNiceDb db(txc.DB);
+    // First pass: collect eligible operations and find each one's first valid part.
+    struct TCandidate {
+        TTxId TxId;
+        TStepId PlanStep;
+        TOperationId FirstPartOpId;
+    };
     THashSet<TTxId> processedTxIds;
+    TVector<TCandidate> candidates;
 
     for (const auto& opId : ReadyToNotifyOperations) {
         TTxId txId = opId.GetTxId();
@@ -959,8 +970,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
             continue; // Not all parts ready yet
         }
 
-        // Use first part's TxState to get path and operation type
-        bool logged = false;
+        // Find first valid part
         for (ui32 partIdx = 0; partIdx < operation->Parts.size(); ++partIdx) {
             TOperationId partOpId(txId, partIdx);
 
@@ -976,45 +986,62 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
                 continue;
             }
 
-            TPathElement::TPtr path = ss->PathsById.at(pathId);
-
-            ui64 seqId = ss->AllocateNotificationSequenceId(db);
-
-            TString pathName = path->Name;
-            NKikimrSchemeOp::EPathType objectType = path->PathType;
-            TString userSid = path->Owner;
-            ui64 schemaVersion = ss->GetTypeSpecificAlterVersion(pathId, path->PathType);
-
-            ss->PersistNotificationLogEntry(db, {
-                .SequenceId = seqId,
-                .TxId = txId,
-                .TxType = txState.TxType,
-                .PathId = pathId,
-                .PathName = pathName,
-                .ObjectType = objectType,
-                .Status = NKikimrScheme::StatusSuccess,
-                .UserSid = userSid,
-                .SchemaVersion = schemaVersion,
-                .CompletedAt = ctx.Now(),
-            });
-
-            LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                "DoPersistNotifications: logged entry"
-                    << " seqId=" << seqId
-                    << " txId=" << txId
-                    << " path=" << pathName
-                    << " type=" << ui32(txState.TxType));
-
-            logged = true;
-            break; // One entry per transaction, using first part's path
+            candidates.push_back(TCandidate{txId, txState.PlanStep, partOpId});
+            break;
         }
+    }
 
-        if (!logged) {
+    // Sort by (PlanStep, TxId) for deterministic SequenceId assignment.
+    std::sort(candidates.begin(), candidates.end(), [](const TCandidate& a, const TCandidate& b) {
+        return std::tie(a.PlanStep, a.TxId) < std::tie(b.PlanStep, b.TxId);
+    });
+
+    // Second pass: assign SequenceIds in sorted order and persist.
+    NIceDb::TNiceDb db(txc.DB);
+
+    for (const auto& candidate : candidates) {
+        TTxId txId = candidate.TxId;
+
+        auto txStateIt = ss->TxInFlight.find(candidate.FirstPartOpId);
+        if (txStateIt == ss->TxInFlight.end()) {
             LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "DoPersistNotifications: no notification logged for txId=" << txId
-                    << ", no TxInFlight entry or valid TargetPathId found"
-                    << " across " << operation->Parts.size() << " parts");
+                    << ", TxInFlight entry disappeared between passes");
+            continue;
         }
+
+        const TTxState& txState = txStateIt->second;
+        TPathId pathId = txState.TargetPathId;
+
+        TPathElement::TPtr path = ss->PathsById.at(pathId);
+
+        ui64 seqId = ss->AllocateNotificationSequenceId(db);
+
+        TString pathName = path->Name;
+        NKikimrSchemeOp::EPathType objectType = path->PathType;
+        TString userSid = path->Owner;
+        ui64 schemaVersion = ss->GetTypeSpecificAlterVersion(pathId, path->PathType);
+
+        ss->PersistNotificationLogEntry(db, {
+            .SequenceId = seqId,
+            .TxId = txId,
+            .TxType = txState.TxType,
+            .PathId = pathId,
+            .PathName = pathName,
+            .ObjectType = objectType,
+            .Status = NKikimrScheme::StatusSuccess,
+            .UserSid = userSid,
+            .SchemaVersion = schemaVersion,
+            .CompletedAt = ctx.Now(),
+            .PlanStep = txState.PlanStep,
+        });
+
+        LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+            "DoPersistNotifications: logged entry"
+                << " seqId=" << seqId
+                << " txId=" << txId
+                << " path=" << pathName
+                << " type=" << ui32(txState.TxType));
     }
 }
 
