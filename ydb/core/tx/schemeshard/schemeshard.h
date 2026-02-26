@@ -7,6 +7,7 @@
 #include <ydb/core/base/subdomain.h>
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
+#include <ydb/core/protos/schemeshard/notification_log.pb.h>
 #include <ydb/core/protos/tx_scheme.pb.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
@@ -108,6 +109,20 @@ namespace TEvSchemeShard {
         EvShredInfoRequest,
         EvShredInfoResponse,
         EvShredManualStartupRequest,
+
+        // Notification Log events
+        EvRegisterSubscriber,
+        EvRegisterSubscriberResult,
+        EvFetchNotifications,
+        EvFetchNotificationsResult,
+        EvAckNotifications,
+        EvAckNotificationsResult,
+        EvForceAdvanceSubscriber,
+        EvForceAdvanceSubscriberResult,
+        EvWakeupToRunNotificationLogCleanup,
+        // Test-only:
+        EvInternalReadNotificationLog,
+        EvInternalReadNotificationLogResult,
 
         EvEnd
     };
@@ -415,6 +430,9 @@ namespace TEvSchemeShard {
     };
 
     struct TEvWakeupToRunShredBSC : public TEventLocal<TEvWakeupToRunShredBSC, EvWakeupToRunShredBSC> {
+    };
+
+    struct TEvWakeupToRunNotificationLogCleanup : public TEventLocal<TEvWakeupToRunNotificationLogCleanup, EvWakeupToRunNotificationLogCleanup> {
     };
 
     struct TEvInitTenantSchemeShard: public TEventPB<TEvInitTenantSchemeShard,
@@ -725,6 +743,48 @@ namespace TEvSchemeShard {
     };
 
     struct TEvShredManualStartupRequest : TEventPB<TEvShredManualStartupRequest, NKikimrScheme::TEvShredManualStartupRequest, EvShredManualStartupRequest> {};
+
+    // Notification Log events (proto-backed)
+    struct TEvRegisterSubscriber : public TEventPB<TEvRegisterSubscriber,
+        NKikimrSchemeShard::TEvRegisterSubscriber, EvRegisterSubscriber> {};
+    struct TEvRegisterSubscriberResult : public TEventPB<TEvRegisterSubscriberResult,
+        NKikimrSchemeShard::TEvRegisterSubscriberResult, EvRegisterSubscriberResult> {};
+    struct TEvFetchNotifications : public TEventPB<TEvFetchNotifications,
+        NKikimrSchemeShard::TEvFetchNotifications, EvFetchNotifications> {};
+    struct TEvFetchNotificationsResult : public TEventPB<TEvFetchNotificationsResult,
+        NKikimrSchemeShard::TEvFetchNotificationsResult, EvFetchNotificationsResult> {};
+    struct TEvAckNotifications : public TEventPB<TEvAckNotifications,
+        NKikimrSchemeShard::TEvAckNotifications, EvAckNotifications> {};
+    struct TEvAckNotificationsResult : public TEventPB<TEvAckNotificationsResult,
+        NKikimrSchemeShard::TEvAckNotificationsResult, EvAckNotificationsResult> {};
+    struct TEvForceAdvanceSubscriber : public TEventPB<TEvForceAdvanceSubscriber,
+        NKikimrSchemeShard::TEvForceAdvanceSubscriber, EvForceAdvanceSubscriber> {};
+    struct TEvForceAdvanceSubscriberResult : public TEventPB<TEvForceAdvanceSubscriberResult,
+        NKikimrSchemeShard::TEvForceAdvanceSubscriberResult, EvForceAdvanceSubscriberResult> {};
+
+    // Test-only: non-proto-backed events for reading notification log in tests
+    struct TEvInternalReadNotificationLog : public TEventLocal<TEvInternalReadNotificationLog, EvInternalReadNotificationLog> {
+    };
+
+    struct TEvInternalReadNotificationLogResult : public TEventLocal<TEvInternalReadNotificationLogResult, EvInternalReadNotificationLogResult> {
+        struct TEntry {
+            ui64 SequenceId = 0;
+            ui64 TxId = 0;
+            ui32 OperationType = 0;
+            ui64 PathOwnerId = 0;
+            ui64 PathLocalId = 0;
+            TString PathName;
+            ui32 ObjectType = 0;
+            ui32 Status = 0;
+            TString UserSID;
+            ui64 SchemaVersion = 0;
+            TString Description;
+            ui64 CompletedAt = 0;
+            ui64 PlanStep = 0;
+        };
+        TVector<TEntry> Entries;
+        ui64 MinInFlightPlanStep = 0;
+    };
 };
 
 }

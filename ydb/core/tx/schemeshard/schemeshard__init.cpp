@@ -1363,6 +1363,8 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
 
         RETURN_IF_NO_PRECHARGED(Self->ReadSysValue(db, Schema::SysParam_NextPathId, Self->NextLocalPathId));
         RETURN_IF_NO_PRECHARGED(Self->ReadSysValue(db, Schema::SysParam_NextShardIdx, Self->NextLocalShardIdx));
+        RETURN_IF_NO_PRECHARGED(Self->ReadSysValue(db, Schema::SysParam_NextNotificationSequenceId, Self->NextNotificationSequenceId));
+        RETURN_IF_NO_PRECHARGED(Self->ReadSysValue(db, Schema::SysParam_NotificationLogEntryCount, Self->NotificationLogEntryCount));
 
         {
             ui64 isReadOnlyModeVal = 0;
