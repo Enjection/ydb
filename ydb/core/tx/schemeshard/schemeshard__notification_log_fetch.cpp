@@ -137,7 +137,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             }
         }
 
-        // Update LastActivityAt on every fetch (prevents subscriber from appearing stale)
+        // Update LastActivityAt on every fetch
         db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
             NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
         );

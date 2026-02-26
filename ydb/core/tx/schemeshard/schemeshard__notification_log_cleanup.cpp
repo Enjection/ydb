@@ -22,18 +22,8 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
 
         while (!subRowset.EndOfSet()) {
             ui64 cursor = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
-            ui64 lastActivity = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastActivityAt>();
-
-            // Check if subscriber is stale (30 days without activity)
-            TInstant activityTime = TInstant::MicroSeconds(lastActivity);
-            TInstant staleThreshold = TInstant::Now() - TDuration::Days(30);
-
-            if (activityTime > staleThreshold) {
-                // Active subscriber - include in min cursor calculation
-                hasSubscribers = true;
-                minCursor = Min(minCursor, cursor);
-            }
-            // Stale subscribers are excluded from min cursor but NOT deleted
+            hasSubscribers = true;
+            minCursor = Min(minCursor, cursor);
 
             if (!subRowset.Next()) {
                 return false;
@@ -41,7 +31,6 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         }
 
         if (!hasSubscribers) {
-            // No active subscribers - can clean everything past retention
             minCursor = Self->NextNotificationSequenceId;
         }
 
