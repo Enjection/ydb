@@ -2298,7 +2298,7 @@ struct Schema : NIceDb::Schema {
                                       ChangeDetails, Description, CompletedAt, PlanStep>;
     };
 
-    struct SubscriberCursors : Table<131> {
+    struct NotificationLogSubscriberCursors : Table<131> {
         struct SubscriberId :        Column<1, NScheme::NTypeIds::Utf8> {};
         struct LastAckedSequenceId : Column<2, NScheme::NTypeIds::Uint64> {};
         struct LastActivityAt :      Column<3, NScheme::NTypeIds::Uint64> {};
@@ -2436,7 +2436,7 @@ struct Schema : NIceDb::Schema {
         SecretsAlterData,
         StreamingQueryState,
         NotificationLog,
-        SubscriberCursors
+        NotificationLogSubscriberCursors
     >;
 
     static constexpr ui64 SysParam_NextPathId = 1;

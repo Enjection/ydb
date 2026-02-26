@@ -12,7 +12,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         NIceDb::TNiceDb db(txc.DB);
 
         // Step 1: Read all subscriber cursors
-        auto subRowset = db.Table<Schema::SubscriberCursors>().Range().Select();
+        auto subRowset = db.Table<Schema::NotificationLogSubscriberCursors>().Range().Select();
         if (!subRowset.IsReady()) {
             return false;
         }
@@ -21,8 +21,8 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         bool hasSubscribers = false;
 
         while (!subRowset.EndOfSet()) {
-            ui64 cursor = subRowset.GetValue<Schema::SubscriberCursors::LastAckedSequenceId>();
-            ui64 lastActivity = subRowset.GetValue<Schema::SubscriberCursors::LastActivityAt>();
+            ui64 cursor = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
+            ui64 lastActivity = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastActivityAt>();
 
             // Check if subscriber is stale (30 days without activity)
             TInstant activityTime = TInstant::MicroSeconds(lastActivity);
@@ -107,7 +107,7 @@ struct TTxForceAdvanceSubscriber : public NTabletFlatExecutor::TTransactionBase<
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto rowset = db.Table<Schema::SubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
@@ -121,9 +121,9 @@ struct TTxForceAdvanceSubscriber : public NTabletFlatExecutor::TTransactionBase<
         // Advance cursor to current tail (NextNotificationSequenceId is the last assigned ID)
         ui64 newCursor = Self->NextNotificationSequenceId;
 
-        db.Table<Schema::SubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::SubscriberCursors::LastAckedSequenceId>(newCursor),
-            NIceDb::TUpdate<Schema::SubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(newCursor),
+            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);

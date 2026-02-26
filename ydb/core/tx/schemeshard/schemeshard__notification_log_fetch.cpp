@@ -21,21 +21,21 @@ struct TTxRegisterSubscriber : public NTabletFlatExecutor::TTransactionBase<TSch
         NIceDb::TNiceDb db(txc.DB);
 
         // Check if subscriber already exists
-        auto rowset = db.Table<Schema::SubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
 
         if (rowset.IsValid()) {
             // Already registered - return current cursor
-            ui64 currentCursor = rowset.GetValue<Schema::SubscriberCursors::LastAckedSequenceId>();
+            ui64 currentCursor = rowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
             Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
             Result->Record.SetCurrentSequenceId(currentCursor);
         } else {
             // New subscriber - create with cursor at 0
-            db.Table<Schema::SubscriberCursors>().Key(subscriberId).Update(
-                NIceDb::TUpdate<Schema::SubscriberCursors::LastAckedSequenceId>(0),
-                NIceDb::TUpdate<Schema::SubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+            db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
+                NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(0),
+                NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
             );
             Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
             Result->Record.SetCurrentSequenceId(0);
@@ -74,7 +74,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto subRowset = db.Table<Schema::SubscriberCursors>().Key(subscriberId).Select();
+        auto subRowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
         if (!subRowset.IsReady()) {
             return false;
         }
@@ -85,7 +85,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             return true;
         }
 
-        ui64 storedCursor = subRowset.GetValue<Schema::SubscriberCursors::LastAckedSequenceId>();
+        ui64 storedCursor = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
 
         // Calculate skipped entries if afterSeqId < storedCursor
         // (subscriber's stored cursor was force-advanced past their request)
@@ -138,8 +138,8 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         }
 
         // Update LastActivityAt on every fetch (prevents subscriber from appearing stale)
-        db.Table<Schema::SubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::SubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
@@ -189,7 +189,7 @@ struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchem
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto rowset = db.Table<Schema::SubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
@@ -200,7 +200,7 @@ struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchem
             return true;
         }
 
-        ui64 currentCursor = rowset.GetValue<Schema::SubscriberCursors::LastAckedSequenceId>();
+        ui64 currentCursor = rowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
 
         // Only advance cursor forward, never backward
         ui64 newCursor = Max(currentCursor, upToSeqId);
@@ -210,9 +210,9 @@ struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchem
             newCursor = Self->NextNotificationSequenceId;
         }
 
-        db.Table<Schema::SubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::SubscriberCursors::LastAckedSequenceId>(newCursor),
-            NIceDb::TUpdate<Schema::SubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(newCursor),
+            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);

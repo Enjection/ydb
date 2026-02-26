@@ -180,19 +180,19 @@ struct TTxInternalReadNotificationLog : public NTabletFlatExecutor::TTransaction
 
         while (!rowset.EndOfSet()) {
             TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry entry;
-            entry.SequenceId    = rowset.GetValue<NL::SequenceId>();
-            entry.TxId          = rowset.GetValue<NL::TxId>();
+            entry.SequenceId = rowset.GetValue<NL::SequenceId>();
+            entry.TxId = rowset.GetValue<NL::TxId>();
             entry.OperationType = rowset.GetValue<NL::OperationType>();
-            entry.PathOwnerId   = rowset.GetValue<NL::PathOwnerId>();
-            entry.PathLocalId   = rowset.GetValue<NL::PathLocalId>();
-            entry.PathName      = rowset.GetValue<NL::PathName>();
-            entry.ObjectType    = rowset.GetValue<NL::ObjectType>();
-            entry.Status        = rowset.GetValue<NL::Status>();
-            entry.UserSID       = rowset.GetValue<NL::UserSID>();
+            entry.PathOwnerId = rowset.GetValue<NL::PathOwnerId>();
+            entry.PathLocalId = rowset.GetValue<NL::PathLocalId>();
+            entry.PathName = rowset.GetValue<NL::PathName>();
+            entry.ObjectType = rowset.GetValue<NL::ObjectType>();
+            entry.Status = rowset.GetValue<NL::Status>();
+            entry.UserSID = rowset.GetValue<NL::UserSID>();
             entry.SchemaVersion = rowset.GetValue<NL::SchemaVersion>();
-            entry.Description   = rowset.GetValue<NL::Description>();
-            entry.CompletedAt   = rowset.GetValue<NL::CompletedAt>();
-            entry.PlanStep      = rowset.GetValueOrDefault<NL::PlanStep>(0);
+            entry.Description = rowset.GetValue<NL::Description>();
+            entry.CompletedAt = rowset.GetValue<NL::CompletedAt>();
+            entry.PlanStep = rowset.GetValueOrDefault<NL::PlanStep>(0);
             Result->Entries.push_back(std::move(entry));
 
             if (!rowset.Next()) {

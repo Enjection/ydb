@@ -3684,7 +3684,7 @@ bool TSchemeShard::CheckNotificationLogOverflow(TString& errStr) const {
         errStr = TStringBuilder()
             << "notification log is full: " << NotificationLogEntryCount
             << " entries (limit: " << MaxNotificationLogEntries << ")."
-            << " Subscribers may not be draining. Use ForceAdvanceSubscriber to unblock.";
+            << " Subscribers may not be draining.";
         return false;
     }
     return true;
