@@ -25,10 +25,6 @@ TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> ReadNotifi
 
 Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
 
-    // Exhaustive reboot tests: verify operations complete across arbitrary reboot points.
-    // Notification log persistence is verified separately below since ForwardToTablet/GrabEdgeEvent
-    // is incompatible with the pipe reset framework (adding events shifts injection points).
-
     Y_UNIT_TEST_WITH_REBOOTS(CreateTableWithReboots) {
         t.Run([&](TTestActorRuntime& runtime, bool& activeZone) {
             {
@@ -48,6 +44,18 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                 TInactiveZone inactive(activeZone);
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/Table1"),
                     {NLs::Finished, NLs::IsTable});
+
+                auto entries = ReadNotificationLog(runtime);
+                bool found = false;
+                for (const auto& e : entries) {
+                    if (e.PathName == "Table1") {
+                        found = true;
+                        UNIT_ASSERT(e.SequenceId > 0);
+                        UNIT_ASSERT_VALUES_EQUAL(e.ObjectType, (ui32)NKikimrSchemeOp::EPathTypeTable);
+                        break;
+                    }
+                }
+                UNIT_ASSERT_C(found, "Notification log entry for Table1 not found");
             }
         });
     }
@@ -79,6 +87,24 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                     {NLs::Finished, NLs::IsTable});
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/T2"),
                     {NLs::Finished, NLs::IsTable});
+
+                auto entries = ReadNotificationLog(runtime);
+
+                // T1 was created in inactive zone — its entry must exist
+                bool foundT1 = false;
+                for (const auto& e : entries) {
+                    if (e.PathName == "T1") {
+                        foundT1 = true;
+                        UNIT_ASSERT(e.SequenceId > 0);
+                    }
+                }
+                UNIT_ASSERT_C(foundT1, "Notification log entry for T1 not found");
+
+                // Verify monotonic sequence IDs across all entries
+                for (size_t i = 1; i < entries.size(); ++i) {
+                    UNIT_ASSERT_C(entries[i].SequenceId > entries[i-1].SequenceId,
+                        "SequenceIds must be strictly monotonic");
+                }
             }
         });
     }
@@ -108,43 +134,83 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/Table1"),
                     {NLs::Finished, NLs::IsTable,
                      NLs::CheckColumns("Table1", {"key", "value", "extra"}, {}, {"key"})});
+
+                auto entries = ReadNotificationLog(runtime);
+
+                // CREATE was done in inactive zone — its entry must exist
+                bool foundCreate = false;
+                for (const auto& e : entries) {
+                    if (e.PathName == "Table1" && e.OperationType == (ui32)TTxState::TxCreateTable) {
+                        foundCreate = true;
+                        UNIT_ASSERT(e.SequenceId > 0);
+                    }
+                }
+                UNIT_ASSERT_C(foundCreate, "CREATE TABLE entry not found in notification log");
+
+                // Verify monotonic sequence IDs across all entries
+                for (size_t i = 1; i < entries.size(); ++i) {
+                    UNIT_ASSERT_C(entries[i].SequenceId > entries[i-1].SequenceId,
+                        "SequenceIds must be strictly monotonic");
+                }
             }
         });
     }
 
-    // Targeted notification log persistence test: verify log entries survive a reboot.
-    // Uses plain Y_UNIT_TEST with explicit RebootTablet since ReadNotificationLog
-    // (ForwardToTablet + GrabEdgeEvent) is incompatible with Y_UNIT_TEST_WITH_REBOOTS.
-    Y_UNIT_TEST(NotificationLogSurvivesReboot) {
-        TTestWithReboots t;
+    // Verify that the NextNotificationSequenceId counter is properly restored
+    // after reboots: new operations must get strictly higher sequence IDs than
+    // operations that completed before the reboot point.
+    Y_UNIT_TEST_WITH_REBOOTS(SequenceIdCounterSurvivesReboot) {
         t.Run([&](TTestActorRuntime& runtime, bool& activeZone) {
             {
                 TInactiveZone inactive(activeZone);
-
-                // Create a table — generates a notification log entry
                 t.TestEnv->ReliablePropose(runtime, CreateTableRequest(++t.TxId, "/MyRoot",
-                    "Name: \"Table1\""
+                    "Name: \"T1\""
                     "Columns { Name: \"key\" Type: \"Uint64\" }"
                     "KeyColumnNames: [\"key\"]"),
                     {NKikimrScheme::StatusAccepted, NKikimrScheme::StatusAlreadyExists,
                      NKikimrScheme::StatusMultipleModifications});
                 t.TestEnv->TestWaitNotification(runtime, t.TxId);
+            }
 
-                // Verify log entry before reboot
-                auto entriesBefore = ReadNotificationLog(runtime);
-                UNIT_ASSERT_VALUES_EQUAL(entriesBefore.size(), 1);
-                UNIT_ASSERT_VALUES_EQUAL(entriesBefore[0].PathName, "Table1");
-                ui64 seqIdBefore = entriesBefore[0].SequenceId;
+            // Create T2 in active zone — reboots injected here.
+            t.TestEnv->ReliablePropose(runtime, CreateTableRequest(++t.TxId, "/MyRoot",
+                "Name: \"T2\""
+                "Columns { Name: \"key\" Type: \"Uint64\" }"
+                "KeyColumnNames: [\"key\"]"),
+                {NKikimrScheme::StatusAccepted, NKikimrScheme::StatusAlreadyExists,
+                 NKikimrScheme::StatusMultipleModifications});
+            t.TestEnv->TestWaitNotification(runtime, t.TxId);
 
-                // Reboot the SchemeShard
-                TActorId sender = runtime.AllocateEdgeActor();
-                RebootTablet(runtime, TTestTxConfig::SchemeShard, sender);
+            {
+                TInactiveZone inactive(activeZone);
+                TestDescribeResult(DescribePath(runtime, "/MyRoot/T1"),
+                    {NLs::Finished, NLs::IsTable});
+                TestDescribeResult(DescribePath(runtime, "/MyRoot/T2"),
+                    {NLs::Finished, NLs::IsTable});
 
-                // Verify log entries survive reboot
-                auto entriesAfter = ReadNotificationLog(runtime);
-                UNIT_ASSERT_VALUES_EQUAL(entriesAfter.size(), 1);
-                UNIT_ASSERT_VALUES_EQUAL(entriesAfter[0].PathName, "Table1");
-                UNIT_ASSERT_VALUES_EQUAL(entriesAfter[0].SequenceId, seqIdBefore);
+                auto entries = ReadNotificationLog(runtime);
+
+                // T1 was created in inactive zone — its entry must exist
+                ui64 t1SeqId = 0;
+                for (const auto& e : entries) {
+                    if (e.PathName == "T1") t1SeqId = e.SequenceId;
+                }
+                UNIT_ASSERT_C(t1SeqId > 0, "T1 entry not found in notification log");
+
+                // If T2's entry exists, verify counter continuity
+                for (const auto& e : entries) {
+                    if (e.PathName == "T2") {
+                        UNIT_ASSERT_C(e.SequenceId > t1SeqId,
+                            "T2 SequenceId (" << e.SequenceId
+                                << ") must be greater than T1 SequenceId (" << t1SeqId << ")");
+                    }
+                }
+
+                // Verify monotonic sequence IDs across all entries
+                for (size_t i = 1; i < entries.size(); ++i) {
+                    UNIT_ASSERT_C(entries[i].SequenceId > entries[i-1].SequenceId,
+                        "SequenceIds must be strictly monotonic");
+                }
             }
         });
     }
