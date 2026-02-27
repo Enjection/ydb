@@ -15,9 +15,6 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <errno.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <unistd.h>
-#endif
 
 #include <libfyaml.h>
 
@@ -100,6 +97,39 @@ err_out:
 	}
 
 	return NULL;
+}
+
+struct fy_document_builder *
+fy_document_builder_create_on_parser(struct fy_parser *fyp)
+{
+	struct fy_document_builder *fydb = NULL;
+	struct fy_document_state *fyds;
+	struct fy_document_builder_cfg cfg;
+	int rc;
+
+	if (!fyp)
+		return NULL;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.parse_cfg = fyp->cfg;
+	cfg.diag = fy_diag_ref(fyp->diag);
+
+	fydb = fy_document_builder_create(&cfg);
+	if (!fydb) {
+		fy_diag_unref(cfg.diag);
+		return NULL;
+	}
+
+	fyds = fy_parser_get_document_state(fyp);
+	if (fyds) {
+		rc = fy_document_builder_set_in_document(fydb, fyds, true);
+		if (rc) {
+			fy_document_builder_destroy(fydb);
+			return NULL;
+		}
+	}
+
+	return fydb;
 }
 
 void
@@ -225,9 +255,8 @@ fy_document_builder_set_in_document(struct fy_document_builder *fydb, struct fy_
 }
 
 int
-fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_eventp *fyep)
+fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_event *fye)
 {
-	struct fy_event *fye;
 	enum fy_event_type etype;
 	struct fy_document *fyd;
 	struct fy_document_builder_ctx *c, *cp;
@@ -237,7 +266,6 @@ fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_ev
 	struct fy_token *fyt;
 	int rc;
 
-	fye = fyep ? &fyep->e : NULL;
 	etype = fye ? fye->type : FYET_NONE;
 	fyt = fye ? fy_event_get_token(fye) : NULL;
 
@@ -271,7 +299,7 @@ fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_ev
 			fydb_error_check(fydb, fydb->fyd, err_out,
 					"fy_document_create() failed");
 
-			rc = fy_document_set_document_state(fydb->fyd, fyep->e.document_start.document_state);
+			rc = fy_document_set_document_state(fydb->fyd, fye->document_start.document_state);
 			fydb_error_check(fydb, !rc, err_out,
 					"fy_document_set_document_state() failed");
 
@@ -344,7 +372,10 @@ fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_ev
 				"fy_node_alloc() MAPPING failed");
 
 		c->fyn = fyn;
-		fyn->style = fye->mapping_start.mapping_start->type == FYTT_FLOW_MAPPING_START ? FYNS_FLOW : FYNS_BLOCK;
+		if (fye->mapping_start.mapping_start)
+			fyn->style = fye->mapping_start.mapping_start->type == FYTT_FLOW_MAPPING_START ? FYNS_FLOW : FYNS_BLOCK;
+		else
+			fyn->style = FYNS_ANY;
 		fyn->tag = fy_token_ref(fye->mapping_start.tag);
 		if (fye->mapping_start.anchor) {
 			rc = fy_document_register_anchor(fyd, fyn, fy_token_ref(fye->mapping_start.anchor));
@@ -376,7 +407,10 @@ fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_ev
 				"fy_node_alloc() SEQUENCE failed");
 
 		c->fyn = fyn;
-		fyn->style = fye->sequence_start.sequence_start->type == FYTT_FLOW_SEQUENCE_START ? FYNS_FLOW : FYNS_BLOCK;
+		if (fye->sequence_start.sequence_start)
+			fyn->style = fye->sequence_start.sequence_start->type == FYTT_FLOW_SEQUENCE_START ? FYNS_FLOW : FYNS_BLOCK;
+		else
+			fyn->style = FYNS_ANY;
 		fyn->tag = fy_token_ref(fye->sequence_start.tag);
 		if (fye->sequence_start.anchor) {
 			rc = fy_document_register_anchor(fyd, fyn, fy_token_ref(fye->sequence_start.anchor));
@@ -529,12 +563,36 @@ fy_document_builder_load_document(struct fy_document_builder *fydb,
 
 	while (!fy_document_builder_is_document_complete(fydb) &&
 		(fyep = fy_parse_private(fyp)) != NULL) {
-		rc = fy_document_builder_process_event(fydb, fyep);
+		rc = fy_document_builder_process_event(fydb, &fyep->e);
 		fy_parse_eventp_recycle(fyp, fyep);
 		if (rc < 0) {
 			fyp->stream_error = true;
 			return NULL;
 		}
+	}
+
+	/* get ownership of the document */
+	return fy_document_builder_take_document(fydb);
+}
+
+struct fy_document *
+fy_document_builder_event_document(struct fy_document_builder *fydb, struct fy_eventp_list *evpl)
+{
+	struct fy_eventp *fyep = NULL;
+	int rc;
+
+	if (!fydb || !evpl)
+		return NULL;
+
+	for (fyep = fy_eventp_list_head(evpl); fyep; fyep = fy_eventp_next(evpl, fyep)) {
+
+		if (fy_document_builder_is_document_complete(fydb))
+			break;
+
+		rc = fy_document_builder_process_event(fydb, &fyep->e);
+		if (rc < 0)
+			return NULL;
+
 	}
 
 	/* get ownership of the document */

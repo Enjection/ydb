@@ -14,20 +14,21 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <limits.h>
+#include <errno.h>
 #include <fcntl.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <unistd.h>
-#include <sys/mman.h>
-#endif
 #include <sys/types.h>
 #include <sys/stat.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
+
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/mman.h>
 #include <sys/ioctl.h>
 #endif
-#include <errno.h>
 
 #include <libfyaml.h>
 
+#include "fy-win32.h"
 #include "fy-parse.h"
 #include "fy-ctype.h"
 
@@ -65,6 +66,7 @@ void fy_input_free(struct fy_input *fyi)
 	switch (fyi->state) {
 	case FYIS_NONE:
 	case FYIS_QUEUED:
+	case FYIS_ERROR:
 		/* nothing to do */
 		break;
 	case FYIS_PARSE_IN_PROGRESS:
@@ -96,8 +98,9 @@ const char *fy_input_get_filename(struct fy_input *fyi)
 	return fyi->name;
 }
 
-static void fy_input_from_data_setup(struct fy_input *fyi,
-				     struct fy_atom *handle, bool simple)
+static void
+fy_input_from_data_setup_styled(struct fy_input *fyi,
+		struct fy_atom *handle, enum fy_scalar_style sstyle)
 {
 	const char *data;
 	size_t size;
@@ -119,11 +122,16 @@ static void fy_input_from_data_setup(struct fy_input *fyi,
 
 	memset(handle, 0, sizeof(*handle));
 
-	if (size > 0)
-		aflags = fy_analyze_scalar_content(data, size,
-				false, fylb_cr_nl, fyfws_space_tab);	/* hardcoded yaml mode */
-	else
-		aflags = FYACF_EMPTY | FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN | FYACF_SIZE0;
+	aflags = fy_analyze_scalar_content(data, size,
+			false, fylb_cr_nl, fyfws_space_tab);	/* hardcoded yaml mode */
+
+	if (sstyle == FYSS_ANY) {
+		sstyle = (aflags & (FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN |
+				    FYACF_LB | FYACF_ENDS_WITH_COLON |
+				    FYACF_STARTS_WITH_WS | FYACF_STARTS_WITH_LB |
+				    FYACF_ENDS_WITH_WS | FYACF_ENDS_WITH_LB | FYACF_CONSECUTIVE_LB))
+				== (FYACF_FLOW_PLAIN | FYACF_BLOCK_PLAIN) ? FYSS_PLAIN : FYSS_DOUBLE_QUOTED;
+	}
 
 	handle->start_mark.input_pos = 0;
 	handle->start_mark.line = 0;
@@ -131,18 +139,40 @@ static void fy_input_from_data_setup(struct fy_input *fyi,
 	handle->end_mark.input_pos = size;
 	handle->end_mark.line = 0;
 	handle->end_mark.column = fy_utf8_count(data, size);
-	/* if it's plain, all is good */
-	if (simple || (aflags & FYACF_FLOW_PLAIN)) {
-		handle->storage_hint = size;	/* maximum */
-		handle->storage_hint_valid = false;
-		handle->direct_output = !!(aflags & FYACF_JSON_ESCAPE);
-		handle->style = FYAS_PLAIN;
-	} else {
-		handle->storage_hint = 0;	/* just calculate */
-		handle->storage_hint_valid = false;
-		handle->direct_output = false;
-		handle->style = FYAS_DOUBLE_QUOTED_MANUAL;
+
+	handle->storage_hint = 0;	/* just calculate */
+	handle->storage_hint_valid = false;
+	handle->direct_output = false;
+
+	switch (sstyle) {
+	case FYSS_PLAIN:
+		handle->style = FYAS_PLAIN | FYAS_MANUAL_MARK;
+		break;
+	case FYSS_SINGLE_QUOTED:
+		handle->style = FYAS_SINGLE_QUOTED | FYAS_MANUAL_MARK;
+		break;
+	case FYSS_DOUBLE_QUOTED:
+		handle->style = FYAS_DOUBLE_QUOTED | FYAS_MANUAL_MARK;
+		break;
+	case FYSS_LITERAL:
+		handle->style = FYAS_LITERAL | FYAS_MANUAL_MARK;
+		/* we need everything */
+		if (aflags & FYACF_ENDS_WITH_LB)
+			aflags |= FYACF_TRAILING_LB;
+		break;
+	case FYSS_FOLDED:
+		handle->style = FYAS_FOLDED | FYAS_MANUAL_MARK;
+		/* we need everything */
+		if (aflags & FYACF_ENDS_WITH_LB)
+			aflags |= FYACF_TRAILING_LB;
+		break;
+
+	case FYSS_ANY:
+	default:
+		handle->style = FYAS_DOUBLE_QUOTED_MANUAL | FYAS_MANUAL_MARK;
+		break;
 	}
+
 	handle->empty = !!(aflags & FYACF_EMPTY);
 	handle->has_lb = !!(aflags & FYACF_LB);
 	handle->has_ws = !!(aflags & FYACF_WS);
@@ -162,8 +192,17 @@ static void fy_input_from_data_setup(struct fy_input *fyi,
 	handle->json_mode = false;	/* XXX hardcoded */
 	handle->lb_mode = fylb_cr_nl;
 	handle->fws_mode = fyfws_space_tab;
+	handle->directive0_mode = false;
 out:
 	fyi->state = FYIS_PARSED;
+}
+
+
+static void fy_input_from_data_setup(struct fy_input *fyi,
+				     struct fy_atom *handle, bool simple)
+{
+	return fy_input_from_data_setup_styled(fyi, handle,
+			simple ? FYSS_PLAIN : FYSS_ANY);
 }
 
 struct fy_input *fy_input_from_data(const char *data, size_t size,
@@ -210,6 +249,50 @@ struct fy_input *fy_input_from_malloc_data(char *data, size_t size,
 	return fyi;
 }
 
+struct fy_input *fy_input_from_data_styled(const char *data, size_t size,
+				    struct fy_atom *handle, enum fy_scalar_style sstyle)
+{
+	struct fy_input *fyi;
+
+	if (data && size == (size_t)-1)
+		size = strlen(data);
+
+	fyi = fy_input_alloc();
+	if (!fyi)
+		return NULL;
+
+	fyi->cfg.type = fyit_memory;
+	fyi->cfg.userdata = NULL;
+	fyi->cfg.memory.data = data;
+	fyi->cfg.memory.size = size;
+
+	fy_input_from_data_setup_styled(fyi, handle, sstyle);
+
+	return fyi;
+}
+
+struct fy_input *fy_input_from_malloc_data_styled(char *data, size_t size,
+					   struct fy_atom *handle,  enum fy_scalar_style sstyle)
+{
+	struct fy_input *fyi;
+
+	if (data && size == (size_t)-1)
+		size = strlen(data);
+
+	fyi = fy_input_alloc();
+	if (!fyi)
+		return NULL;
+
+	fyi->cfg.type = fyit_alloc;
+	fyi->cfg.userdata = NULL;
+	fyi->cfg.alloc.data = data;
+	fyi->cfg.alloc.size = size;
+
+	fy_input_from_data_setup_styled(fyi, handle, sstyle);
+
+	return fyi;
+}
+
 void fy_input_close(struct fy_input *fyi)
 {
 	if (!fyi)
@@ -220,12 +303,10 @@ void fy_input_close(struct fy_input *fyi)
 	case fyit_file:
 	case fyit_fd:
 
-#if !defined(_MSC_VER)
 		if (fyi->addr) {
 			munmap(fyi->addr, fyi->length);
 			fyi->addr = NULL;
 		}
-#endif
 
 		if (fyi->fd != -1) {
 			if (!fyi->cfg.no_close_fd)
@@ -260,9 +341,69 @@ void fy_input_close(struct fy_input *fyi)
 		/* nothing */
 		break;
 
+	case fyit_dociter:
+		/* nothing */
+		break;
+
 	default:
 		break;
 	}
+}
+
+ssize_t fy_input_estimate_queued_size(const struct fy_input *fyi)
+{
+	struct stat sb;
+	int fd, rc;
+
+	if (!fyi || fyi->state != FYIS_QUEUED)
+		return 0;
+
+	memset(&sb, 0, sizeof(sb));
+
+	switch (fyi->cfg.type) {
+	case fyit_file:
+		rc = stat(fyi->cfg.file.filename, &sb);
+		if (rc)
+			return -1;
+		break;
+
+	case fyit_stream:
+		fd = fileno(fyi->cfg.stream.fp);
+		if (fd < 0)
+			return -1;
+		rc = fstat(fd, &sb);
+		if (rc)
+			return -1;
+		break;
+
+	case fyit_memory:
+		return (ssize_t)fyi->cfg.memory.size;
+
+	case fyit_alloc:
+		return (ssize_t)fyi->cfg.alloc.size;
+
+	case fyit_fd:
+		rc = fstat(fyi->cfg.fd.fd, &sb);
+		if (rc)
+			return -1;
+		break;
+
+	case fyit_callback:
+	case fyit_dociter:
+	default:
+		return SSIZE_MAX;	/* cannot determine */
+	}
+
+	/* only do it for regular files */
+	if ((sb.st_mode & S_IFMT) != S_IFREG)
+		return SSIZE_MAX;
+
+	/* check for very impossible roll-over */
+	if ((size_t)sb.st_size > (size_t)SSIZE_MAX)
+		return SSIZE_MAX;
+
+	/* ok, we did find it */
+	return (ssize_t)sb.st_size;
 }
 
 struct fy_diag *fy_reader_get_diag(struct fy_reader *fyr)
@@ -275,13 +416,15 @@ struct fy_diag *fy_reader_get_diag(struct fy_reader *fyr)
 
 int fy_reader_file_open(struct fy_reader *fyr, const char *filename)
 {
+	int flags = O_RDONLY;
+
 	if (!fyr || !filename)
 		return -1;
 
 	if (fyr->ops && fyr->ops->file_open)
 		return fyr->ops->file_open(fyr, filename);
 
-	return open(filename, O_RDONLY);
+	return open(filename, flags);
 }
 
 void fy_reader_reset(struct fy_reader *fyr)
@@ -303,7 +446,6 @@ void fy_reader_reset(struct fy_reader *fyr)
 	fyr->mode = fyrm_yaml;
 	fyr->ops = ops;
 	fyr->diag = diag;
-	fyr->current_c = -1;
 }
 
 void fy_reader_setup(struct fy_reader *fyr, const struct fy_reader_ops *ops)
@@ -339,16 +481,19 @@ void fy_reader_apply_mode(struct fy_reader *fyr)
 		fyr->json_mode = false;
 		fyr->lb_mode = fylb_cr_nl;
 		fyr->fws_mode = fyfws_space_tab;
+		fyr->directive0_mode = false;
 		break;
 	case fyrm_json:
 		fyr->json_mode = true;
 		fyr->lb_mode = fylb_cr_nl;
 		fyr->fws_mode = fyfws_space;
+		fyr->directive0_mode = false;
 		break;
 	case fyrm_yaml_1_1:
 		fyr->json_mode = false;
 		fyr->lb_mode = fylb_cr_nl_N_L_P;
 		fyr->fws_mode = fyfws_space_tab;
+		fyr->directive0_mode = true;
 		break;
 	}
 	fyi = fyr->current_input;
@@ -356,12 +501,14 @@ void fy_reader_apply_mode(struct fy_reader *fyr)
 		fyi->json_mode = fyr->json_mode;
 		fyi->lb_mode = fyr->lb_mode;
 		fyi->fws_mode = fyr->fws_mode;
+		fyi->directive0_mode = fyr->directive0_mode;
 	}
 }
 
 int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const struct fy_reader_input_cfg *icfg)
 {
 	struct stat sb;
+	struct fy_document_iterator *fydi;
 	int rc;
 
 	if (!fyi)
@@ -404,7 +551,7 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 					"bad file.fd %d",  fyi->cfg.fd.fd);
 			break;
 		default:
-			assert(0);	// will never happen
+			FY_IMPOSSIBLE_ABORT();
 		}
 
 		rc = fstat(fyi->fd, &sb);
@@ -414,7 +561,6 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 		fyi->length = sb.st_size;
 
 		/* only map if not zero (and is not disabled) */
-#if !defined(_MSC_VER)
 		if (sb.st_size > 0 && !fyr->current_input_cfg.disable_mmap_opt) {
 			fyi->addr = mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fyi->fd, 0);
 
@@ -425,14 +571,13 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 				fyi->addr = NULL;
 			}
 		}
-#endif
 		/* if we've managed to mmap, we' good */
 		if (fyi->addr)
 			break;
 
 		/* if we're not ignoring stdio, open a FILE* using the fd */
-		if (!fyi->cfg.ignore_stdio) {
-			fyi->fp = fdopen(fyi->fd, "r");
+		if (sb.st_size > 0 && !fyi->cfg.ignore_stdio) {
+			fyi->fp = fdopen(fyi->fd, "rb");
 			fyr_error_check(fyr, rc != -1, err_out, "failed to fdopen %s", fyi->name);
 		} else
 			fyi->fp = NULL;
@@ -457,9 +602,14 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 	case fyit_callback:
 		break;
 
-	default:
-		assert(0);
+	case fyit_dociter:
+		fydi = fyi->cfg.dociter.fydi;
+		fyr_error_check(fyr, fydi, err_out,
+				"missing document iterator");
 		break;
+
+	default:
+		FY_IMPOSSIBLE_ABORT();
 	}
 
 	switch (fyi->cfg.type) {
@@ -467,19 +617,18 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 		/* those two need no memory */
 	case fyit_memory:
 	case fyit_alloc:
+	case fyit_dociter:
 		break;
 
 		/* all the rest need it */
 	default:
 		/* if we're not in mmap mode */
-#if !defined(_MSC_VER)
 		if (fyi->addr && !fyr->current_input_cfg.disable_mmap_opt)
 			break;
-#endif
 
 		fyi->chunk = fyi->cfg.chunk;
 		if (!fyi->chunk)
-			fyi->chunk = fy_get_pagesize();
+			fyi->chunk = sysconf(_SC_PAGESIZE);
 		fyi->chop = fyi->chunk * FYI_CHOP_MULT;
 		fyi->buffer = malloc(fyi->chunk);
 		fyr_error_check(fyr, fyi->buffer, err_out,
@@ -489,13 +638,11 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 	}
 
 	fyr->this_input_start = 0;
-	fyr->current_input_pos = 0;
 	fyr->line = 0;
 	fyr->column = 0;
-	fyr->current_c = -1;
 	fyr->current_ptr = NULL;
-	fyr->current_w = 0;
-	fyr->current_left = 0;
+	fyr->current_ptr_start = NULL;
+	fyr->current_ptr_end = NULL;
 
 	fyi->state = FYIS_PARSE_IN_PROGRESS;
 
@@ -503,6 +650,7 @@ int fy_reader_input_open(struct fy_reader *fyr, struct fy_input *fyi, const stru
 
 err_out:
 	fy_input_close(fyi);
+	fyi->state = FYIS_ERROR;
 	return -1;
 }
 
@@ -510,6 +658,7 @@ int fy_reader_input_done(struct fy_reader *fyr)
 {
 	struct fy_input *fyi;
 	void *buf;
+	size_t current_input_pos;
 
 	if (!fyr)
 		return -1;
@@ -517,6 +666,8 @@ int fy_reader_input_done(struct fy_reader *fyr)
 	fyi = fyr->current_input;
 	if (!fyi)
 		return 0;
+
+	current_input_pos = fy_reader_current_input_pos(fyr);
 
 	switch (fyi->cfg.type) {
 	case fyit_file:
@@ -529,14 +680,24 @@ int fy_reader_input_done(struct fy_reader *fyr)
 	case fyit_stream:
 	case fyit_callback:
 		/* chop extra buffer */
-		buf = realloc(fyi->buffer, fyr->current_input_pos);
-		fyr_error_check(fyr, buf || !fyr->current_input_pos, err_out,
-				"realloc() failed");
+		if (current_input_pos > 0) {
+			buf = realloc(fyi->buffer, current_input_pos);
+			fyr_error_check(fyr, buf || !current_input_pos, err_out,
+					"realloc() failed");
+		} else {
+			/* for empty stream, just free everything */
+			free(fyi->buffer);
+			buf = NULL;
+		}
 
-		fyi->buffer = buf;
-		fyi->allocated = fyr->current_input_pos;
 		/* increate input generation; required for direct input to work */
-		fyi->generation++;
+		if (fyi->buffer != buf) {
+			fyi->buffer = buf;
+			fyi->generation++;
+		}
+
+		fyi->allocated = current_input_pos;
+
 		break;
 
 	default:
@@ -551,12 +712,14 @@ int fy_reader_input_done(struct fy_reader *fyr)
 	return 0;
 
 err_out:
+	fyi->state = FYIS_ERROR;
 	return -1;
 }
 
 int fy_reader_input_scan_token_mark_slow_path(struct fy_reader *fyr)
 {
 	struct fy_input *fyi, *fyi_new = NULL;
+	size_t current_input_pos;
 
 	assert(fyr);
 
@@ -588,21 +751,24 @@ int fy_reader_input_scan_token_mark_slow_path(struct fy_reader *fyr)
 
 	fyi_new->lb_mode = fyi->lb_mode;
 	fyi_new->fws_mode = fyi->fws_mode;
+	fyi_new->directive0_mode = fyi->directive0_mode;
 
 	fyi_new->state = FYIS_PARSE_IN_PROGRESS;
 
 	/* adjust and copy the left over reads */
-	assert(fyi->read >= fyr->current_input_pos);
-	fyi_new->read = fyi->read - fyr->current_input_pos;
+	current_input_pos = fy_reader_current_input_pos(fyr);
+	assert(fyi->read >= current_input_pos);
+	fyi_new->read = fyi->read - current_input_pos;
 	if (fyi_new->read > 0)
-		memcpy(fyi_new->buffer, (char *)fyi->buffer + fyr->current_input_pos, fyi_new->read);
+		memcpy(fyi_new->buffer, (const char *)fyi->buffer + current_input_pos, fyi_new->read);
 
-	fyr->this_input_start += fyr->current_input_pos;
+	fyr->this_input_start += current_input_pos;
 
 	/* update the reader to point to the new input */
 	fyr->current_input = fyi_new;
-	fyr->current_input_pos = 0;
 	fyr->current_ptr = fyi_new->buffer;
+	fyr->current_ptr_start = fyi_new->buffer;
+	fyr->current_ptr_end = (const char *)fyr->current_ptr_start + fyi_new->read;
 
 	fyr_debug(fyr, "chop at this_input_start=%zu chop=%zu\n", fyr->this_input_start, fyi->chop);
 
@@ -620,12 +786,12 @@ err_out:
 const void *fy_reader_ptr_slow_path(struct fy_reader *fyr, size_t *leftp)
 {
 	struct fy_input *fyi;
-	const void *p;
-	int left;
+	const void *p, *start;
+	size_t size, left, current_input_pos;
 
 	if (fyr->current_ptr) {
 		if (leftp)
-			*leftp = fyr->current_left;
+			*leftp = fy_reader_current_left(fyr);
 		return fyr->current_ptr;
 	}
 
@@ -634,49 +800,83 @@ const void *fy_reader_ptr_slow_path(struct fy_reader *fyr, size_t *leftp)
 		return NULL;
 
 	/* tokens cannot cross boundaries */
-	switch (fyi->cfg.type) {
-	case fyit_file:
-	case fyit_fd:
-		if (fyi->addr) {
-			left = fyi->length - (fyr->this_input_start + fyr->current_input_pos);
-			p = (char *)fyi->addr + fyr->current_input_pos;
-			break;
-		}
+	start = fy_input_start_size(fyi, &size);
 
-		/* fall-through */
+	current_input_pos = fy_reader_current_input_pos(fyr);
+	left = size - current_input_pos;
+	assert(left <= size);
 
-	case fyit_stream:
-	case fyit_callback:
-		left = fyi->read - (fyr->this_input_start + fyr->current_input_pos);
-		p = (char *)fyi->buffer + fyr->current_input_pos;
-		break;
-
-	case fyit_memory:
-		left = fyi->cfg.memory.size - fyr->current_input_pos;
-		p = (char *)fyi->cfg.memory.data + fyr->current_input_pos;
-		break;
-
-	case fyit_alloc:
-		left = fyi->cfg.alloc.size - fyr->current_input_pos;
-		p = (char *)fyi->cfg.alloc.data + fyr->current_input_pos;
-		break;
-
-
-	default:
-		assert(0);	/* no streams */
-		p = NULL;
-		left = 0;
-		break;
-	}
+	p = (const char *)start + current_input_pos;
 
 	if (leftp)
 		*leftp = left;
 
+	if (!fyr->current_ptr_start) {
+		fyr->current_ptr_start = start;
+		fyr->current_ptr_end = (const char *)start + size;
+	}
+
 	fyr->current_ptr = p;
-	fyr->current_left = left;
-	fyr->current_c = fy_utf8_get(p, left, &fyr->current_w);
+
+	assert(current_input_pos <= size);
 
 	return p;
+}
+
+int fy_reader_peek_at_offset_width_slow_path(struct fy_reader *fyr, size_t offset, int *wp)
+{
+	const uint8_t *p;
+	size_t left;
+	int w;
+
+	assert(fyr);
+
+	/* ensure that the first octet at least is pulled in */
+	p = fy_reader_ensure_lookahead(fyr, offset + 1, &left);
+	if (!p)
+		return FYUG_EOF;
+
+	/* get width by first octet */
+	w = fy_utf8_width_by_first_octet(p[offset]);
+	if (!w)
+		return FYUG_INV;
+
+	/* make sure that there's enough to cover the utf8 width */
+	if (offset + w > left) {
+		p = fy_reader_ensure_lookahead(fyr, offset + w, &left);
+		if (!p)
+			return FYUG_PARTIAL;
+	}
+
+	return fy_utf8_get(p + offset, left - offset, wp);
+}
+
+int64_t fy_reader_peek_at_offset_width_slow_path_64(struct fy_reader *fyr, size_t offset)
+{
+	const uint8_t *p;
+	size_t left;
+	int w;
+
+	assert(fyr);
+
+	/* ensure that the first octet at least is pulled in */
+	p = fy_reader_ensure_lookahead(fyr, offset + 1, &left);
+	if (!p)
+		return FYUG_EOF;
+
+	/* get width by first octet */
+	w = fy_utf8_width_by_first_octet(p[offset]);
+	if (!w)
+		return FYUG_INV;
+
+	/* make sure that there's enough to cover the utf8 width */
+	if (offset + w > left) {
+		p = fy_reader_ensure_lookahead(fyr, offset + w, &left);
+		if (!p)
+			return FYUG_PARTIAL;
+	}
+
+	return fy_utf8_get_64(p + offset, left - offset);
 }
 
 const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi,
@@ -684,11 +884,11 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 {
 	const void *p;
 	size_t left, pos, size, nread, nreadreq, missing;
-	ssize_t snread;
+	ssize_t snread, current_input_pos;
 	size_t space __FY_DEBUG_UNUSED__;
 	void *buf;
 
-	if (!fyr || !fyi) {
+	if (!fyr || !fyi || fyi->state == FYIS_ERROR) {
 		if (leftp)
 			*leftp = 0;
 		return NULL;
@@ -696,7 +896,9 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 
 	p = NULL;
 	left = 0;
-	pos = fyr->current_input_pos;
+
+	current_input_pos = fy_reader_current_input_pos(fyr);
+	pos = current_input_pos;
 
 	switch (fyi->cfg.type) {
 	case fyit_file:
@@ -720,6 +922,7 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 	case fyit_callback:
 
 		assert(fyi->read >= pos);
+		assert(fyi->chunk > 0);
 
 		left = fyi->read - pos;
 		p = (char *)fyi->buffer + pos;
@@ -761,10 +964,13 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 
 			fyr_debug(fyr, "input read allocated=%zu new-size=%zu", fyi->allocated, size);
 
-			fyi->buffer = buf;
-			fyi->allocated = size;
-			fyi->generation++;
+			/* increase input generation; required for direct input to work */
+			if (fyi->buffer != buf) {
+				fyi->buffer = buf;
+				fyi->generation++;
+			}
 
+			fyi->allocated = size;
 			space = fyi->allocated - pos;
 			p = (char *)fyi->buffer + pos;
 		}
@@ -823,7 +1029,6 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 				do {
 					snread = read(fyi->fd, (char *)fyi->buffer + fyi->read, nreadreq);
 				} while (snread == -1 && errno == EAGAIN);
-
 				fyr_debug(fyr, "read returned %zd", snread);
 
 				if (snread == -1) {
@@ -869,7 +1074,7 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 			fyr_debug(fyr, "memory input exhausted");
 			break;
 		}
-		p = (char *)fyi->cfg.memory.data + pos;
+		p = (const char *)fyi->cfg.memory.data + pos;
 		break;
 
 	case fyit_alloc:
@@ -880,13 +1085,14 @@ const void *fy_reader_input_try_pull(struct fy_reader *fyr, struct fy_input *fyi
 			fyr_debug(fyr, "alloc input exhausted");
 			break;
 		}
-		p = (char *)fyi->cfg.alloc.data + pos;
+		p = (const char *)fyi->cfg.alloc.data + pos;
 		break;
 
+	case fyit_dociter:
+		FY_IMPOSSIBLE_ABORT();
 
 	default:
-		assert(0);
-		break;
+		FY_IMPOSSIBLE_ABORT();
 	}
 
 	if (leftp)
@@ -903,11 +1109,11 @@ void
 fy_reader_advance_slow_path(struct fy_reader *fyr, int c)
 {
 	bool is_line_break = false;
-	size_t w;
 
-	/* skip this character (optimize case of being the current) */
-	w = c == fyr->current_c ? (size_t)fyr->current_w : fy_utf8_width(c);
-	fy_reader_advance_octets(fyr, w);
+	if (c < 0)
+		return;
+
+	fy_reader_advance_octets(fyr, fy_utf8_width(c));
 
 	/* first check for CR/LF */
 	if (c == '\r' && fy_reader_peek(fyr) == '\n') {
@@ -962,13 +1168,13 @@ struct fy_input *fy_input_create(const struct fy_input_cfg *fyic)
 		break;
 	case fyit_memory:
 		ret = asprintf(&fyi->name, "<memory-@%p-%p>",
-			fyic->memory.data, (char *)fyic->memory.data + fyic->memory.size - 1);
+			fyic->memory.data, (const char *)fyic->memory.data + fyic->memory.size - 1);
 		if (ret == -1)
 			fyi->name = NULL;
 		break;
 	case fyit_alloc:
 		ret = asprintf(&fyi->name, "<alloc-@%p-%p>",
-			fyic->memory.data, (char *)fyic->memory.data + fyic->memory.size - 1);
+			fyic->memory.data, (const char *)fyic->memory.data + fyic->memory.size - 1);
 		if (ret == -1)
 			fyi->name = NULL;
 		break;
@@ -977,9 +1183,15 @@ struct fy_input *fy_input_create(const struct fy_input_cfg *fyic)
 		if (ret == -1)
 			fyi->name = NULL;
 		break;
-	default:
-		assert(0);
+
+	case fyit_dociter:
+		ret = asprintf(&fyi->name, "<dociter-@%p>", fyi->cfg.dociter.fydi);
+		if (ret == -1)
+			fyi->name = NULL;
 		break;
+
+	default:
+		FY_IMPOSSIBLE_ABORT();
 	}
 	if (!fyi->name)
 		goto err_out;
@@ -997,6 +1209,7 @@ struct fy_input *fy_input_create(const struct fy_input_cfg *fyic)
 	/* default modes */
 	fyi->lb_mode = fylb_cr_nl;
 	fyi->fws_mode = fyfws_space_tab;
+	fyi->directive0_mode = false;
 
 	return fyi;
 
@@ -1008,8 +1221,8 @@ err_out:
 /* ensure that there are at least size octets available */
 const void *fy_reader_ensure_lookahead_slow_path(struct fy_reader *fyr, size_t size, size_t *leftp)
 {
-	const void *p;
-	size_t left;
+	const void *p, *new_start, *old_start;
+	size_t left, new_size, old_size;
 
 	if (!leftp)
 		leftp = &left;
@@ -1017,19 +1230,87 @@ const void *fy_reader_ensure_lookahead_slow_path(struct fy_reader *fyr, size_t s
 	p = fy_reader_ptr(fyr, leftp);
 	if (!p || *leftp < size) {
 
+		if (!fyr->current_input) {
+			fyr_debug(fyr, "ensure lookahead size=%zd left=%zd no input left",
+					size, *leftp);
+			return NULL;
+		}
 		fyr_debug(fyr, "ensure lookahead size=%zd left=%zd (%s - %zu)",
 				size, *leftp,
 				fy_input_get_filename(fyr->current_input),
-				fyr->current_input_pos);
+				fy_reader_current_input_pos(fyr));
+
+		/* update with what is new */
+		old_start = fy_input_start_size(fyr->current_input, &old_size);
 
 		p = fy_reader_input_try_pull(fyr, fyr->current_input, size, leftp);
 		if (!p || *leftp < size)
 			return NULL;
 
+		/* update with what is new */
+		new_start = fy_input_start_size(fyr->current_input, &new_size);
+
+		/* oops, input characteristics changed */
+		if (old_start != new_start || old_size != new_size) {
+
+			/* buffer just grew in place */
+			if (old_start == new_start) {
+				fyr_debug(fyr, "buffer grew %zu -> %zu",
+						old_size, new_size);
+			} else {
+				fyr_debug(fyr, "buffer changed %p/%zu -> %p/%zu",
+						old_start, old_size, new_start, new_size);
+
+				fyr->current_ptr_start = new_start;
+			}
+
+			fyr->current_ptr_end = (const char *)fyr->current_ptr_start + new_size;
+		}
+
 		fyr->current_ptr = p;
-		fyr->current_left = *leftp;
-		fyr->current_c = fy_utf8_get(fyr->current_ptr, fyr->current_left, &fyr->current_w);
 	}
 	return p;
 }
 
+struct fy_event *fy_reader_generate_next_event(struct fy_reader *fyr)
+{
+	struct fy_input *fyi;
+	struct fy_document_iterator *fydi;
+	struct fy_event *fye;
+
+	fyi = fy_reader_current_input(fyr);
+	if (!fyi || fyi->cfg.type != fyit_dociter)
+		return NULL;
+
+	fydi = fyi->cfg.dociter.fydi;
+
+	do {
+		fye = fy_document_iterator_generate_next(fydi);
+		if (!fye)
+			return NULL;
+
+		/* remove if we don't want the event */
+		if (((fye->type == FYET_STREAM_START || fye->type == FYET_STREAM_END) &&
+				!(fyi->cfg.dociter.flags & FYPEGF_GENERATE_STREAM_EVENTS)) ||
+		    ((fye->type == FYET_DOCUMENT_START || fye->type == FYET_DOCUMENT_END) &&
+				!(fyi->cfg.dociter.flags & FYPEGF_GENERATE_DOCUMENT_EVENTS))) {
+			fy_document_iterator_event_free(fydi, fye);
+			fye = NULL;
+		}
+	} while (!fye);
+
+	return fye;
+}
+
+void fy_reader_event_free(struct fy_reader *fyr, struct fy_event *fye)
+{
+	struct fy_input *fyi;
+
+	fyi = fy_reader_current_input(fyr);
+	assert(fyi);
+	assert(fy_reader_generates_events(fyr));
+
+	assert (fyi->cfg.type == fyit_dociter);
+
+	fy_document_iterator_event_free(fyi->cfg.dociter.fydi, fye);
+}

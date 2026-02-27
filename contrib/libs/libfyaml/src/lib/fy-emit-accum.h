@@ -212,7 +212,7 @@ fy_emit_accum_utf8_write(struct fy_emit_accum *ea, const void *data, size_t len)
 
 static inline int
 fy_emit_accum_utf8_printf_raw(struct fy_emit_accum *ea, const char *fmt, ...)
-		FY_ATTRIBUTE(format(printf, 2, 3));
+		__attribute__((format(printf, 2, 3)));
 
 static inline int
 fy_emit_accum_utf8_printf_raw(struct fy_emit_accum *ea, const char *fmt, ...)
@@ -338,7 +338,7 @@ fy_emit_accum_empty(struct fy_emit_accum *ea)
 	return ea->next == 0;
 }
 
-static inline int
+static inline size_t
 fy_emit_accum_size(struct fy_emit_accum *ea)
 {
 	return ea->next;

@@ -16,8 +16,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#include <libfyaml.h>
-
 #include "fy-list.h"
 
 /* declare type methods */
@@ -31,17 +29,17 @@ struct __useless_struct_to_allow_semicolon
 #define FY_TYPE_DECL_LIST(_type) \
 static inline void fy_ ## _type ## _list_init(struct fy_ ## _type ## _list *_l) \
 { \
-	fy_list_init_head(&_l->_lh); \
+	list_init(&_l->_lh); \
 } \
 static inline void fy_ ## _type ## _list_add(struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n) \
 { \
 	if (_l && _n) \
-		fy_list_add_head(&_n->node, &_l->_lh); \
+		list_add(&_n->node, &_l->_lh); \
 } \
 static inline void fy_ ## _type ## _list_add_tail(struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n) \
 { \
 	if (_l && _n) \
-		fy_list_add_tail(&_n->node, &_l->_lh); \
+		list_add_tail(&_n->node, &_l->_lh); \
 } \
 static inline void fy_ ## _type ## _list_push(struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n) \
 { \
@@ -55,38 +53,36 @@ static inline void fy_ ## _type ## _list_push_tail(struct fy_ ## _type ## _list 
 } \
 static inline bool fy_ ## _type ## _list_empty(struct fy_ ## _type ## _list *_l) \
 { \
-	return _l ? fy_list_is_empty(&_l->_lh) : true; \
+	return _l ? list_empty(&_l->_lh) : true; \
 } \
 static inline bool fy_ ## _type ## _list_is_singular(struct fy_ ## _type ## _list *_l) \
 { \
-	return _l ? fy_list_is_singular(&_l->_lh) : true; \
+	return _l ? list_is_singular(&_l->_lh) : true; \
 } \
 static inline void fy_ ## _type ## _list_del(struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n) \
 { \
-	if (_l && _n) { \
-		fy_list_del(&_n->node); \
-		fy_list_init_head(&_n->node); \
-	} \
+	if (_l && _n) \
+		list_del(&_n->node); \
 } \
 static inline void fy_ ## _type ## _list_insert_after(struct fy_ ## _type ## _list *_l, \
 		struct fy_ ## _type *_p, struct fy_ ## _type *_n) \
 { \
 	if (_l && _p && _n) \
-		fy_list_add_head(&_n->node, &_p->node); \
+		list_add(&_n->node, &_p->node); \
 } \
 static inline void fy_ ## _type ## _list_insert_before(struct fy_ ## _type ## _list *_l, \
 		struct fy_ ## _type *_p, struct fy_ ## _type *_n) \
 { \
 	if (_l && _p && _n) \
-		fy_list_add_tail(&_n->node, &_p->node); \
+		list_add_tail(&_n->node, &_p->node); \
 } \
 static inline struct fy_ ## _type *fy_ ## _type ## _list_head(struct fy_ ## _type ## _list *_l) \
 { \
-	return !fy_ ## _type ## _list_empty(_l) ? fy_container_of(_l->_lh.next, struct fy_ ## _type, node) : NULL; \
+	return !fy_ ## _type ## _list_empty(_l) ? list_first_entry(&_l->_lh, struct fy_ ## _type, node) : NULL; \
 } \
 static inline struct fy_ ## _type *fy_ ## _type ## _list_tail(struct fy_ ## _type ## _list *_l) \
 { \
-	return !fy_ ## _type ## _list_empty(_l) ? fy_container_of(_l->_lh.prev, struct fy_ ## _type, node) : NULL; \
+	return !fy_ ## _type ## _list_empty(_l) ? list_last_entry(&_l->_lh, struct fy_ ## _type, node) : NULL; \
 } \
 static inline struct fy_ ## _type *fy_ ## _type ## _list_first(struct fy_ ## _type ## _list *_l) \
 { \
@@ -120,13 +116,13 @@ static inline struct fy_ ## _type *fy_ ## _type ## _next(struct fy_ ## _type ## 
 { \
 	if (!_n || !_l || _n->node.next == &_l->_lh) \
 		return NULL; \
-	return fy_container_of(_n->node.next, struct fy_ ## _type, node); \
+	return list_entry(_n->node.next, struct fy_ ## _type, node); \
 } \
 static inline struct fy_ ## _type *fy_ ## _type ## _prev(struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n) \
 { \
 	if (!_n || !_l || _n->node.prev == &_l->_lh) \
 		return NULL; \
-	return fy_container_of(_n->node.prev, struct fy_ ## _type, node); \
+	return list_entry(_n->node.prev, struct fy_ ## _type, node); \
 } \
 static inline void fy_ ## _type ## _lists_splice( \
 		struct fy_ ## _type ## _list *_l, \
@@ -134,9 +130,9 @@ static inline void fy_ ## _type ## _lists_splice( \
 { \
 	/* check arguments for sanity and lists are not empty */ \
 	if (!_l || !_lfrom || \
-		fy_ ## _type ## _list_empty(_lfrom)) \
+	    fy_ ## _type ## _list_empty(_lfrom)) \
 		return; \
-	fy_list_splice(&_lfrom->_lh, &_l->_lh); \
+	list_splice(&_lfrom->_lh, &_l->_lh); \
 } \
 static inline void fy_ ## _type ## _list_splice_after( \
 		struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n, \
@@ -144,19 +140,19 @@ static inline void fy_ ## _type ## _list_splice_after( \
 { \
 	/* check arguments for sanity and lists are not empty */ \
 	if (!_l || !_n || !_lfrom || \
-		fy_ ## _type ## _list_empty(_lfrom)) \
+	    fy_ ## _type ## _list_empty(_lfrom)) \
 		return; \
-	fy_list_splice(&_lfrom->_lh, &_n->node); \
+	list_splice(&_lfrom->_lh, &_n->node); \
 } \
 static inline void fy_ ## _type ## _list_splice_before( \
 		struct fy_ ## _type ## _list *_l, struct fy_ ## _type *_n, \
 		struct fy_ ## _type ## _list *_lfrom) \
 { \
 	/* check arguments for sanity and lists are not empty */ \
-	 if (!_l || !_n || !_lfrom || \
-		fy_ ## _type ## _list_empty(_lfrom)) \
+	if (!_l || !_n || !_lfrom || \
+	    fy_ ## _type ## _list_empty(_lfrom)) \
 		return; \
-	fy_list_splice(&_lfrom->_lh, _n->node.prev); \
+	list_splice(&_lfrom->_lh, _n->node.prev); \
 } \
 struct __useless_struct_to_allow_semicolon
 

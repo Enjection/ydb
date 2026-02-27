@@ -17,8 +17,6 @@
 #include <string.h>
 #include <assert.h>
 
-#include <libfyaml.h>
-
 #include "fy-utf8.h"
 
 enum fy_lb_mode {
@@ -31,100 +29,118 @@ enum fy_flow_ws_mode {
 	fyfws_space,			/* only space (json) */
 };
 
-static inline bool fy_is_first_alpha(int c)
+static inline bool fy_is_first_alpha(const int c)
 {
 	return (c >= 'a' && c <= 'z') ||
 	       (c >= 'A' && c <= 'Z') ||
 	       c == '_';
 }
 
-static inline bool fy_is_alpha(int c)
+static inline bool fy_is_alpha(const int c)
 {
 	return fy_is_first_alpha(c) || c == '-';
 }
 
-static inline bool fy_is_num(int c)
+static inline bool fy_is_num(const int c)
 {
 	return c >= '0' && c <= '9';
 }
 
-static inline bool fy_is_first_alnum(int c)
+static inline bool fy_is_digit(const int c)
+{
+	return c >= '0' && c <= '9';
+}
+
+static inline bool fy_is_xdigit(const int c)
+{
+	return fy_is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static inline bool fy_is_first_alnum(const int c)
 {
 	return fy_is_first_alpha(c);
 }
 
-static inline bool fy_is_alnum(int c)
+static inline bool fy_is_alnum(const int c)
 {
 	return fy_is_alpha(c) || fy_is_num(c);
 }
 
-static inline bool fy_is_space(int c)
+static inline bool fy_is_space(const int c)
 {
-	return c == ' ';
+	return fy_utf8_is_space(c);
 }
 
-static inline bool fy_is_tab(int c)
+static inline bool fy_is_tab(const int c)
 {
-	return c == '\t';
+	return fy_utf8_is_tab(c);
 }
 
-static inline bool fy_is_ws(int c)
+static inline bool fy_is_ws(const int c)
 {
-	return fy_is_space(c) || fy_is_tab(c);
+	return fy_utf8_is_ws(c);
 }
 
-static inline bool fy_is_hex(int c)
+static inline bool fy_is_hex(const int c)
 {
-	return (c >= '0' && c <= '9') ||
-	       (c >= 'a' && c <= 'f') ||
-	       (c >= 'A' && c <= 'F');
+	return fy_utf8_is_hex(c);
 }
 
-static inline bool fy_is_uri(int c)
+static inline bool fy_is_flow_indicator(const int c)
+{
+	return fy_utf8_is_flow_indicator(c);
+}
+
+static inline bool fy_is_lb_r_n(const int c)
+{
+	return fy_utf8_is_lb(c);
+}
+
+static inline bool fy_is_blank(const int c)
+{
+	return fy_utf8_is_ws(c);
+}
+
+static inline bool fy_is_blank_lb_r_n(const int c)
+{
+	return fy_utf8_is_ws_lb(c);
+}
+
+static inline bool fy_is_uri(const int c)
 {
 	return fy_is_alnum(c) || fy_utf8_strchr(";/?:@&=+$,.!~*\'()[]%", c);
 }
 
-static inline bool fy_is_lb_r_n(int c)
-{
-	return c == '\r' || c == '\n';
-}
-
-static inline bool fy_is_lb_NEL(int c)
+static inline bool fy_is_lb_NEL(const int c)
 {
 	return c == 0x85;
 }
 
-static inline bool fy_is_lb_LS_PS(int c)
+static inline bool fy_is_lb_LS_PS(const int c)
 {
 	return c == 0x2028 || c == 0x2029;
 }
 
-static inline bool fy_is_unicode_lb(int c)
+static inline bool fy_is_unicode_lb(const int c)
 {
 	/* note that YAML1.1 supports NEL #x85, LS #x2028 and PS #x2029 as linebreaks */
 	/* YAML1.2 and higher does not */
 	return fy_is_lb_NEL(c) || fy_is_lb_LS_PS(c);
 }
 
-static inline bool fy_is_any_lb(int c)
+static inline bool fy_is_any_lb(const int c)
 {
 	return fy_is_lb_r_n(c) || fy_is_unicode_lb(c);
 }
 
-static inline bool fy_is_z(int c)
+static inline bool fy_is_z(const int c)
 {
 	return c <= 0;
 }
 
-static inline bool fy_is_blank(int c)
-{
-	return c == ' ' || c == '\t';
-}
-
 #define FY_UTF8_BOM	0xfeff
 
-static inline bool fy_is_print(int c)
+static inline bool fy_is_print(const int c)
 {
 	return c == '\n' || c == '\r' ||
 	       (c >= 0x0020 && c <= 0x007e) ||
@@ -132,110 +148,112 @@ static inline bool fy_is_print(int c)
 	       (c >= 0xe000 && c <= 0xfffd && c != FY_UTF8_BOM);
 }
 
-static inline bool fy_is_printq(int c)
+static inline bool fy_is_printq(const int c)
 {
 	return c != '\t' && c != 0xa0 && !fy_is_any_lb(c) && fy_is_print(c);
 }
 
-static inline bool fy_is_nb_char(int c)
+static inline bool fy_is_nb_char(const int c)
 {
 	return (c >= 0x0020 && c <= 0x007e) ||
 	       (c >= 0x00a0 && c <= 0xd7ff) ||
 	       (c >= 0xe000 && c <= 0xfffd && c != FY_UTF8_BOM);
 }
 
-static inline bool fy_is_ns_char(int c)
+static inline bool fy_is_ns_char(const int c)
 {
 	return fy_is_nb_char(c) && !fy_is_ws(c);
 }
 
-static inline bool fy_is_start_indicator(int c)
+static inline bool fy_is_start_indicator(const int c)
 {
 	return !!fy_utf8_strchr(",[]{}#&*!|>'\"%%@`", c);
 }
 
-static inline bool fy_is_indicator_before_space(int c)
+static inline bool fy_is_indicator_before_space(const int c)
 {
 	return !!fy_utf8_strchr("-:?`", c);
 }
 
-static inline bool fy_is_flow_indicator(int c)
-{
-	return !!fy_utf8_strchr(",[]{}", c);
-}
-
-static inline bool fy_is_path_flow_scalar_start(int c)
+static inline bool fy_is_path_flow_scalar_start(const int c)
 {
 	return c == '\'' || c == '"';
 }
 
-static inline bool fy_is_path_flow_key_start(int c)
+static inline bool fy_is_path_flow_key_start(const int c)
 {
 	return c == '"' || c == '\'' || c == '{' || c == '[';
 }
 
-static inline bool fy_is_path_flow_key_end(int c)
+static inline bool fy_is_path_flow_key_end(const int c)
 {
 	return c == '"' || c == '\'' || c == '}' || c == ']';
 }
 
-static inline bool fy_is_unicode_control(int c)
+static inline bool fy_is_unicode_control(const int c)
 {
         return (c >= 0 && c <= 0x1f) || (c >= 0x80 && c <= 0x9f);
 }
 
-static inline bool fy_is_unicode_space(int c)
+static inline bool fy_is_unicode_space(const int c)
 {
         return c == 0x20 || c == 0xa0 ||
                (c >= 0x2000 && c <= 0x200a) ||
                c == 0x202f || c == 0x205f || c == 0x3000;
 }
 
-static inline bool fy_is_json_unescaped(int c)
+static inline bool fy_is_json_unescaped(const int c)
 {
 	return c >= 0x20 && c <= 0x110000 && c != '"' && c != '\\';
 }
 
-static inline bool fy_is_json_unescaped_range_only(int c)
+static inline bool fy_is_json_unescaped_range_only(const int c)
 {
 	return c >= 0x20 && c <= 0x110000;
 }
 
-static inline bool fy_is_lb_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_lb_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	if (fy_is_lb_r_n(c))
 		return true;
 	return lb_mode == fylb_cr_nl_N_L_P && fy_is_unicode_lb(c);
 }
 
-static inline bool fy_is_generic_lb_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_generic_lb_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	if (fy_is_lb_r_n(c))
 		return true;
 	return lb_mode == fylb_cr_nl_N_L_P && fy_is_lb_NEL(c);
 }
 
-static inline bool fy_is_lbz_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_blank_lb_m(const int c, const enum fy_lb_mode lb_mode)
+{
+	if (fy_is_blank_lb_r_n(c))
+		return true;
+	return lb_mode == fylb_cr_nl_N_L_P && fy_is_unicode_lb(c);
+}
+
+static inline bool fy_is_lbz_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	return fy_is_lb_m(c, lb_mode) || fy_is_z(c);
 }
 
-static inline bool fy_is_generic_lbz_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_generic_lbz_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	return fy_is_generic_lb_m(c, lb_mode) || fy_is_z(c);
 }
 
-static inline bool fy_is_blankz_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_blankz_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	return fy_is_ws(c) || fy_is_lbz_m(c, lb_mode);
 }
 
-static inline bool fy_is_generic_blankz_m(int c, enum fy_lb_mode lb_mode)
+static inline bool fy_is_generic_blankz_m(const int c, const enum fy_lb_mode lb_mode)
 {
 	return fy_is_ws(c) || fy_is_generic_lbz_m(c, lb_mode);
 }
 
-static inline bool fy_is_flow_ws_m(int c, enum fy_flow_ws_mode fws_mode)
+static inline bool fy_is_flow_ws_m(const int c, const enum fy_flow_ws_mode fws_mode)
 {
 	return fy_is_space(c) || (fws_mode == fyfws_space_tab && fy_is_tab(c));
 }
@@ -244,26 +262,26 @@ static inline bool fy_is_flow_ws_m(int c, enum fy_flow_ws_mode fws_mode)
 static inline const void * \
 fy_find_ ## _kind (const void *s, size_t len) \
 { \
-	const char *cs = (char *)s; \
-	const char *e = cs + len; \
+	const char *sc = (const char *)s; \
+	const char *e = sc + len; \
 	int c, w; \
-	for (; cs < e && (c = fy_utf8_get(cs,  e - cs, &w)) >= 0; cs += w) { \
+	for (; sc < e && (c = fy_utf8_get(sc, (size_t)(e - sc), &w)) >= 0; sc += w) { \
 		assert(w); \
 		if (fy_is_ ## _kind (c)) \
-			return cs; \
+			return sc; \
 	} \
 	return NULL; \
 } \
 static inline const void * \
 fy_find_non_ ## _kind (const void *s, size_t len) \
 { \
-	const char *cs = (char *)s; \
-	const char *e = cs + len; \
+	const char *sc = (const char *)s; \
+	const char *e = sc + len; \
 	int c, w; \
-	for (; cs < e && (c = fy_utf8_get(cs,  e - cs, &w)) >= 0; cs += w) { \
+	for (; sc < e && (c = fy_utf8_get(sc, (size_t)(e - sc), &w)) >= 0; sc += w) { \
 		assert(w); \
 		if (!(fy_is_ ## _kind (c))) \
-			return cs; \
+			return sc; \
 		assert(w); \
 	} \
 	return NULL; \
@@ -273,6 +291,8 @@ struct useless_struct_for_semicolon
 FY_CTYPE_AT_BUILDER(first_alpha);
 FY_CTYPE_AT_BUILDER(alpha);
 FY_CTYPE_AT_BUILDER(num);
+FY_CTYPE_AT_BUILDER(digit);
+FY_CTYPE_AT_BUILDER(xdigit);
 FY_CTYPE_AT_BUILDER(first_alnum);
 FY_CTYPE_AT_BUILDER(alnum);
 FY_CTYPE_AT_BUILDER(space);
@@ -303,7 +323,7 @@ FY_CTYPE_AT_BUILDER(json_unescaped);
  */
 
 /* skip for a _single_ linebreak */
-static inline const void *fy_skip_lb(const void *ptr, int left)
+static inline const void *fy_skip_lb(const void *ptr, size_t left)
 {
 	int c, width;
 
@@ -313,17 +333,17 @@ static inline const void *fy_skip_lb(const void *ptr, int left)
 		return NULL;
 
 	/* MS-DOS: check if next character is '\n' */
-	if (c == '\r' && left > width && *(char *)ptr == '\n')
+	if (c == '\r' && left > (size_t)width && *(char *)ptr == '\n')
 		width++;
 
-	return (char *)ptr + width;
+	return (const char *)ptr + width;
 }
 
 /* given a pointer to a chunk of memory, return pointer to first
  * ws character after the last non-ws character, or the end
  * of the chunk
  */
-static inline const void *fy_last_non_ws(const void *ptr, int left)
+static inline const void *fy_last_non_ws(const void *ptr, size_t left)
 {
 	const char *s, *e;
 	int c;

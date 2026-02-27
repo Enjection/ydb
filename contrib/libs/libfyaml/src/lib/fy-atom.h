@@ -21,7 +21,7 @@
 #include <libfyaml.h>
 
 #include "fy-list.h"
-#include "fy-input.h"
+#include "fy-ctype.h"
 
 struct fy_reader;
 struct fy_input;
@@ -35,17 +35,24 @@ enum fy_atom_style {
 	FYAS_LITERAL,
 	FYAS_FOLDED,
 	FYAS_URI,	/* special style for URIs */
-	FYAS_DOUBLE_QUOTED_MANUAL,
-	FYAS_COMMENT	/* (possibly multi line) comment */
+	FYAS_COMMENT,	/* (possibly multi line) comment */
+	FYAS_MANUAL_MARK = FY_BIT(3),
+	FYAS_PLAIN_MANUAL = FYAS_PLAIN | FYAS_MANUAL_MARK,
+	FYAS_SINGLE_QUOTED_MANUAL = FYAS_SINGLE_QUOTED | FYAS_MANUAL_MARK,
+	FYAS_DOUBLE_QUOTED_MANUAL = FYAS_DOUBLE_QUOTED | FYAS_MANUAL_MARK,
+	FYAS_LITERAL_MANUAL = FYAS_LITERAL | FYAS_MANUAL_MARK,
+	FYAS_FOLDED_MANUAL = FYAS_FOLDED | FYAS_MANUAL_MARK,
 };
 
 static inline bool fy_atom_style_is_quoted(enum fy_atom_style style)
 {
+	style &= ~FYAS_MANUAL_MARK;
 	return style == FYAS_SINGLE_QUOTED || style == FYAS_DOUBLE_QUOTED;
 }
 
 static inline bool fy_atom_style_is_block(enum fy_atom_style style)
 {
+	style &= ~FYAS_MANUAL_MARK;
 	return style == FYAS_LITERAL || style == FYAS_FOLDED;
 }
 
@@ -66,11 +73,12 @@ struct fy_atom {
 		uint64_t tozero;			/* fast way to zero everything here */
 		struct {
 			/* save a little bit of space with bitfields */
-			enum fy_atom_style style : 8;	/* note that it's a big perf win for bytes */
-			enum fy_atom_chomp chomp : 8;
+			unsigned int style : 8;	/* enum fy_atom_style, note that it's a big perf win for bytes */
+			unsigned int chomp : 8; /* enum fy_atom_chomp */
 			unsigned int tabsize : 8;
-			enum fy_lb_mode lb_mode : 1;
-			enum fy_flow_ws_mode fws_mode : 1;
+			unsigned int lb_mode : 1; /* enum fy_lb_mode */
+			unsigned int fws_mode : 1; /* enum fy_flow_ws_mode */
+			unsigned int directive0_mode : 1;
 			bool direct_output : 1;		/* can directly output */
 			bool storage_hint_valid : 1;
 			bool empty : 1;			/* atom contains whitespace and linebreaks only if length > 0 */
@@ -85,6 +93,9 @@ struct fy_atom {
 			bool valid_anchor : 1;		/* atom is a valid anchor */
 			bool json_mode : 1;		/* atom was read in json mode */
 			bool ends_with_eof : 1;		/* atom ends at EOF of input */
+			bool is_merge_key: 1;		/* atom is just << */
+			bool simple_key_allowed : 1;	/* atom allows a simple key */
+			bool high_ascii : 1;		/* atom has utf code point >= 0x80 (only for plains) */
 		};
 	};
 };
@@ -116,6 +127,11 @@ static inline enum fy_lb_mode fy_atom_lb_mode(struct fy_atom *handle)
 	return handle->lb_mode;
 }
 
+static inline bool fy_atom_is_merge_key(struct fy_atom *handle)
+{
+	return handle && handle->is_merge_key;
+}
+
 static inline enum fy_flow_ws_mode fy_atom_flow_ws_mode(struct fy_atom *handle)
 {
 	if (!handle)
@@ -135,50 +151,10 @@ static inline bool fy_atom_is_flow_ws(struct fy_atom *handle, int c)
 	return fy_is_flow_ws_m(c, fy_atom_flow_ws_mode(handle));
 }
 
-int fy_atom_format_text_length(struct fy_atom *atom);
+ssize_t fy_atom_format_text_length(struct fy_atom *atom);
 const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz);
 
 int fy_atom_format_utf8_length(struct fy_atom *atom);
-
-static inline void
-fy_reader_fill_atom_start(struct fy_reader *fyr, struct fy_atom *handle)
-{
-	/* start mark */
-	fy_reader_get_mark(fyr, &handle->start_mark);
-	handle->fyi = fy_reader_current_input(fyr);
-	handle->fyi_generation = fy_reader_current_input_generation(fyr);
-
-	handle->increment = 0;
-	handle->tozero = 0;
-
-	/* note that handle->data may be zero for empty input */
-}
-
-static inline void
-fy_reader_fill_atom_end_at(struct fy_reader *fyr, struct fy_atom *handle, struct fy_mark *end_mark)
-{
-	if (end_mark)
-		handle->end_mark = *end_mark;
-	else
-		fy_reader_get_mark(fyr, &handle->end_mark);
-
-	/* default is plain, modify at return */
-	handle->style = FYAS_PLAIN;
-	handle->chomp = FYAC_CLIP;
-	/* by default we don't do storage hints, it's the job of the caller */
-	handle->storage_hint = 0;
-	handle->storage_hint_valid = false;
-	handle->tabsize = fy_reader_tabsize(fyr);
-	handle->json_mode = fy_reader_json_mode(fyr);
-	handle->lb_mode = fy_reader_lb_mode(fyr);
-	handle->fws_mode = fy_reader_flow_ws_mode(fyr);
-}
-
-static inline void
-fy_reader_fill_atom_end(struct fy_reader *fyr, struct fy_atom *handle)
-{
-	fy_reader_fill_atom_end_at(fyr, handle, NULL);
-}
 
 static inline void
 fy_atom_reset_storage_hints(struct fy_atom *handle)
@@ -192,11 +168,11 @@ struct fy_atom *fy_reader_fill_atom_mark(struct fy_reader *fyr, const struct fy_
 					 const struct fy_mark *end_mark, struct fy_atom *handle);
 struct fy_atom *fy_reader_fill_atom_at(struct fy_reader *fyr, int advance, int count, struct fy_atom *handle);
 
-#define fy_reader_fill_atom_a(_fyr, _advance)  fy_reader_fill_atom((_fyr), (_advance), FY_ALLOCA(sizeof(struct fy_atom)))
+#define fy_reader_fill_atom_a(_fyr, _advance)  fy_reader_fill_atom((_fyr), (_advance), alloca(sizeof(struct fy_atom)))
 
 struct fy_atom *fy_fill_node_atom(struct fy_node *fyn, struct fy_atom *handle);
 
-#define fy_fill_node_atom_a(_fyn)  fy_fill_node_atom((_fyn), FY_ALLOCA(sizeof(struct fy_atom)))
+#define fy_fill_node_atom_a(_fyn)  fy_fill_node_atom((_fyn), alloca(sizeof(struct fy_atom)))
 
 struct fy_atom_iter_line_info {
 	const char *start;
@@ -277,13 +253,7 @@ int fy_atom_strcmp(struct fy_atom *atom, const char *str);
 bool fy_atom_is_number(struct fy_atom *atom);
 int fy_atom_cmp(struct fy_atom *atom1, struct fy_atom *atom2);
 
-static inline const char *fy_atom_data(const struct fy_atom *atom)
-{
-	if (!atom)
-		return NULL;
-
-	return (char *)fy_input_start(atom->fyi) + atom->start_mark.input_pos;
-}
+const char *fy_atom_data(const struct fy_atom *atom);
 
 static inline size_t fy_atom_size(const struct fy_atom *atom)
 {
@@ -333,5 +303,13 @@ void fy_atom_raw_line_iter_finish(struct fy_atom_raw_line_iter *iter);
 
 const struct fy_raw_line *
 fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter);
+
+const char *
+fy_atom_lines_containing(struct fy_atom *atom, size_t *lenp);
+
+
+unsigned int
+fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style,
+		     int *maxspanp, int *maxcolp);
 
 #endif
