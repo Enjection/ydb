@@ -9,21 +9,21 @@ using namespace NSchemeShardUT_Private;
 
 namespace {
 
-TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> ReadNotificationLog(
+TVector<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult::TEntry> ReadSchemeChangeRecords(
     TTestActorRuntime& runtime)
 {
     auto sender = runtime.AllocateEdgeActor();
     ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender,
-        new TEvSchemeShard::TEvInternalReadNotificationLog());
+        new TEvSchemeShard::TEvInternalReadSchemeChangeRecords());
     TAutoPtr<IEventHandle> handle;
-    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadNotificationLogResult>(handle);
+    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult>(handle);
     UNIT_ASSERT(event);
     return event->Entries;
 }
 
 } // anonymous namespace
 
-Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
+Y_UNIT_TEST_SUITE(TSchemeChangeRecordsReboots) {
 
     Y_UNIT_TEST_WITH_REBOOTS(CreateTableWithReboots) {
         t.Run([&](TTestActorRuntime& runtime, bool& activeZone) {
@@ -45,7 +45,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/Table1"),
                     {NLs::Finished, NLs::IsTable});
 
-                auto entries = ReadNotificationLog(runtime);
+                auto entries = ReadSchemeChangeRecords(runtime);
                 bool found = false;
                 for (const auto& e : entries) {
                     if (e.PathName == "Table1") {
@@ -55,7 +55,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                         break;
                     }
                 }
-                UNIT_ASSERT_C(found, "Notification log entry for Table1 not found");
+                UNIT_ASSERT_C(found, "Scheme change record for Table1 not found");
             }
         });
     }
@@ -88,7 +88,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/T2"),
                     {NLs::Finished, NLs::IsTable});
 
-                auto entries = ReadNotificationLog(runtime);
+                auto entries = ReadSchemeChangeRecords(runtime);
 
                 // T1 was created in inactive zone — its entry must exist
                 bool foundT1 = false;
@@ -98,7 +98,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                         UNIT_ASSERT(e.SequenceId > 0);
                     }
                 }
-                UNIT_ASSERT_C(foundT1, "Notification log entry for T1 not found");
+                UNIT_ASSERT_C(foundT1, "Scheme change record for T1 not found");
 
                 // Verify monotonic sequence IDs across all entries
                 for (size_t i = 1; i < entries.size(); ++i) {
@@ -135,7 +135,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                     {NLs::Finished, NLs::IsTable,
                      NLs::CheckColumns("Table1", {"key", "value", "extra"}, {}, {"key"})});
 
-                auto entries = ReadNotificationLog(runtime);
+                auto entries = ReadSchemeChangeRecords(runtime);
 
                 // CREATE was done in inactive zone — its entry must exist
                 bool foundCreate = false;
@@ -156,7 +156,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
         });
     }
 
-    // Verify that the NextNotificationSequenceId counter is properly restored
+    // Verify that the NextSchemeChangeSequenceId counter is properly restored
     // after reboots: new operations must get strictly higher sequence IDs than
     // operations that completed before the reboot point.
     Y_UNIT_TEST_WITH_REBOOTS(SequenceIdCounterSurvivesReboot) {
@@ -188,7 +188,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogReboots) {
                 TestDescribeResult(DescribePath(runtime, "/MyRoot/T2"),
                     {NLs::Finished, NLs::IsTable});
 
-                auto entries = ReadNotificationLog(runtime);
+                auto entries = ReadSchemeChangeRecords(runtime);
 
                 // T1 was created in inactive zone — its entry must exist
                 ui64 t1SeqId = 0;

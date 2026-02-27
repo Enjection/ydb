@@ -2,15 +2,15 @@
 
 namespace NKikimr::NSchemeShard {
 
-ui64 TSchemeShard::AllocateNotificationSequenceId(NIceDb::TNiceDb& db) {
-    ui64 id = ++NextNotificationSequenceId;
-    PersistUpdateNextNotificationSequenceId(db);
+ui64 TSchemeShard::AllocateSchemeChangeSequenceId(NIceDb::TNiceDb& db) {
+    ui64 id = ++NextSchemeChangeSequenceId;
+    PersistUpdateNextSchemeChangeSequenceId(db);
     return id;
 }
 
-void TSchemeShard::PersistNotificationLogEntry(NIceDb::TNiceDb& db, const TNotificationLogEntryData& entry)
+void TSchemeShard::PersistSchemeChangeRecord(NIceDb::TNiceDb& db, const TSchemeChangeRecordData& entry)
 {
-    using T = Schema::NotificationLog;
+    using T = Schema::SchemeChangeRecords;
     db.Table<T>().Key(entry.SequenceId).Update(
         NIceDb::TUpdate<T::TxId>(ui64(entry.TxId)),
         NIceDb::TUpdate<T::OperationType>(ui32(entry.TxType)),
@@ -26,8 +26,8 @@ void TSchemeShard::PersistNotificationLogEntry(NIceDb::TNiceDb& db, const TNotif
         NIceDb::TUpdate<T::CompletedAt>(entry.CompletedAt.MicroSeconds()),
         NIceDb::TUpdate<T::PlanStep>(ui64(entry.PlanStep))
     );
-    ++NotificationLogEntryCount;
-    PersistUpdateNotificationLogEntryCount(db);
+    ++SchemeChangeRecordCount;
+    PersistUpdateSchemeChangeRecordCount(db);
 }
 
 ui64 TSchemeShard::GetTypeSpecificAlterVersion(TPathId pathId, NKikimrSchemeOp::EPathType pathType) const {
@@ -153,33 +153,33 @@ ui64 TSchemeShard::GetTypeSpecificAlterVersion(TPathId pathId, NKikimrSchemeOp::
     return 0;
 }
 
-// Test-only: handle internal read of notification log
-void TSchemeShard::Handle(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev, const TActorContext& ctx) {
-    Execute(CreateTxInternalReadNotificationLog(ev), ctx);
+// Test-only: handle internal read of scheme change records
+void TSchemeShard::Handle(TEvSchemeShard::TEvInternalReadSchemeChangeRecords::TPtr& ev, const TActorContext& ctx) {
+    Execute(CreateTxInternalReadSchemeChangeRecords(ev), ctx);
 }
 
-// Transaction that reads notification log entries and returns them
-struct TTxInternalReadNotificationLog : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-    TEvSchemeShard::TEvInternalReadNotificationLog::TPtr Request;
-    THolder<TEvSchemeShard::TEvInternalReadNotificationLogResult> Result;
+// Transaction that reads scheme change record entries and returns them
+struct TTxInternalReadSchemeChangeRecords : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
+    TEvSchemeShard::TEvInternalReadSchemeChangeRecords::TPtr Request;
+    THolder<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult> Result;
 
-    TTxInternalReadNotificationLog(TSchemeShard* self, TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev)
+    TTxInternalReadSchemeChangeRecords(TSchemeShard* self, TEvSchemeShard::TEvInternalReadSchemeChangeRecords::TPtr& ev)
         : TTransactionBase(self)
         , Request(ev)
-        , Result(MakeHolder<TEvSchemeShard::TEvInternalReadNotificationLogResult>())
+        , Result(MakeHolder<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult>())
     {}
 
     bool Execute(TTransactionContext& txc, const TActorContext&) override {
         NIceDb::TNiceDb db(txc.DB);
 
-        using NL = Schema::NotificationLog;
+        using NL = Schema::SchemeChangeRecords;
         auto rowset = db.Table<NL>().Range().Select();
         if (!rowset.IsReady()) {
             return false;
         }
 
         while (!rowset.EndOfSet()) {
-            TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry entry;
+            TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult::TEntry entry;
             entry.SequenceId = rowset.GetValue<NL::SequenceId>();
             entry.TxId = rowset.GetValue<NL::TxId>();
             entry.OperationType = rowset.GetValue<NL::OperationType>();
@@ -225,8 +225,8 @@ struct TTxInternalReadNotificationLog : public NTabletFlatExecutor::TTransaction
     }
 };
 
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxInternalReadNotificationLog(TEvSchemeShard::TEvInternalReadNotificationLog::TPtr& ev) {
-    return new TTxInternalReadNotificationLog(this, ev);
+NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxInternalReadSchemeChangeRecords(TEvSchemeShard::TEvInternalReadSchemeChangeRecords::TPtr& ev) {
+    return new TTxInternalReadSchemeChangeRecords(this, ev);
 }
 
 } // namespace NKikimr::NSchemeShard

@@ -37,8 +37,8 @@ RECURSE_FOR_TESTS(
     ut_login_large
     ut_move
     ut_move_reboots
-    ut_notification_log
-    ut_notification_log_reboots
+    ut_scheme_change_records
+    ut_scheme_change_records_reboots
     ut_olap
     ut_olap_reboots
     ut_partition_stats
@@ -107,9 +107,9 @@ SRCS(
     schemeshard__make_access_database_no_inheritable.cpp
     schemeshard__monitoring.cpp
     schemeshard__notify.cpp
-    schemeshard__notification_log.cpp
-    schemeshard__notification_log_cleanup.cpp
-    schemeshard__notification_log_fetch.cpp
+    schemeshard__scheme_change_records.cpp
+    schemeshard__scheme_change_records_cleanup.cpp
+    schemeshard__scheme_change_records_fetch.cpp
     schemeshard__op_traits.h
     schemeshard__operation.cpp
     schemeshard__operation.h

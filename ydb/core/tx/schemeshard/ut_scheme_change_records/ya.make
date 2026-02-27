@@ -2,20 +2,18 @@ UNITTEST_FOR(ydb/core/tx/schemeshard)
 
 FORK_SUBTESTS()
 
-SPLIT_FACTOR(6)
-
-IF (SANITIZER_TYPE OR WITH_VALGRIND)
-    SIZE(LARGE)
-    INCLUDE(${ARCADIA_ROOT}/ydb/tests/large.inc)
-ELSE()
-    SIZE(MEDIUM)
+IF (WITH_VALGRIND)
+    SPLIT_FACTOR(20)
 ENDIF()
+
+SIZE(MEDIUM)
 
 PEERDIR(
     library/cpp/getopt
     library/cpp/regex/pcre
     library/cpp/svnversion
-    ydb/core/testlib/default
+    ydb/core/kqp/ut/common
+    ydb/core/testlib/pg
     ydb/core/tx
     ydb/core/tx/schemeshard/ut_helpers
     yql/essentials/public/udf/service/exception_policy
@@ -24,7 +22,9 @@ PEERDIR(
 YQL_LAST_ABI_VERSION()
 
 SRCS(
-    ut_notification_log_reboots.cpp
+    ut_scheme_change_records.cpp
+    ut_scheme_change_records_protocol.cpp
+    ut_scheme_change_records_subscriber.cpp
 )
 
 END()

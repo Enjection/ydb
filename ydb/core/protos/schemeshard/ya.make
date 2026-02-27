@@ -10,7 +10,7 @@ IF (OS_WINDOWS)
 ENDIF()
 
 SRCS(
-    notification_log.proto
+    scheme_change_records.proto
     operations.proto
 )
 

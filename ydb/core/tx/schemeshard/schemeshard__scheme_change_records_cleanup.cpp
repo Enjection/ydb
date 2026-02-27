@@ -2,9 +2,9 @@
 
 namespace NKikimr::NSchemeShard {
 
-// TTxNotificationLogCleanup - periodic cleanup of old notification log entries
-struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-    TTxNotificationLogCleanup(TSchemeShard* self)
+// TTxSchemeChangeRecordsCleanup - periodic cleanup of old scheme change records
+struct TTxSchemeChangeRecordsCleanup : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
+    TTxSchemeChangeRecordsCleanup(TSchemeShard* self)
         : TTransactionBase(self)
     {}
 
@@ -12,7 +12,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         NIceDb::TNiceDb db(txc.DB);
 
         // Step 1: Read all subscriber cursors
-        auto subRowset = db.Table<Schema::NotificationLogSubscriberCursors>().Range().Select();
+        auto subRowset = db.Table<Schema::SchemeChangeSubscribers>().Range().Select();
         if (!subRowset.IsReady()) {
             return false;
         }
@@ -21,7 +21,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         bool hasSubscribers = false;
 
         while (!subRowset.EndOfSet()) {
-            ui64 cursor = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
+            ui64 cursor = subRowset.GetValue<Schema::SchemeChangeSubscribers::LastAckedSequenceId>();
             hasSubscribers = true;
             minCursor = Min(minCursor, cursor);
 
@@ -31,7 +31,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         }
 
         if (!hasSubscribers) {
-            minCursor = Self->NextNotificationSequenceId;
+            minCursor = Self->NextSchemeChangeSequenceId;
         }
 
         if (minCursor == 0 || minCursor == Max<ui64>()) {
@@ -42,13 +42,13 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
         ui64 deletedCount = 0;
         const ui64 maxDeletesPerBatch = 10000;
 
-        auto logRowset = db.Table<Schema::NotificationLog>().Range().Select();
+        auto logRowset = db.Table<Schema::SchemeChangeRecords>().Range().Select();
         if (!logRowset.IsReady()) {
             return false;
         }
 
         while (!logRowset.EndOfSet()) {
-            ui64 seqId = logRowset.GetValue<Schema::NotificationLog::SequenceId>();
+            ui64 seqId = logRowset.GetValue<Schema::SchemeChangeRecords::SequenceId>();
             if (seqId > minCursor) {
                 break;
             }
@@ -56,7 +56,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
                 break; // Batch limit
             }
 
-            db.Table<Schema::NotificationLog>().Key(seqId).Delete();
+            db.Table<Schema::SchemeChangeRecords>().Key(seqId).Delete();
             ++deletedCount;
 
             if (!logRowset.Next()) {
@@ -64,9 +64,9 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
             }
         }
 
-        if (deletedCount > 0 && Self->NotificationLogEntryCount >= deletedCount) {
-            Self->NotificationLogEntryCount -= deletedCount;
-            Self->PersistUpdateNotificationLogEntryCount(db);
+        if (deletedCount > 0 && Self->SchemeChangeRecordCount >= deletedCount) {
+            Self->SchemeChangeRecordCount -= deletedCount;
+            Self->PersistUpdateSchemeChangeRecordCount(db);
         }
 
         return true;
@@ -74,7 +74,7 @@ struct TTxNotificationLogCleanup : public NTabletFlatExecutor::TTransactionBase<
 
     void Complete(const TActorContext& ctx) override {
         // Schedule next cleanup run
-        Self->ScheduleNotificationLogCleanup(ctx);
+        Self->ScheduleSchemeChangeRecordsCleanup(ctx);
     }
 };
 
@@ -96,7 +96,7 @@ struct TTxForceAdvanceSubscriber : public NTabletFlatExecutor::TTransactionBase<
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
@@ -107,12 +107,12 @@ struct TTxForceAdvanceSubscriber : public NTabletFlatExecutor::TTransactionBase<
             return true;
         }
 
-        // Advance cursor to current tail (NextNotificationSequenceId is the last assigned ID)
-        ui64 newCursor = Self->NextNotificationSequenceId;
+        // Advance cursor to current tail (NextSchemeChangeSequenceId is the last assigned ID)
+        ui64 newCursor = Self->NextSchemeChangeSequenceId;
 
-        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(newCursor),
-            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastAckedSequenceId>(newCursor),
+            NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
@@ -127,8 +127,8 @@ struct TTxForceAdvanceSubscriber : public NTabletFlatExecutor::TTransactionBase<
 };
 
 // Factory methods and handlers
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxNotificationLogCleanup() {
-    return new TTxNotificationLogCleanup(this);
+NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxSchemeChangeRecordsCleanup() {
+    return new TTxSchemeChangeRecordsCleanup(this);
 }
 
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxForceAdvanceSubscriber(TEvSchemeShard::TEvForceAdvanceSubscriber::TPtr& ev) {
@@ -139,16 +139,16 @@ void TSchemeShard::Handle(TEvSchemeShard::TEvForceAdvanceSubscriber::TPtr& ev, c
     Execute(CreateTxForceAdvanceSubscriber(ev), ctx);
 }
 
-void TSchemeShard::Handle(TEvSchemeShard::TEvWakeupToRunNotificationLogCleanup::TPtr&, const TActorContext& ctx) {
-    HandleWakeupToRunNotificationLogCleanup(ctx);
+void TSchemeShard::Handle(TEvSchemeShard::TEvWakeupToRunSchemeChangeRecordsCleanup::TPtr&, const TActorContext& ctx) {
+    HandleWakeupToRunSchemeChangeRecordsCleanup(ctx);
 }
 
-void TSchemeShard::HandleWakeupToRunNotificationLogCleanup(const TActorContext& ctx) {
-    Execute(CreateTxNotificationLogCleanup(), ctx);
+void TSchemeShard::HandleWakeupToRunSchemeChangeRecordsCleanup(const TActorContext& ctx) {
+    Execute(CreateTxSchemeChangeRecordsCleanup(), ctx);
 }
 
-void TSchemeShard::ScheduleNotificationLogCleanup(const TActorContext& ctx) {
-    ctx.Schedule(TDuration::Hours(1), new TEvSchemeShard::TEvWakeupToRunNotificationLogCleanup());
+void TSchemeShard::ScheduleSchemeChangeRecordsCleanup(const TActorContext& ctx) {
+    ctx.Schedule(TDuration::Hours(1), new TEvSchemeShard::TEvWakeupToRunSchemeChangeRecordsCleanup());
 }
 
 } // namespace NKikimr::NSchemeShard

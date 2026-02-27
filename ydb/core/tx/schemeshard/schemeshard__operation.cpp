@@ -113,7 +113,7 @@ bool TSchemeShard::ProcessOperationParts(
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
             response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
-        } else if (!context.SS->CheckNotificationLogOverflow(errStr)) {
+        } else if (!context.SS->CheckSchemeChangeRecordsOverflow(errStr)) {
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
             response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
         } else {
@@ -730,7 +730,7 @@ struct TSchemeShard::TTxOperationPlanStep: public NTabletFlatExecutor::TTransact
                 }
 
                 // Set PlanStep on txState before HandleReply so it's available
-                // for notification log persistence (not all operations set it themselves)
+                // for scheme change records persistence (not all operations set it themselves)
                 if (auto* txState = Self->FindTx(opId)) {
                     txState->PlanStep = step;
                 }

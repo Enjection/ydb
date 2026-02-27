@@ -22,38 +22,38 @@ TEvSchemeShard::TEvRegisterSubscriberResult* RegisterSubscriber(
     return result;
 }
 
-TEvSchemeShard::TEvFetchNotificationsResult* FetchNotifications(
+TEvSchemeShard::TEvFetchSchemeChangeRecordsResult* FetchSchemeChangeRecords(
     TTestBasicRuntime& runtime, const TString& subscriberId, ui64 afterSeqId, ui32 maxCount,
     TAutoPtr<IEventHandle>& handle)
 {
     auto sender = runtime.AllocateEdgeActor();
-    auto req = MakeHolder<TEvSchemeShard::TEvFetchNotifications>();
+    auto req = MakeHolder<TEvSchemeShard::TEvFetchSchemeChangeRecords>();
     req->Record.SetSubscriberId(subscriberId);
     req->Record.SetAfterSequenceId(afterSeqId);
     req->Record.SetMaxCount(maxCount);
     ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender, req.Release());
-    auto result = runtime.GrabEdgeEvent<TEvSchemeShard::TEvFetchNotificationsResult>(handle);
+    auto result = runtime.GrabEdgeEvent<TEvSchemeShard::TEvFetchSchemeChangeRecordsResult>(handle);
     UNIT_ASSERT(result);
     return result;
 }
 
-TEvSchemeShard::TEvAckNotificationsResult* AckNotifications(
+TEvSchemeShard::TEvAckSchemeChangeRecordsResult* AckSchemeChangeRecords(
     TTestBasicRuntime& runtime, const TString& subscriberId, ui64 upToSeqId,
     TAutoPtr<IEventHandle>& handle)
 {
     auto sender = runtime.AllocateEdgeActor();
-    auto req = MakeHolder<TEvSchemeShard::TEvAckNotifications>();
+    auto req = MakeHolder<TEvSchemeShard::TEvAckSchemeChangeRecords>();
     req->Record.SetSubscriberId(subscriberId);
     req->Record.SetUpToSequenceId(upToSeqId);
     ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender, req.Release());
-    auto result = runtime.GrabEdgeEvent<TEvSchemeShard::TEvAckNotificationsResult>(handle);
+    auto result = runtime.GrabEdgeEvent<TEvSchemeShard::TEvAckSchemeChangeRecordsResult>(handle);
     UNIT_ASSERT(result);
     return result;
 }
 
 } // anonymous namespace
 
-Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
+Y_UNIT_TEST_SUITE(TSchemeChangeRecordsProtocolTests) {
     Y_UNIT_TEST(RegisterSubscriberCreatesEmptyCursor) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime);
@@ -99,7 +99,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
         TAutoPtr<IEventHandle> regHandle;
         RegisterSubscriber(runtime, "test:sub:1", regHandle);
         TAutoPtr<IEventHandle> fetchHandle;
-        auto fetch = FetchNotifications(runtime, "test:sub:1", 0, 100, fetchHandle);
+        auto fetch = FetchSchemeChangeRecords(runtime, "test:sub:1", 0, 100, fetchHandle);
         UNIT_ASSERT_VALUES_EQUAL(fetch->Record.GetStatus(), (ui32)NKikimrScheme::StatusSuccess);
         UNIT_ASSERT(fetch->Record.EntriesSize() >= 2);
     }
@@ -121,7 +121,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
         TAutoPtr<IEventHandle> regHandle;
         RegisterSubscriber(runtime, "test:sub:1", regHandle);
         TAutoPtr<IEventHandle> fetchHandle;
-        auto fetch = FetchNotifications(runtime, "test:sub:1", 0, 2, fetchHandle);
+        auto fetch = FetchSchemeChangeRecords(runtime, "test:sub:1", 0, 2, fetchHandle);
         UNIT_ASSERT_VALUES_EQUAL(fetch->Record.GetStatus(), (ui32)NKikimrScheme::StatusSuccess);
         UNIT_ASSERT_VALUES_EQUAL(fetch->Record.EntriesSize(), 2);
         UNIT_ASSERT(fetch->Record.GetHasMore());
@@ -150,17 +150,17 @@ Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
         RegisterSubscriber(runtime, "test:sub:1", regHandle);
 
         TAutoPtr<IEventHandle> fetch1Handle;
-        auto fetch1 = FetchNotifications(runtime, "test:sub:1", 0, 100, fetch1Handle);
+        auto fetch1 = FetchSchemeChangeRecords(runtime, "test:sub:1", 0, 100, fetch1Handle);
         UNIT_ASSERT(fetch1->Record.EntriesSize() >= 2);
 
         ui64 firstSeqId = fetch1->Record.GetEntries(0).GetSequenceId();
         TAutoPtr<IEventHandle> ackHandle;
-        auto ack = AckNotifications(runtime, "test:sub:1", firstSeqId, ackHandle);
+        auto ack = AckSchemeChangeRecords(runtime, "test:sub:1", firstSeqId, ackHandle);
         UNIT_ASSERT_VALUES_EQUAL(ack->Record.GetStatus(), (ui32)NKikimrScheme::StatusSuccess);
         UNIT_ASSERT_VALUES_EQUAL(ack->Record.GetNewCursor(), firstSeqId);
 
         TAutoPtr<IEventHandle> fetch2Handle;
-        auto fetch2 = FetchNotifications(runtime, "test:sub:1", firstSeqId, 100, fetch2Handle);
+        auto fetch2 = FetchSchemeChangeRecords(runtime, "test:sub:1", firstSeqId, 100, fetch2Handle);
         UNIT_ASSERT_VALUES_EQUAL(fetch2->Record.GetStatus(), (ui32)NKikimrScheme::StatusSuccess);
         UNIT_ASSERT(fetch2->Record.EntriesSize() < fetch1->Record.EntriesSize());
     }
@@ -170,7 +170,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
         TTestEnv env(runtime);
 
         TAutoPtr<IEventHandle> fetchHandle;
-        auto fetch = FetchNotifications(runtime, "nonexistent:sub", 0, 100, fetchHandle);
+        auto fetch = FetchSchemeChangeRecords(runtime, "nonexistent:sub", 0, 100, fetchHandle);
         UNIT_ASSERT_VALUES_EQUAL(fetch->Record.GetStatus(), (ui32)NKikimrScheme::StatusPathDoesNotExist);
     }
 
@@ -198,20 +198,20 @@ Y_UNIT_TEST_SUITE(TNotificationLogProtocolTests) {
         RegisterSubscriber(runtime, "sub2", reg2Handle);
 
         TAutoPtr<IEventHandle> fetch1Handle, fetch2Handle;
-        auto fetch1 = FetchNotifications(runtime, "sub1", 0, 100, fetch1Handle);
-        auto fetch2 = FetchNotifications(runtime, "sub2", 0, 100, fetch2Handle);
+        auto fetch1 = FetchSchemeChangeRecords(runtime, "sub1", 0, 100, fetch1Handle);
+        auto fetch2 = FetchSchemeChangeRecords(runtime, "sub2", 0, 100, fetch2Handle);
 
         UNIT_ASSERT_VALUES_EQUAL(fetch1->Record.EntriesSize(), fetch2->Record.EntriesSize());
 
         ui64 lastSeq = fetch1->Record.GetLastSequenceId();
         ui64 firstSeq = fetch1->Record.GetEntries(0).GetSequenceId();
         TAutoPtr<IEventHandle> ack1Handle, ack2Handle;
-        AckNotifications(runtime, "sub1", lastSeq, ack1Handle);
-        AckNotifications(runtime, "sub2", firstSeq, ack2Handle);
+        AckSchemeChangeRecords(runtime, "sub1", lastSeq, ack1Handle);
+        AckSchemeChangeRecords(runtime, "sub2", firstSeq, ack2Handle);
 
         TAutoPtr<IEventHandle> fetch1bHandle, fetch2bHandle;
-        auto fetch1b = FetchNotifications(runtime, "sub1", lastSeq, 100, fetch1bHandle);
-        auto fetch2b = FetchNotifications(runtime, "sub2", firstSeq, 100, fetch2bHandle);
+        auto fetch1b = FetchSchemeChangeRecords(runtime, "sub1", lastSeq, 100, fetch1bHandle);
+        auto fetch2b = FetchSchemeChangeRecords(runtime, "sub2", firstSeq, 100, fetch2bHandle);
         UNIT_ASSERT_VALUES_EQUAL(fetch1b->Record.EntriesSize(), 0);
         UNIT_ASSERT(fetch2b->Record.EntriesSize() > 0);
     }

@@ -14,7 +14,7 @@ message TEvRegisterSubscriberResult {
     uint64 CurrentSequenceId = 3;
 }
 
-message TNotificationLogEntry {
+message TSchemeChangeRecord {
     uint64 SequenceId = 1;
     uint64 TxId = 2;
     uint32 OperationType = 3;
@@ -31,16 +31,16 @@ message TNotificationLogEntry {
     uint64 PlanStep = 14;
 }
 
-message TEvFetchNotifications {
+message TEvFetchSchemeChangeRecords {
     string SubscriberId = 1;
     uint64 AfterSequenceId = 2;
     uint32 MaxCount = 3;
 }
 
-message TEvFetchNotificationsResult {
+message TEvFetchSchemeChangeRecordsResult {
     uint32 Status = 1;
     string Reason = 2;
-    repeated TNotificationLogEntry Entries = 3;
+    repeated TSchemeChangeRecord Entries = 3;
     uint64 LastSequenceId = 4;
     bool HasMore = 5;
     uint64 SkippedEntries = 6;
@@ -51,12 +51,12 @@ message TEvFetchNotificationsResult {
     uint64 MinInFlightPlanStep = 7;
 }
 
-message TEvAckNotifications {
+message TEvAckSchemeChangeRecords {
     string SubscriberId = 1;
     uint64 UpToSequenceId = 2;
 }
 
-message TEvAckNotificationsResult {
+message TEvAckSchemeChangeRecordsResult {
     uint32 Status = 1;
     string Reason = 2;
     uint64 NewCursor = 3;

@@ -935,8 +935,8 @@ void TSideEffects::DoDoneParts(TSchemeShard *ss, const TActorContext &ctx) {
     }
 }
 
-void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
-    // Notification log ordering contract:
+void TSideEffects::DoPersistSchemeChangeRecords(TSchemeShard* ss, NTabletFlatExecutor::TTransactionContext& txc, const TActorContext& ctx) {
+    // Scheme change records ordering contract:
     // Within a single tablet transaction, SequenceIds are assigned in (PlanStep, TxId) order.
     // This ensures deterministic ordering for operations completing in the same batch.
     // Cross-tablet-transaction ordering may still diverge — consumers should use
@@ -1005,7 +1005,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
         auto txStateIt = ss->TxInFlight.find(candidate.FirstPartOpId);
         if (txStateIt == ss->TxInFlight.end()) {
             LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                "DoPersistNotifications: no notification logged for txId=" << txId
+                "DoPersistSchemeChangeRecords: no scheme change record logged for txId=" << txId
                     << ", TxInFlight entry disappeared between passes");
             continue;
         }
@@ -1015,14 +1015,14 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
 
         TPathElement::TPtr path = ss->PathsById.at(pathId);
 
-        ui64 seqId = ss->AllocateNotificationSequenceId(db);
+        ui64 seqId = ss->AllocateSchemeChangeSequenceId(db);
 
         TString pathName = path->Name;
         NKikimrSchemeOp::EPathType objectType = path->PathType;
         TString userSid = path->Owner;
         ui64 schemaVersion = ss->GetTypeSpecificAlterVersion(pathId, path->PathType);
 
-        ss->PersistNotificationLogEntry(db, {
+        ss->PersistSchemeChangeRecord(db, {
             .SequenceId = seqId,
             .TxId = txId,
             .TxType = txState.TxType,
@@ -1037,7 +1037,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
         });
 
         LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-            "DoPersistNotifications: logged entry"
+            "DoPersistSchemeChangeRecords: logged entry"
                 << " seqId=" << seqId
                 << " txId=" << txId
                 << " path=" << pathName
@@ -1046,7 +1046,7 @@ void TSideEffects::DoPersistNotifications(TSchemeShard* ss, NTabletFlatExecutor:
 }
 
 void TSideEffects::DoDoneTransactions(TSchemeShard *ss, NTabletFlatExecutor::TTransactionContext &txc, const TActorContext &ctx) {
-    DoPersistNotifications(ss, txc, ctx);  // persist notification log entries before operations are erased
+    DoPersistSchemeChangeRecords(ss, txc, ctx);  // persist scheme change records before operations are erased
     for (auto& txId: DoneTransactions) {
 
         if (!ss->Operations.contains(txId)) {

@@ -7,7 +7,7 @@
 #include <ydb/core/base/subdomain.h>
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
-#include <ydb/core/protos/schemeshard/notification_log.pb.h>
+#include <ydb/core/protos/schemeshard/scheme_change_records.pb.h>
 #include <ydb/core/protos/tx_scheme.pb.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
@@ -110,19 +110,19 @@ namespace TEvSchemeShard {
         EvShredInfoResponse,
         EvShredManualStartupRequest,
 
-        // Notification Log events
+        // Scheme Change Records events
         EvRegisterSubscriber,
         EvRegisterSubscriberResult,
-        EvFetchNotifications,
-        EvFetchNotificationsResult,
-        EvAckNotifications,
-        EvAckNotificationsResult,
+        EvFetchSchemeChangeRecords,
+        EvFetchSchemeChangeRecordsResult,
+        EvAckSchemeChangeRecords,
+        EvAckSchemeChangeRecordsResult,
         EvForceAdvanceSubscriber,
         EvForceAdvanceSubscriberResult,
-        EvWakeupToRunNotificationLogCleanup,
+        EvWakeupToRunSchemeChangeRecordsCleanup,
         // Test-only:
-        EvInternalReadNotificationLog,
-        EvInternalReadNotificationLogResult,
+        EvInternalReadSchemeChangeRecords,
+        EvInternalReadSchemeChangeRecordsResult,
 
         EvEnd
     };
@@ -432,7 +432,7 @@ namespace TEvSchemeShard {
     struct TEvWakeupToRunShredBSC : public TEventLocal<TEvWakeupToRunShredBSC, EvWakeupToRunShredBSC> {
     };
 
-    struct TEvWakeupToRunNotificationLogCleanup : public TEventLocal<TEvWakeupToRunNotificationLogCleanup, EvWakeupToRunNotificationLogCleanup> {
+    struct TEvWakeupToRunSchemeChangeRecordsCleanup : public TEventLocal<TEvWakeupToRunSchemeChangeRecordsCleanup, EvWakeupToRunSchemeChangeRecordsCleanup> {
     };
 
     struct TEvInitTenantSchemeShard: public TEventPB<TEvInitTenantSchemeShard,
@@ -744,29 +744,29 @@ namespace TEvSchemeShard {
 
     struct TEvShredManualStartupRequest : TEventPB<TEvShredManualStartupRequest, NKikimrScheme::TEvShredManualStartupRequest, EvShredManualStartupRequest> {};
 
-    // Notification Log events (proto-backed)
+    // Scheme Change Records events (proto-backed)
     struct TEvRegisterSubscriber : public TEventPB<TEvRegisterSubscriber,
         NKikimrSchemeShard::TEvRegisterSubscriber, EvRegisterSubscriber> {};
     struct TEvRegisterSubscriberResult : public TEventPB<TEvRegisterSubscriberResult,
         NKikimrSchemeShard::TEvRegisterSubscriberResult, EvRegisterSubscriberResult> {};
-    struct TEvFetchNotifications : public TEventPB<TEvFetchNotifications,
-        NKikimrSchemeShard::TEvFetchNotifications, EvFetchNotifications> {};
-    struct TEvFetchNotificationsResult : public TEventPB<TEvFetchNotificationsResult,
-        NKikimrSchemeShard::TEvFetchNotificationsResult, EvFetchNotificationsResult> {};
-    struct TEvAckNotifications : public TEventPB<TEvAckNotifications,
-        NKikimrSchemeShard::TEvAckNotifications, EvAckNotifications> {};
-    struct TEvAckNotificationsResult : public TEventPB<TEvAckNotificationsResult,
-        NKikimrSchemeShard::TEvAckNotificationsResult, EvAckNotificationsResult> {};
+    struct TEvFetchSchemeChangeRecords : public TEventPB<TEvFetchSchemeChangeRecords,
+        NKikimrSchemeShard::TEvFetchSchemeChangeRecords, EvFetchSchemeChangeRecords> {};
+    struct TEvFetchSchemeChangeRecordsResult : public TEventPB<TEvFetchSchemeChangeRecordsResult,
+        NKikimrSchemeShard::TEvFetchSchemeChangeRecordsResult, EvFetchSchemeChangeRecordsResult> {};
+    struct TEvAckSchemeChangeRecords : public TEventPB<TEvAckSchemeChangeRecords,
+        NKikimrSchemeShard::TEvAckSchemeChangeRecords, EvAckSchemeChangeRecords> {};
+    struct TEvAckSchemeChangeRecordsResult : public TEventPB<TEvAckSchemeChangeRecordsResult,
+        NKikimrSchemeShard::TEvAckSchemeChangeRecordsResult, EvAckSchemeChangeRecordsResult> {};
     struct TEvForceAdvanceSubscriber : public TEventPB<TEvForceAdvanceSubscriber,
         NKikimrSchemeShard::TEvForceAdvanceSubscriber, EvForceAdvanceSubscriber> {};
     struct TEvForceAdvanceSubscriberResult : public TEventPB<TEvForceAdvanceSubscriberResult,
         NKikimrSchemeShard::TEvForceAdvanceSubscriberResult, EvForceAdvanceSubscriberResult> {};
 
-    // Test-only: non-proto-backed events for reading notification log in tests
-    struct TEvInternalReadNotificationLog : public TEventLocal<TEvInternalReadNotificationLog, EvInternalReadNotificationLog> {
+    // Test-only: non-proto-backed events for reading scheme change records in tests
+    struct TEvInternalReadSchemeChangeRecords : public TEventLocal<TEvInternalReadSchemeChangeRecords, EvInternalReadSchemeChangeRecords> {
     };
 
-    struct TEvInternalReadNotificationLogResult : public TEventLocal<TEvInternalReadNotificationLogResult, EvInternalReadNotificationLogResult> {
+    struct TEvInternalReadSchemeChangeRecordsResult : public TEventLocal<TEvInternalReadSchemeChangeRecordsResult, EvInternalReadSchemeChangeRecordsResult> {
         struct TEntry {
             ui64 SequenceId = 0;
             ui64 TxId = 0;

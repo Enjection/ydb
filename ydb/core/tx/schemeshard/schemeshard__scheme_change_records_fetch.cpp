@@ -21,21 +21,21 @@ struct TTxRegisterSubscriber : public NTabletFlatExecutor::TTransactionBase<TSch
         NIceDb::TNiceDb db(txc.DB);
 
         // Check if subscriber already exists
-        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
 
         if (rowset.IsValid()) {
             // Already registered - return current cursor
-            ui64 currentCursor = rowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
+            ui64 currentCursor = rowset.GetValue<Schema::SchemeChangeSubscribers::LastAckedSequenceId>();
             Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
             Result->Record.SetCurrentSequenceId(currentCursor);
         } else {
             // New subscriber - create with cursor at 0
-            db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
-                NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(0),
-                NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+            db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Update(
+                NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastAckedSequenceId>(0),
+                NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastActivityAt>(TInstant::Now().MicroSeconds())
             );
             Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
             Result->Record.SetCurrentSequenceId(0);
@@ -49,16 +49,16 @@ struct TTxRegisterSubscriber : public NTabletFlatExecutor::TTransactionBase<TSch
     }
 };
 
-// ==================== TTxFetchNotifications ====================
+// ==================== TTxFetchSchemeChangeRecords ====================
 
-struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-    TEvSchemeShard::TEvFetchNotifications::TPtr Request;
-    THolder<TEvSchemeShard::TEvFetchNotificationsResult> Result;
+struct TTxFetchSchemeChangeRecords : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
+    TEvSchemeShard::TEvFetchSchemeChangeRecords::TPtr Request;
+    THolder<TEvSchemeShard::TEvFetchSchemeChangeRecordsResult> Result;
 
-    TTxFetchNotifications(TSchemeShard* self, TEvSchemeShard::TEvFetchNotifications::TPtr& ev)
+    TTxFetchSchemeChangeRecords(TSchemeShard* self, TEvSchemeShard::TEvFetchSchemeChangeRecords::TPtr& ev)
         : TTransactionBase(self)
         , Request(ev)
-        , Result(MakeHolder<TEvSchemeShard::TEvFetchNotificationsResult>())
+        , Result(MakeHolder<TEvSchemeShard::TEvFetchSchemeChangeRecordsResult>())
     {}
 
     bool Execute(TTransactionContext& txc, const TActorContext&) override {
@@ -74,7 +74,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto subRowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
+        auto subRowset = db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Select();
         if (!subRowset.IsReady()) {
             return false;
         }
@@ -85,7 +85,7 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             return true;
         }
 
-        ui64 storedCursor = subRowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
+        ui64 storedCursor = subRowset.GetValue<Schema::SchemeChangeSubscribers::LastAckedSequenceId>();
 
         // Calculate skipped entries if afterSeqId < storedCursor
         // (subscriber's stored cursor was force-advanced past their request)
@@ -96,9 +96,9 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             effectiveAfterSeqId = storedCursor;
         }
 
-        // Read entries from NotificationLog starting after effectiveAfterSeqId
+        // Read entries from SchemeChangeRecords starting after effectiveAfterSeqId
         Y_ENSURE(effectiveAfterSeqId < Max<ui64>(), "effectiveAfterSeqId overflow");
-        auto rowset = db.Table<Schema::NotificationLog>().GreaterOrEqual(effectiveAfterSeqId + 1).Select();
+        auto rowset = db.Table<Schema::SchemeChangeRecords>().GreaterOrEqual(effectiveAfterSeqId + 1).Select();
         if (!rowset.IsReady()) {
             return false;
         }
@@ -114,20 +114,20 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
             }
 
             auto* entry = Result->Record.AddEntries();
-            ui64 seqId = rowset.GetValue<Schema::NotificationLog::SequenceId>();
+            ui64 seqId = rowset.GetValue<Schema::SchemeChangeRecords::SequenceId>();
             entry->SetSequenceId(seqId);
-            entry->SetTxId(rowset.GetValue<Schema::NotificationLog::TxId>());
-            entry->SetOperationType(rowset.GetValue<Schema::NotificationLog::OperationType>());
-            entry->SetPathOwnerId(rowset.GetValue<Schema::NotificationLog::PathOwnerId>());
-            entry->SetPathLocalId(rowset.GetValue<Schema::NotificationLog::PathLocalId>());
-            entry->SetPathName(rowset.GetValue<Schema::NotificationLog::PathName>());
-            entry->SetObjectType(rowset.GetValue<Schema::NotificationLog::ObjectType>());
-            entry->SetStatus(rowset.GetValue<Schema::NotificationLog::Status>());
-            entry->SetUserSID(rowset.GetValue<Schema::NotificationLog::UserSID>());
-            entry->SetSchemaVersion(rowset.GetValue<Schema::NotificationLog::SchemaVersion>());
-            entry->SetDescription(rowset.GetValue<Schema::NotificationLog::Description>());
-            entry->SetCompletedAt(rowset.GetValue<Schema::NotificationLog::CompletedAt>());
-            entry->SetPlanStep(rowset.GetValueOrDefault<Schema::NotificationLog::PlanStep>(0));
+            entry->SetTxId(rowset.GetValue<Schema::SchemeChangeRecords::TxId>());
+            entry->SetOperationType(rowset.GetValue<Schema::SchemeChangeRecords::OperationType>());
+            entry->SetPathOwnerId(rowset.GetValue<Schema::SchemeChangeRecords::PathOwnerId>());
+            entry->SetPathLocalId(rowset.GetValue<Schema::SchemeChangeRecords::PathLocalId>());
+            entry->SetPathName(rowset.GetValue<Schema::SchemeChangeRecords::PathName>());
+            entry->SetObjectType(rowset.GetValue<Schema::SchemeChangeRecords::ObjectType>());
+            entry->SetStatus(rowset.GetValue<Schema::SchemeChangeRecords::Status>());
+            entry->SetUserSID(rowset.GetValue<Schema::SchemeChangeRecords::UserSID>());
+            entry->SetSchemaVersion(rowset.GetValue<Schema::SchemeChangeRecords::SchemaVersion>());
+            entry->SetDescription(rowset.GetValue<Schema::SchemeChangeRecords::Description>());
+            entry->SetCompletedAt(rowset.GetValue<Schema::SchemeChangeRecords::CompletedAt>());
+            entry->SetPlanStep(rowset.GetValueOrDefault<Schema::SchemeChangeRecords::PlanStep>(0));
 
             lastSeqId = seqId;
             ++count;
@@ -138,8 +138,8 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
         }
 
         // Update LastActivityAt on every fetch
-        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
@@ -169,16 +169,16 @@ struct TTxFetchNotifications : public NTabletFlatExecutor::TTransactionBase<TSch
     }
 };
 
-// ==================== TTxAckNotifications ====================
+// ==================== TTxAckSchemeChangeRecords ====================
 
-struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
-    TEvSchemeShard::TEvAckNotifications::TPtr Request;
-    THolder<TEvSchemeShard::TEvAckNotificationsResult> Result;
+struct TTxAckSchemeChangeRecords : public NTabletFlatExecutor::TTransactionBase<TSchemeShard> {
+    TEvSchemeShard::TEvAckSchemeChangeRecords::TPtr Request;
+    THolder<TEvSchemeShard::TEvAckSchemeChangeRecordsResult> Result;
 
-    TTxAckNotifications(TSchemeShard* self, TEvSchemeShard::TEvAckNotifications::TPtr& ev)
+    TTxAckSchemeChangeRecords(TSchemeShard* self, TEvSchemeShard::TEvAckSchemeChangeRecords::TPtr& ev)
         : TTransactionBase(self)
         , Request(ev)
-        , Result(MakeHolder<TEvSchemeShard::TEvAckNotificationsResult>())
+        , Result(MakeHolder<TEvSchemeShard::TEvAckSchemeChangeRecordsResult>())
     {}
 
     bool Execute(TTransactionContext& txc, const TActorContext&) override {
@@ -189,7 +189,7 @@ struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchem
         NIceDb::TNiceDb db(txc.DB);
 
         // Verify subscriber exists
-        auto rowset = db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Select();
+        auto rowset = db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Select();
         if (!rowset.IsReady()) {
             return false;
         }
@@ -200,19 +200,19 @@ struct TTxAckNotifications : public NTabletFlatExecutor::TTransactionBase<TSchem
             return true;
         }
 
-        ui64 currentCursor = rowset.GetValue<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>();
+        ui64 currentCursor = rowset.GetValue<Schema::SchemeChangeSubscribers::LastAckedSequenceId>();
 
         // Only advance cursor forward, never backward
         ui64 newCursor = Max(currentCursor, upToSeqId);
 
-        // Clamp to the current max sequence ID (NextNotificationSequenceId is the last assigned ID)
-        if (newCursor > Self->NextNotificationSequenceId) {
-            newCursor = Self->NextNotificationSequenceId;
+        // Clamp to the current max sequence ID (NextSchemeChangeSequenceId is the last assigned ID)
+        if (newCursor > Self->NextSchemeChangeSequenceId) {
+            newCursor = Self->NextSchemeChangeSequenceId;
         }
 
-        db.Table<Schema::NotificationLogSubscriberCursors>().Key(subscriberId).Update(
-            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastAckedSequenceId>(newCursor),
-            NIceDb::TUpdate<Schema::NotificationLogSubscriberCursors::LastActivityAt>(TInstant::Now().MicroSeconds())
+        db.Table<Schema::SchemeChangeSubscribers>().Key(subscriberId).Update(
+            NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastAckedSequenceId>(newCursor),
+            NIceDb::TUpdate<Schema::SchemeChangeSubscribers::LastActivityAt>(TInstant::Now().MicroSeconds())
         );
 
         Result->Record.SetStatus(NKikimrScheme::StatusSuccess);
@@ -232,12 +232,12 @@ NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxRegisterSubscriber(TEvS
     return new TTxRegisterSubscriber(this, ev);
 }
 
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxFetchNotifications(TEvSchemeShard::TEvFetchNotifications::TPtr& ev) {
-    return new TTxFetchNotifications(this, ev);
+NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxFetchSchemeChangeRecords(TEvSchemeShard::TEvFetchSchemeChangeRecords::TPtr& ev) {
+    return new TTxFetchSchemeChangeRecords(this, ev);
 }
 
-NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxAckNotifications(TEvSchemeShard::TEvAckNotifications::TPtr& ev) {
-    return new TTxAckNotifications(this, ev);
+NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxAckSchemeChangeRecords(TEvSchemeShard::TEvAckSchemeChangeRecords::TPtr& ev) {
+    return new TTxAckSchemeChangeRecords(this, ev);
 }
 
 // ==================== Handle methods ====================
@@ -246,12 +246,12 @@ void TSchemeShard::Handle(TEvSchemeShard::TEvRegisterSubscriber::TPtr& ev, const
     Execute(CreateTxRegisterSubscriber(ev), ctx);
 }
 
-void TSchemeShard::Handle(TEvSchemeShard::TEvFetchNotifications::TPtr& ev, const TActorContext& ctx) {
-    Execute(CreateTxFetchNotifications(ev), ctx);
+void TSchemeShard::Handle(TEvSchemeShard::TEvFetchSchemeChangeRecords::TPtr& ev, const TActorContext& ctx) {
+    Execute(CreateTxFetchSchemeChangeRecords(ev), ctx);
 }
 
-void TSchemeShard::Handle(TEvSchemeShard::TEvAckNotifications::TPtr& ev, const TActorContext& ctx) {
-    Execute(CreateTxAckNotifications(ev), ctx);
+void TSchemeShard::Handle(TEvSchemeShard::TEvAckSchemeChangeRecords::TPtr& ev, const TActorContext& ctx) {
+    Execute(CreateTxAckSchemeChangeRecords(ev), ctx);
 }
 
 } // namespace NKikimr::NSchemeShard

@@ -232,7 +232,7 @@ void TSchemeShard::ActivateAfterInitialization(const TActorContext& ctx, TActiva
 
     StartStopShred();
 
-    ScheduleNotificationLogCleanup(ctx);
+    ScheduleSchemeChangeRecordsCleanup(ctx);
 
     ctx.Send(TxAllocatorClient, MakeHolder<TEvTxAllocatorClient::TEvAllocate>(InitiateCachedTxIdsCount));
 
@@ -3677,21 +3677,21 @@ void TSchemeShard::PersistUpdateNextShardIdx(NIceDb::TNiceDb& db) const {
                 NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NextLocalShardIdx)));
 }
 
-void TSchemeShard::PersistUpdateNextNotificationSequenceId(NIceDb::TNiceDb& db) const {
-    db.Table<Schema::SysParams>().Key(Schema::SysParam_NextNotificationSequenceId).Update(
-        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NextNotificationSequenceId)));
+void TSchemeShard::PersistUpdateNextSchemeChangeSequenceId(NIceDb::TNiceDb& db) const {
+    db.Table<Schema::SysParams>().Key(Schema::SysParam_NextSchemeChangeSequenceId).Update(
+        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NextSchemeChangeSequenceId)));
 }
 
-void TSchemeShard::PersistUpdateNotificationLogEntryCount(NIceDb::TNiceDb& db) const {
-    db.Table<Schema::SysParams>().Key(Schema::SysParam_NotificationLogEntryCount).Update(
-        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(NotificationLogEntryCount)));
+void TSchemeShard::PersistUpdateSchemeChangeRecordCount(NIceDb::TNiceDb& db) const {
+    db.Table<Schema::SysParams>().Key(Schema::SysParam_SchemeChangeRecordCount).Update(
+        NIceDb::TUpdate<Schema::SysParams::Value>(ToString(SchemeChangeRecordCount)));
 }
 
-bool TSchemeShard::CheckNotificationLogOverflow(TString& errStr) const {
-    if (NotificationLogEntryCount >= MaxNotificationLogEntries) {
+bool TSchemeShard::CheckSchemeChangeRecordsOverflow(TString& errStr) const {
+    if (SchemeChangeRecordCount >= MaxSchemeChangeRecords) {
         errStr = TStringBuilder()
-            << "notification log is full: " << NotificationLogEntryCount
-            << " entries (limit: " << MaxNotificationLogEntries << ")."
+            << "scheme change records is full: " << SchemeChangeRecordCount
+            << " entries (limit: " << MaxSchemeChangeRecords << ")."
             << " Subscribers may not be draining.";
         return false;
     }
@@ -5533,7 +5533,7 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
         HFuncTraced(TEvPrivate::TEvCleanDroppedSubDomains, Handle);
         HFuncTraced(TEvPrivate::TEvSubscribeToShardDeletion, Handle);
 
-        // Test-only notification
+        // Test-only scheme change records read
         IgnoreFunc(TEvPrivate::TEvTestNotifySubdomainCleanup);
 
         HFuncTraced(TEvPrivate::TEvPersistTableStats, Handle);
@@ -5563,12 +5563,12 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
         HFuncTraced(TEvSchemeShard::TEvShredManualStartupRequest, Handle);
         HFuncTraced(TEvBlobStorage::TEvControllerShredResponse, Handle);
         HFuncTraced(TEvSchemeShard::TEvWakeupToRunShredBSC, Handle);
-        HFuncTraced(TEvSchemeShard::TEvInternalReadNotificationLog, Handle);
+        HFuncTraced(TEvSchemeShard::TEvInternalReadSchemeChangeRecords, Handle);
         HFuncTraced(TEvSchemeShard::TEvRegisterSubscriber, Handle);
-        HFuncTraced(TEvSchemeShard::TEvFetchNotifications, Handle);
-        HFuncTraced(TEvSchemeShard::TEvAckNotifications, Handle);
+        HFuncTraced(TEvSchemeShard::TEvFetchSchemeChangeRecords, Handle);
+        HFuncTraced(TEvSchemeShard::TEvAckSchemeChangeRecords, Handle);
         HFuncTraced(TEvSchemeShard::TEvForceAdvanceSubscriber, Handle);
-        HFuncTraced(TEvSchemeShard::TEvWakeupToRunNotificationLogCleanup, Handle);
+        HFuncTraced(TEvSchemeShard::TEvWakeupToRunSchemeChangeRecordsCleanup, Handle);
 
         HFuncTraced(TEvPersQueue::TEvOffloadStatus, Handle);
         HFuncTraced(TEvPrivate::TEvContinuousBackupCleanerResult, Handle);
@@ -7988,7 +7988,7 @@ void TSchemeShard::ApplyConsoleConfigs(const NKikimrConfig::TAppConfig& appConfi
         MaxCdcInitialScanShardsInFlight = schemeShardConfig.GetMaxCdcInitialScanShardsInFlight();
         MaxRestoreBuildIndexShardsInFlight = schemeShardConfig.GetMaxRestoreBuildIndexShardsInFlight();
         ConfigureCondErase(schemeShardConfig, ctx);
-        MaxNotificationLogEntries = schemeShardConfig.GetMaxNotificationLogEntries();
+        MaxSchemeChangeRecords = schemeShardConfig.GetMaxSchemeChangeRecords();
     }
 
     if (appConfig.HasTableProfilesConfig()) {

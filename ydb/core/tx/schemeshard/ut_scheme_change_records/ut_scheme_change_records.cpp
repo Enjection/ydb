@@ -10,42 +10,42 @@ using namespace NSchemeShardUT_Private;
 
 namespace {
 
-TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> ReadNotificationLog(
+TVector<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult::TEntry> ReadSchemeChangeRecords(
     TTestBasicRuntime& runtime)
 {
     auto sender = runtime.AllocateEdgeActor();
     ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender,
-        new TEvSchemeShard::TEvInternalReadNotificationLog());
+        new TEvSchemeShard::TEvInternalReadSchemeChangeRecords());
     TAutoPtr<IEventHandle> handle;
-    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadNotificationLogResult>(handle);
+    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult>(handle);
     UNIT_ASSERT(event);
     return event->Entries;
 }
 
-struct TNotificationLogReadResult {
-    TVector<TEvSchemeShard::TEvInternalReadNotificationLogResult::TEntry> Entries;
+struct TSchemeChangeRecordsReadResult {
+    TVector<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult::TEntry> Entries;
     ui64 MinInFlightPlanStep = 0;
 };
 
-TNotificationLogReadResult ReadNotificationLogFull(TTestBasicRuntime& runtime) {
+TSchemeChangeRecordsReadResult ReadSchemeChangeRecordsFull(TTestBasicRuntime& runtime) {
     auto sender = runtime.AllocateEdgeActor();
     ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender,
-        new TEvSchemeShard::TEvInternalReadNotificationLog());
+        new TEvSchemeShard::TEvInternalReadSchemeChangeRecords());
     TAutoPtr<IEventHandle> handle;
-    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadNotificationLogResult>(handle);
+    auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvInternalReadSchemeChangeRecordsResult>(handle);
     UNIT_ASSERT(event);
     return {event->Entries, event->MinInFlightPlanStep};
 }
 
 } // anonymous namespace
 
-Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
-    Y_UNIT_TEST(NotificationLogTableExists) {
+Y_UNIT_TEST_SUITE(TSchemeChangeRecordsSchemaTests) {
+    Y_UNIT_TEST(SchemeChangeRecordsTableExists) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime);
         // If the table didn't exist, the internal read transaction would fail/crash.
         // The key assertion is: no crash, table is accessible.
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         Y_UNUSED(entries);
     }
 
@@ -62,7 +62,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         bool found = false;
         for (const auto& e : entries) {
             if (e.OperationType == (ui32)TTxState::TxCreateTable && e.PathName == "Table1") {
@@ -96,7 +96,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         ui32 alterCount = 0;
         for (const auto& e : entries) {
             if (e.OperationType == (ui32)TTxState::TxAlterTable && e.PathName == "Table1") {
@@ -122,7 +122,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         TestDropTable(runtime, ++txId, "/MyRoot", "Table1");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         bool found = false;
         for (const auto& e : entries) {
             if (e.OperationType == (ui32)TTxState::TxDropTable && e.PathName == "Table1") {
@@ -152,7 +152,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         UNIT_ASSERT(entries.size() >= 2);
 
         for (size_t i = 1; i < entries.size(); ++i) {
@@ -173,7 +173,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         ui64 txId = 100;
 
         // Set a very low limit so we can hit it quickly
-        schemeshard->MaxNotificationLogEntries = 2;
+        schemeshard->MaxSchemeChangeRecords = 2;
 
         // First table: should succeed and produce log entry #1
         TestCreateTable(runtime, ++txId, "/MyRoot", R"(
@@ -192,7 +192,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         env.TestWaitNotification(runtime, txId);
 
         // Verify we have at least 2 entries
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         UNIT_ASSERT_C(entries.size() >= 2, "Expected at least 2 notification log entries");
 
         // Third table: should be rejected with StatusResourceExhausted
@@ -217,7 +217,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         // Set a low limit via config dispatcher
         {
             auto request = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationRequest>();
-            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxNotificationLogEntries(2);
+            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxSchemeChangeRecords(2);
             SetConfig(runtime, TTestTxConfig::SchemeShard, std::move(request));
         }
 
@@ -246,7 +246,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         // Raise limit via config dispatcher
         {
             auto request = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationRequest>();
-            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxNotificationLogEntries(10);
+            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxSchemeChangeRecords(10);
             SetConfig(runtime, TTestTxConfig::SchemeShard, std::move(request));
         }
 
@@ -282,7 +282,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         // Lower the limit below the current entry count via config dispatcher
         {
             auto request = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationRequest>();
-            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxNotificationLogEntries(1);
+            request->Record.MutableConfig()->MutableSchemeShardConfig()->SetMaxSchemeChangeRecords(1);
             SetConfig(runtime, TTestTxConfig::SchemeShard, std::move(request));
         }
 
@@ -307,7 +307,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         UNIT_ASSERT(!entries.empty());
 
         bool found = false;
@@ -342,7 +342,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         // Both CREATE and ALTER should have valid PlanSteps
         for (const auto& e : entries) {
             if (e.PathName == "Table1") {
@@ -371,7 +371,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         UNIT_ASSERT(entries.size() >= 2);
 
         // PlanSteps should be monotonically non-decreasing
@@ -385,7 +385,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         }
 
         // Stronger assertion: (PlanStep, TxId) ordering must match SequenceId ordering
-        // This verifies that DoPersistNotifications sorts by (PlanStep, TxId) before
+        // This verifies that DoPersistSchemeChangeRecords sorts by (PlanStep, TxId) before
         // assigning SequenceIds within a single tablet transaction
         for (size_t i = 1; i < entries.size(); ++i) {
             const auto& prev = entries[i-1];
@@ -410,7 +410,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         TestMkDir(runtime, ++txId, "/MyRoot", "DirA");
         env.TestWaitNotification(runtime, txId);
 
-        auto entries = ReadNotificationLog(runtime);
+        auto entries = ReadSchemeChangeRecords(runtime);
         bool found = false;
         for (const auto& e : entries) {
             if (e.PathName == "DirA") {
@@ -433,7 +433,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         )");
         env.TestWaitNotification(runtime, txId);
 
-        auto result = ReadNotificationLogFull(runtime);
+        auto result = ReadSchemeChangeRecordsFull(runtime);
         UNIT_ASSERT(!result.Entries.empty());
         UNIT_ASSERT_VALUES_EQUAL(result.MinInFlightPlanStep, 0u);
     }
@@ -487,7 +487,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         env.TestWaitNotification(runtime, txId);
 
         // Read notification log — Table2 should be present, Table1 still in-flight
-        auto result = ReadNotificationLogFull(runtime);
+        auto result = ReadSchemeChangeRecordsFull(runtime);
 
         // Watermark should reflect Table1's PlanStep (it's still in-flight)
         UNIT_ASSERT_C(result.MinInFlightPlanStep > 0,
@@ -502,7 +502,7 @@ Y_UNIT_TEST_SUITE(TNotificationLogSchemaTests) {
         env.TestWaitNotification(runtime, firstTxId);
 
         // After Table1 completes, watermark should be 0
-        auto result2 = ReadNotificationLogFull(runtime);
+        auto result2 = ReadSchemeChangeRecordsFull(runtime);
         UNIT_ASSERT_VALUES_EQUAL_C(result2.MinInFlightPlanStep, 0u,
             "MinInFlightPlanStep should be 0 after all ops complete, got: "
                 << result2.MinInFlightPlanStep);
