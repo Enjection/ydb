@@ -259,4 +259,79 @@ Y_UNIT_TEST_SUITE(TSequenceReboots) {
         });
     }
 
+    // Issue #33764: MOST AGGRESSIVE TEST - ConsistentCopy + Drop BOTH in active zone
+    //
+    // This is the critical test for reproducing the full crash chain:
+    // 1. Reboot during TxCopySequence → source seq DbRefCount not restored (off by 1)
+    // 2. Copy completes → RemoveTx decrements source seq DbRefCount (now 0 instead of 1)
+    // 3. Drop starts → source seq marked as Dropped
+    // 4. Drop creates TxDropSequence → IncrementPathDbRefCount(source seq) → 0→1
+    // 5. If reboot happens between step 3 and 4, source seq is Dropped+DbRefCount=0
+    //    → CleanDroppedPaths can remove it → downstream Y_VERIFY_S/Y_ABORT_UNLESS crashes
+    //
+    // By placing BOTH copy and drop in the active zone, TTestWithReboots can hit
+    // reboot points during EITHER operation, maximizing coverage of dangerous states.
+    // Using 8 reboot buckets due to the large number of events across both operations.
+    Y_UNIT_TEST_WITH_REBOOTS_BUCKETS(ConsistentCopyThenDropTableWithSequenceAndReboots, 8, 1, false) {
+        t.Run([&](TTestActorRuntime& runtime, bool& activeZone) {
+            runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_TRACE);
+            runtime.SetLogPriority(NKikimrServices::SEQUENCESHARD, NActors::NLog::PRI_TRACE);
+
+            {
+                TInactiveZone inactive(activeZone);
+                TestCreateIndexedTable(runtime, ++t.TxId, "/MyRoot", R"(
+                    TableDescription {
+                        Name: "Table"
+                        Columns { Name: "key" Type: "Uint64" DefaultFromSequence: "myseq" }
+                        Columns { Name: "value" Type: "Utf8" }
+                        KeyColumnNames: ["key"]
+                    }
+                    IndexDescription {
+                        Name: "ValueIndex"
+                        KeyColumnNames: ["value"]
+                    }
+                    SequenceDescription {
+                        Name: "myseq"
+                    }
+                )");
+                t.TestEnv->TestWaitNotification(runtime, t.TxId);
+            }
+
+            // Active zone: BOTH ConsistentCopyTables AND DropTable
+            // Reboots can hit at any point during either operation.
+
+            // Step 1: ConsistentCopyTables - creates CopyTable + CopySequence sub-ops
+            // A reboot here during TxCopySequence leaves source seq DbRefCount off by 1
+            t.TestEnv->ReliablePropose(runtime,
+                ConsistentCopyTablesRequest(++t.TxId, "/", R"(
+                    CopyTableDescriptions {
+                        SrcPath: "/MyRoot/Table"
+                        DstPath: "/MyRoot/TableCopy"
+                    }
+                )"),
+                {NKikimrScheme::StatusAccepted, NKikimrScheme::StatusMultipleModifications});
+            t.TestEnv->TestWaitNotification(runtime, t.TxId);
+
+            // Step 2: Drop source table - marks source seq as Dropped
+            // If DbRefCount is wrong from step 1 + reboot, this can trigger
+            // premature CleanDroppedPaths removal → Y_VERIFY_S crash
+            t.TestEnv->ReliablePropose(runtime,
+                DropTableRequest(++t.TxId, "/MyRoot", "Table"),
+                {NKikimrScheme::StatusAccepted, NKikimrScheme::StatusMultipleModifications,
+                 NKikimrScheme::StatusPathDoesNotExist});
+            t.TestEnv->TestWaitNotification(runtime, t.TxId);
+
+            {
+                TInactiveZone inactive(activeZone);
+                TestDescribeResult(DescribePath(runtime, "/MyRoot/TableCopy"),
+                                   {NLs::PathExist});
+                TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/TableCopy/ValueIndex"),
+                                   {NLs::PathExist});
+                TestLs(runtime, "/MyRoot/TableCopy/myseq",
+                    TDescribeOptionsBuilder().SetShowPrivateTable(true), NLs::PathExist);
+                TestLs(runtime, "/MyRoot/Table", false, NLs::PathNotExist);
+            }
+        });
+    }
+
 } // Y_UNIT_TEST_SUITE(TSequenceReboots)
