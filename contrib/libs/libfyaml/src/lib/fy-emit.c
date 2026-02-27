@@ -14,11 +14,6 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <limits.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <unistd.h>
-#elif defined (_MSC_VER)
-#define STDOUT_FILENO _fileno(stdin)
-#endif
 #include <ctype.h>
 #include <errno.h>
 
@@ -27,10 +22,31 @@
 #include "fy-parse.h"
 #include "fy-emit.h"
 
+static void fy_emitter_fill_default_colors(struct fy_emitter *fye);
+static FILE *fy_emitter_get_output_fp(struct fy_emitter *fye);
+static int fy_emitter_get_output_fd(struct fy_emitter *fye);
+static int fy_emitter_null_output(struct fy_emitter *fye, enum fy_emitter_write_type type, const char *str, int len, void *userdata);
+
+void fy_emit_save_ctx_cleanup(struct fy_emitter *emit, struct fy_emit_save_ctx *sc);
+
+static inline struct fy_token_list *token_recycle_list(struct fy_emitter *emit, struct fy_parser *fyp)
+{
+	if (fyp && fyp->recycled_token_list)
+		return fyp->recycled_token_list;
+	if (emit && emit->recycled_token_list)
+		return emit->recycled_token_list;
+	return NULL;
+}
+
+static inline void fy_emit_token_unref(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_token *fyt)
+{
+	fy_token_unref_rl(token_recycle_list(emit, fyp), fyt);
+}
+
 /* fwd decl */
-void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, int len);
+void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len);
 void fy_emit_printf(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *fmt, ...)
-		FY_ATTRIBUTE(format(printf, 3, 4));
+		__attribute__((format(printf, 3, 4)));
 
 static inline bool fy_emit_is_json_mode(const struct fy_emitter *emit)
 {
@@ -39,48 +55,73 @@ static inline bool fy_emit_is_json_mode(const struct fy_emitter *emit)
 	if (emit->force_json)
 		return true;
 
-	flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
-	return flags == FYECF_MODE_JSON || flags == FYECF_MODE_JSON_TP || flags == FYECF_MODE_JSON_ONELINE;
+	flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	return flags == FYECF_MODE_JSON || flags == FYECF_MODE_JSON_TP ||
+	       flags == FYECF_MODE_JSON_ONELINE || flags == FYECF_MODE_JSON_COMPACT;
 }
 
 static inline bool fy_emit_is_flow_mode(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
-	return flags == FYECF_MODE_FLOW || flags == FYECF_MODE_FLOW_ONELINE;
+	return flags == FYECF_MODE_FLOW || flags == FYECF_MODE_FLOW_ONELINE ||
+	       flags == FYECF_MODE_FLOW_COMPACT || fy_emit_is_json_mode(emit);
 }
 
 static inline bool fy_emit_is_block_mode(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_BLOCK || flags == FYECF_MODE_DEJSON || flags == FYECF_MODE_PRETTY;
 }
 
 static inline bool fy_emit_is_oneline(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_FLOW_ONELINE || flags == FYECF_MODE_JSON_ONELINE;
 }
 
+static inline bool fy_emit_is_compact(const struct fy_emitter *emit)
+{
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+
+	return flags == FYECF_MODE_FLOW_COMPACT || flags == FYECF_MODE_JSON_COMPACT;
+}
+
+static inline bool fy_emit_is_oneline_or_compact(const struct fy_emitter *emit)
+{
+	return fy_emit_is_oneline(emit) || fy_emit_is_compact(emit);
+}
+
+static inline bool fy_emit_sc_oneline(const struct fy_emitter *emit,
+				      const struct fy_emit_save_ctx *sc)
+{
+	return fy_emit_is_oneline_or_compact(emit) || sc->oneline_flow;
+}
+
+static inline bool fy_emit_preserve_flow_layout(const struct fy_emitter *emit)
+{
+	return !!(emit->xcfg.xflags & FYEXCF_PRESERVE_FLOW_LAYOUT);
+}
+
 static inline bool fy_emit_is_dejson_mode(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_DEJSON;
 }
 
 static inline bool fy_emit_is_pretty_mode(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_PRETTY;
 }
 
 static inline bool fy_emit_is_manual(const struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 
 	return flags == FYECF_MODE_MANUAL;
 }
@@ -89,7 +130,7 @@ static inline int fy_emit_indent(struct fy_emitter *emit)
 {
 	int indent;
 
-	indent = (emit->cfg.flags & FYECF_INDENT(FYECF_INDENT_MASK)) >> FYECF_INDENT_SHIFT;
+	indent = (emit->xcfg.cfg.flags & FYECF_INDENT(FYECF_INDENT_MASK)) >> FYECF_INDENT_SHIFT;
 	return indent ? indent : 2;
 }
 
@@ -97,7 +138,10 @@ static inline int fy_emit_width(struct fy_emitter *emit)
 {
 	int width;
 
-	width = (emit->cfg.flags & FYECF_WIDTH(FYECF_WIDTH_MASK)) >> FYECF_WIDTH_SHIFT;
+	if (fy_emit_is_oneline(emit))
+		return INT_MAX;
+
+	width = (emit->xcfg.cfg.flags & FYECF_WIDTH(FYECF_WIDTH_MASK)) >> FYECF_WIDTH_SHIFT;
 	if (width == 0)
 		return 80;
 	if (width == FYECF_WIDTH_MASK)
@@ -107,7 +151,9 @@ static inline int fy_emit_width(struct fy_emitter *emit)
 
 static inline bool fy_emit_output_comments(struct fy_emitter *emit)
 {
-	return !!(emit->cfg.flags & FYECF_OUTPUT_COMMENTS);
+	return !!(emit->xcfg.cfg.flags & FYECF_OUTPUT_COMMENTS) &&
+		!fy_emit_is_oneline_or_compact(emit) &&
+		!fy_emit_is_json_mode(emit);
 }
 
 static int fy_emit_node_check_json(struct fy_emitter *emit, struct fy_node *fyn)
@@ -178,17 +224,53 @@ void fy_emit_scalar(struct fy_emitter *emit, struct fy_node *fyn, int flags, int
 void fy_emit_sequence(struct fy_emitter *emit, struct fy_node *fyn, int flags, int indent);
 void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, int indent);
 
-void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, int len)
+void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len);
+void fy_emit_puts(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str);
+void fy_emit_putc(struct fy_emitter *emit, enum fy_emitter_write_type type, int c);
+
+/* simple write, just ascii, advance column */
+void fy_emit_write_simple(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len)
 {
-	int c, w;
-	const char *m, *e;
 	int outlen;
 
 	if (!len)
 		return;
 
-	outlen = emit->cfg.output(emit, type, str, len, emit->cfg.userdata);
-	if (outlen != len)
+	outlen = emit->xcfg.cfg.output(emit, type, str, (int)len, emit->xcfg.cfg.userdata);
+	if (outlen != (int)len)
+		emit->output_error = true;
+
+	emit->column += (int)len;
+}
+
+/* simple puts as above */
+void fy_emit_puts_simple(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str)
+{
+	fy_emit_write_simple(emit, type, str, strlen(str));
+}
+
+void fy_emit_putc_simple(struct fy_emitter *emit, enum fy_emitter_write_type type, int c)
+{
+	char cc = (char)c;
+
+	fy_emit_write_simple(emit, type, &cc, 1);
+	if (cc == '\n') {
+		emit->column = 0;
+		emit->line++;
+	}
+}
+
+void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len)
+{
+	int c, w;
+	const char *m, *e;
+	int outlen;
+
+	if (!len || len > INT_MAX)
+		return;
+
+	outlen = emit->xcfg.cfg.output(emit, type, str, (int)len, emit->xcfg.cfg.userdata);
+	if (outlen != (int)len)
 		emit->output_error = true;
 
 	e = str + len;
@@ -247,7 +329,7 @@ void fy_emit_vprintf(struct fy_emitter *emit, enum fy_emitter_write_type type, c
 	if (size < 0)
 		return;
 
-	str = FY_ALLOCA(size + 1);
+	str = alloca(size + 1);
 	size = vsnprintf(str, size + 1, fmt, ap2);
 	if (size < 0)
 		return;
@@ -266,7 +348,7 @@ void fy_emit_printf(struct fy_emitter *emit, enum fy_emitter_write_type type, co
 
 void fy_emit_write_ws(struct fy_emitter *emit)
 {
-	fy_emit_putc(emit, fyewt_whitespace, ' ');
+	fy_emit_putc_simple(emit, fyewt_whitespace, ' ');
 	emit->flags |= FYEF_WHITESPACE;
 }
 
@@ -279,14 +361,14 @@ void fy_emit_write_indent(struct fy_emitter *emit, int indent)
 
 	if (!fy_emit_indentation(emit) || emit->column > indent ||
 	    (emit->column == indent && !fy_emit_whitespace(emit)))
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 
 	if (emit->column < indent) {
 		len = indent - emit->column;
-		ws = FY_ALLOCA(len + 1);
+		ws = alloca(len + 1);
 		memset(ws, ' ', len);
 		ws[len] = '\0';
-		fy_emit_write(emit, fyewt_indent, ws, len);
+		fy_emit_write_simple(emit, fyewt_indent, ws, len);
 	}
 
 	emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
@@ -316,30 +398,32 @@ void fy_emit_write_indicator(struct fy_emitter *emit,
 		int flags, int indent,
 		enum fy_emitter_write_type wtype)
 {
+	/* extended indicators mode? */
+	if (wtype == fyewt_indicator &&
+	    (emit->xcfg.xflags & FYEXCF_EXTENDED_INDICATORS)) {
+		wtype = FYEWT_EXTENDED_INDICATORS_FIRST + (unsigned int)indicator;
+		assert(wtype >= FYEWT_EXTENDED_INDICATORS_FIRST &&
+				wtype <= FYEWT_EXTENDED_INDICATORS_LAST);
+	}
+
 	switch (indicator) {
 
 	case di_question_mark:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, '?');
+		fy_emit_putc_simple(emit, wtype, '?');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_OPEN_ENDED);
 		break;
 
 	case di_colon:
-		if (!(flags & DDNF_SIMPLE)) {
-			if (!emit->flow_level && !fy_emit_is_oneline(emit))
-				fy_emit_write_indent(emit, indent);
-			if (!fy_emit_whitespace(emit))
-				fy_emit_write_ws(emit);
-		}
-		fy_emit_putc(emit, wtype, ':');
+		fy_emit_putc_simple(emit, wtype, ':');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_OPEN_ENDED);
 		break;
 
 	case di_dash:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, '-');
+		fy_emit_putc_simple(emit, wtype, '-');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_OPEN_ENDED);
 		break;
 
@@ -348,7 +432,7 @@ void fy_emit_write_indicator(struct fy_emitter *emit,
 		emit->flow_level++;
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, indicator == di_left_bracket ? '[' : '{');
+		fy_emit_putc_simple(emit, wtype, indicator == di_left_bracket ? '[' : '{');
 		emit->flags |= FYEF_WHITESPACE;
 		emit->flags &= ~(FYEF_INDENTATION | FYEF_OPEN_ENDED);
 		break;
@@ -356,12 +440,12 @@ void fy_emit_write_indicator(struct fy_emitter *emit,
 	case di_right_bracket:
 	case di_right_brace:
 		emit->flow_level--;
-		fy_emit_putc(emit, wtype, indicator == di_right_bracket ? ']' : '}');
+		fy_emit_putc_simple(emit, wtype, indicator == di_right_bracket ? ']' : '}');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION | FYEF_OPEN_ENDED);
 		break;
 
 	case di_comma:
-		fy_emit_putc(emit, wtype, ',');
+		fy_emit_putc_simple(emit, wtype, ',');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION | FYEF_OPEN_ENDED);
 		break;
 
@@ -369,7 +453,7 @@ void fy_emit_write_indicator(struct fy_emitter *emit,
 	case di_greater:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, indicator == di_bar ? '|' : '>');
+		fy_emit_putc_simple(emit, wtype, indicator == di_bar ? '|' : '>');
 		emit->flags &= ~(FYEF_INDENTATION | FYEF_WHITESPACE | FYEF_OPEN_ENDED);
 		break;
 
@@ -377,27 +461,27 @@ void fy_emit_write_indicator(struct fy_emitter *emit,
 	case di_double_quote_start:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, indicator == di_single_quote_start ? '\'' : '"');
+		fy_emit_putc_simple(emit, wtype, indicator == di_single_quote_start ? '\'' : '"');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION | FYEF_OPEN_ENDED);
 		break;
 
 	case di_single_quote_end:
 	case di_double_quote_end:
-		fy_emit_putc(emit, wtype, indicator == di_single_quote_end ? '\'' : '"');
+		fy_emit_putc_simple(emit, wtype, indicator == di_single_quote_end ? '\'' : '"');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION | FYEF_OPEN_ENDED);
 		break;
 
 	case di_ambersand:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, '&');
+		fy_emit_putc_simple(emit, wtype, '&');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION);
 		break;
 
 	case di_star:
 		if (!fy_emit_whitespace(emit))
 			fy_emit_write_ws(emit);
-		fy_emit_putc(emit, wtype, '*');
+		fy_emit_putc_simple(emit, wtype, '*');
 		emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION);
 		break;
 	}
@@ -485,14 +569,10 @@ void fy_emit_document_start_indicator(struct fy_emitter *emit)
 
 	/* output linebreak anyway */
 	if (emit->column)
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-
-	/* stripping doc indicators, do not emit */
-	if (emit->cfg.flags & FYECF_STRIP_DOC)
-		goto no_doc_emit;
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 
 	/* ok, emit document start indicator */
-	fy_emit_puts(emit, fyewt_document_indicator, "---");
+	fy_emit_puts_simple(emit, fyewt_document_indicator, "---");
 	emit->flags &= ~FYEF_WHITESPACE;
 	emit->flags |= FYEF_HAD_DOCUMENT_START;
 	return;
@@ -528,6 +608,8 @@ struct fy_token *fy_node_value_token(struct fy_node *fyn)
 
 bool fy_emit_token_has_comment(struct fy_emitter *emit, struct fy_token *fyt, enum fy_comment_placement placement)
 {
+	if (!fy_emit_output_comments(emit))
+		return false;
 	return fy_emit_token_comment_handle(emit, fyt, placement) ? true : false;
 }
 
@@ -542,7 +624,7 @@ void fy_emit_token_comment(struct fy_emitter *emit, struct fy_token *fyt, int fl
 	struct fy_atom *handle;
 	char *text;
 	const char *t;
-	int len;
+	size_t len;
 
 	handle = fy_emit_token_comment_handle(emit, fyt, placement);
 	if (!handle)
@@ -552,7 +634,7 @@ void fy_emit_token_comment(struct fy_emitter *emit, struct fy_token *fyt, int fl
 	if (len < 0)
 		return;
 
-	text = FY_ALLOCA(len + 1);
+	text = alloca(len + 1);
 
 	if (placement == fycp_top || placement == fycp_bottom) {
 		fy_emit_write_indent(emit, indent);
@@ -571,22 +653,8 @@ void fy_emit_token_comment(struct fy_emitter *emit, struct fy_token *fyt, int fl
 	}
 }
 
-void fy_emit_node_comment(struct fy_emitter *emit, struct fy_node *fyn, int flags, int indent,
-			  enum fy_comment_placement placement)
-{
-	struct fy_token *fyt;
-
-	if (!fy_emit_output_comments(emit) || (unsigned int)placement >= fycp_max)
-		return;
-
-	fyt = fy_node_value_token(fyn);
-	if (!fyt)
-		return;
-
-	fy_emit_token_comment(emit, fyt, flags, indent, placement);
-}
-
 void fy_emit_common_node_preamble(struct fy_emitter *emit,
+		struct fy_token *fyt_value,
 		struct fy_token *fyt_anchor,
 		struct fy_token *fyt_tag,
 		int flags, int indent)
@@ -598,16 +666,26 @@ void fy_emit_common_node_preamble(struct fy_emitter *emit,
 	size_t td_prefix_size, td_handle_size;
 	size_t tag_len = 0, anchor_len = 0;
 	bool json_mode = false;
+	struct fy_emit_save_ctx *sc = &emit->s_sc;
+
+	(void)sc;
+
+	/* content for root always starts on a new line */
+	if (!fy_emit_is_oneline(emit) && (flags & DDNF_ROOT) && emit->column != 0 &&
+            !(emit->flags & FYEF_HAD_DOCUMENT_START)) {
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
+	}
 
 	json_mode = fy_emit_is_json_mode(emit);
 
 	if (!json_mode) {
-		if (!(emit->cfg.flags & FYECF_STRIP_LABELS)) {
+		if (!(emit->xcfg.cfg.flags & FYECF_STRIP_LABELS)) {
 			if (fyt_anchor)
 				anchor = fy_token_get_text(fyt_anchor, &anchor_len);
 		}
 
-		if (!(emit->cfg.flags & FYECF_STRIP_TAGS)) {
+		if (!(emit->xcfg.cfg.flags & FYECF_STRIP_TAGS)) {
 			if (fyt_tag)
 				tag = fy_token_get_text(fyt_tag, &tag_len);
 		}
@@ -636,13 +714,6 @@ void fy_emit_common_node_preamble(struct fy_emitter *emit,
 			emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION);
 		}
 	}
-
-	/* content for root always starts on a new line */
-	if ((flags & DDNF_ROOT) && emit->column != 0 &&
-            !(emit->flags & FYEF_HAD_DOCUMENT_START)) {
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
-	}
 }
 
 void fy_emit_node_internal(struct fy_emitter *emit, struct fy_node *fyn, int flags, int indent, bool is_key)
@@ -650,20 +721,28 @@ void fy_emit_node_internal(struct fy_emitter *emit, struct fy_node *fyn, int fla
 	enum fy_node_type type;
 	struct fy_anchor *fya;
 	struct fy_token *fyt_anchor = NULL;
+	struct fy_token *fyt_value = NULL;
 
-	if (!(emit->cfg.flags & FYECF_STRIP_LABELS)) {
+	if (!(emit->xcfg.cfg.flags & FYECF_STRIP_LABELS)) {
 		fya = fy_document_lookup_anchor_by_node(emit->fyd, fyn);
 		if (fya)
 			fyt_anchor = fya->anchor;
 	}
 
-	fy_emit_common_node_preamble(emit, fyt_anchor, fyn->tag, flags, indent);
-
 	type = fyn ? fyn->type : FYNT_SCALAR;
 
+	if (type == FYNT_SCALAR)
+		fyt_value = fyn ? fyn->scalar : NULL;
+	else if (type == FYNT_SEQUENCE)
+		fyt_value = fyn->sequence_start;
+	else if (type == FYNT_MAPPING)
+		fyt_value = fyn->mapping_start;
+
+	fy_emit_common_node_preamble(emit, fyt_value, fyt_anchor, fyn->tag, flags, indent);
+
 	if (type != FYNT_SCALAR && (flags & DDNF_ROOT) && emit->column != 0) {
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 	}
 
 	switch (type) {
@@ -711,8 +790,17 @@ void fy_emit_token_write_plain(struct fy_emitter *emit, struct fy_token *fyt, in
 	atom = fy_token_atom(fyt);
 
 	/* null and json mode */
-	if (fy_emit_is_json_mode(emit) && (/* (!fyt || !atom || atom->size0) || */ fyt->scalar.is_null)) {
-		fy_emit_puts(emit, wtype, "null");
+	if (fy_emit_is_json_mode(emit) && fyt->scalar.is_null) {
+		fy_emit_puts_simple(emit, wtype, "null");
+		goto out;
+	}
+
+	allow_breaks = !(flags & DDNF_SIMPLE) && !fy_emit_is_json_mode(emit) && !fy_emit_is_oneline(emit);
+
+	/* very very simple case first (90% of cases) */
+	str = fy_token_get_direct_simple_output(fyt, &len);
+	if (str && (!allow_breaks || (fy_emit_accum_column(&emit->ea) + (int)len <= fy_emit_width(emit)))) {
+		fy_emit_write_simple(emit, wtype, str, len);
 		goto out;
 	}
 
@@ -725,8 +813,6 @@ void fy_emit_token_write_plain(struct fy_emitter *emit, struct fy_token *fyt, in
 
 	if (!atom)
 		goto out;
-
-	allow_breaks = !(flags & DDNF_SIMPLE) && !fy_emit_is_json_mode(emit) && !fy_emit_is_oneline(emit);
 
 	spaces = false;
 	breaks = false;
@@ -744,6 +830,7 @@ void fy_emit_token_write_plain(struct fy_emitter *emit, struct fy_token *fyt, in
 				fy_emit_output_accum(emit, wtype, &emit->ea);
 				emit->flags &= ~FYEF_INDENTATION;
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			} else
 				fy_emit_accum_utf8_put(&emit->ea, c);
 
@@ -759,17 +846,21 @@ void fy_emit_token_write_plain(struct fy_emitter *emit, struct fy_token *fyt, in
 			if (!breaks) {
 				fy_emit_output_accum(emit, wtype, &emit->ea);
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			}
 
 			emit->flags &= ~FYEF_INDENTATION;
 			fy_emit_write_indent(emit, indent);
+			fy_emit_output_col_sync(emit, &emit->ea);
 
 			breaks = true;
 
 		} else {
 
-			if (breaks)
+			if (breaks) {
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
+			}
 
 			fy_emit_accum_utf8_put(&emit->ea, c);
 
@@ -818,6 +909,7 @@ void fy_emit_token_write_alias(struct fy_emitter *emit, struct fy_token *fyt, in
 
 void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, int flags, int indent, char qc)
 {
+	const struct fy_token_analysis *ta;
 	bool allow_breaks, spaces, breaks;
 	int c, i, w, digit;
 	enum fy_emitter_write_type wtype;
@@ -830,6 +922,7 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 	uint32_t hi_surrogate, lo_surrogate;
 	uint8_t non_utf8[4];
 	size_t non_utf8_len, k;
+	int emit_width;
 
 	wtype = qc == '\'' ?
 		((flags & DDNF_SIMPLE_SCALAR_KEY) ?
@@ -850,9 +943,15 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 	 */
 	target_style = qc == '"' ? FYAS_DOUBLE_QUOTED : FYAS_SINGLE_QUOTED;
 
+	allow_breaks = !(flags & DDNF_SIMPLE) && !fy_emit_is_json_mode(emit) && !fy_emit_is_oneline(emit);
+	emit_width = fy_emit_width(emit);
+
+	ta = fy_token_text_analyze(fyt);
+
 	/* simple case of direct output (large amount of cases) */
 	str = fy_token_get_direct_output(fyt, &len);
-	if (str && fy_token_atom_style(fyt) == target_style) {
+	if (str && fy_token_atom_style(fyt) == target_style &&
+	   (ta->flags & FYTTAF_DIRECT_OUTPUT) && emit->column + ta->maxcol < emit_width) {
 		fy_emit_write(emit, wtype, str, len);
 		goto out;
 	}
@@ -861,8 +960,6 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 	atom = fy_token_atom(fyt);
 	if (!atom)
 		goto out;
-
-	allow_breaks = !(flags & DDNF_SIMPLE) && !fy_emit_is_json_mode(emit) && !fy_emit_is_oneline(emit);
 
 	spaces = false;
 	breaks = false;
@@ -892,7 +989,7 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 
 		if (fy_is_space(c) || (qc == '\'' && fy_is_ws(c))) {
 			should_indent = allow_breaks && !spaces &&
-					fy_emit_accum_column(&emit->ea) > fy_emit_width(emit);
+					fy_emit_accum_column(&emit->ea) >= emit_width;
 
 			if (should_indent &&
 				((qc == '\'' && fy_is_ws(fy_atom_iter_utf8_peek(&iter))) ||
@@ -900,10 +997,11 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 				fy_emit_output_accum(emit, wtype, &emit->ea);
 
 				if (qc == '"' && fy_is_ws(fy_atom_iter_utf8_peek(&iter)))
-					fy_emit_putc(emit, wtype, '\\');
+					fy_emit_putc_simple(emit, wtype, '\\');
 
 				emit->flags &= ~FYEF_INDENTATION;
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			} else
 				fy_emit_accum_utf8_put(&emit->ea, c);
 
@@ -920,10 +1018,12 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 			if (!breaks) {
 				fy_emit_output_accum(emit, wtype, &emit->ea);
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			}
 
 			emit->flags &= ~FYEF_INDENTATION;
 			fy_emit_write_indent(emit, indent);
+			fy_emit_output_col_sync(emit, &emit->ea);
 
 			breaks = true;
 		} else {
@@ -931,6 +1031,17 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 			if (breaks) {
 				fy_emit_output_accum(emit, wtype, &emit->ea);
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
+
+			} else if (qc == '"' && allow_breaks && fy_emit_accum_column(&emit->ea) >= emit_width) {
+
+				fy_emit_output_accum(emit, wtype, &emit->ea);
+
+				fy_emit_putc_simple(emit, wtype, '\\');
+
+				emit->flags &= ~FYEF_INDENTATION;
+				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			}
 
 			/* escape */
@@ -990,7 +1101,7 @@ void fy_emit_token_write_quoted(struct fy_emitter *emit, struct fy_token *fyt, i
 					case '\v':
 						fy_emit_accum_utf8_put(&emit->ea, 'v');
 						break;
-					case '\e':
+					case '\x1b':	// \e
 						fy_emit_accum_utf8_put(&emit->ea, 'e');
 						break;
 					case 0x85:
@@ -1087,7 +1198,7 @@ bool fy_emit_token_write_block_hints(struct fy_emitter *emit, struct fy_token *f
 	}
 
 	if (atom->starts_with_ws || atom->starts_with_lb) {
-		fy_emit_putc(emit, fyewt_indicator, '0' + fy_emit_indent(emit));
+		fy_emit_putc_simple(emit, fyewt_indicator, '0' + fy_emit_indent(emit));
 		explicit_chomp = true;
 	}
 
@@ -1106,7 +1217,7 @@ bool fy_emit_token_write_block_hints(struct fy_emitter *emit, struct fy_token *f
 
 out:
 	if (chomp)
-		fy_emit_putc(emit, fyewt_indicator, chomp);
+		fy_emit_putc_simple(emit, fyewt_indicator, chomp);
 	*chompp = chomp;
 	return explicit_chomp;
 }
@@ -1125,7 +1236,7 @@ void fy_emit_token_write_literal(struct fy_emitter *emit, struct fy_token *fyt, 
 	if (flags & DDNF_ROOT)
 		indent += fy_emit_indent(emit);
 
-	fy_emit_putc(emit, fyewt_linebreak, '\n');
+	fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 	emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 
 	atom = fy_token_atom(fyt);
@@ -1140,6 +1251,7 @@ void fy_emit_token_write_literal(struct fy_emitter *emit, struct fy_token *fyt, 
 
 		if (breaks) {
 			fy_emit_write_indent(emit, indent);
+			fy_emit_output_col_sync(emit, &emit->ea);
 			breaks = false;
 		}
 
@@ -1172,7 +1284,7 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 	if (flags & DDNF_ROOT)
 		indent += fy_emit_indent(emit);
 
-	fy_emit_putc(emit, fyewt_linebreak, '\n');
+	fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 	emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 
 	atom = fy_token_atom(fyt);
@@ -1193,8 +1305,10 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 				fy_emit_output_accum(emit, fyewt_literal_scalar, &emit->ea);
 				/* do not output a newline (indent) if at the end or
 				 * this is a leading spaces line */
-				if (!fy_is_z(fy_atom_iter_utf8_peek(&iter)) && !leading_spaces)
+				if (!fy_is_z(fy_atom_iter_utf8_peek(&iter)) && !leading_spaces) {
 					fy_emit_write_indent(emit, indent);
+					fy_emit_output_col_sync(emit, &emit->ea);
+				}
 			}
 
 			/* count the number of consecutive breaks */
@@ -1213,6 +1327,7 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 			while (nrbreaks-- > nrbreakslim) {
 				emit->flags &= ~FYEF_INDENTATION;
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			}
 
 			breaks = true;
@@ -1222,6 +1337,7 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 			/* if we had a break, output an indent */
 			if (breaks) {
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 
 				/* if this line starts with whitespace we need to know */
 				leading_spaces = fy_is_ws(c);
@@ -1233,6 +1349,7 @@ void fy_emit_token_write_folded(struct fy_emitter *emit, struct fy_token *fyt, i
 				fy_emit_output_accum(emit, fyewt_folded_scalar, &emit->ea);
 				emit->flags &= ~FYEF_INDENTATION;
 				fy_emit_write_indent(emit, indent);
+				fy_emit_output_col_sync(emit, &emit->ea);
 			} else
 				fy_emit_accum_utf8_put(&emit->ea, c);
 
@@ -1249,11 +1366,9 @@ fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 			   int flags, int indent, enum fy_node_style style,
 			   struct fy_token *fyt_tag)
 {
-	const char *value = NULL;
-	size_t len = 0;
+	const struct fy_token_analysis *ta = NULL;
 	bool json, flow, is_null_scalar, is_json_plain;
 	struct fy_atom *atom;
-	int aflags = -1;
 	const char *tag;
 	size_t tag_len;
 
@@ -1267,7 +1382,7 @@ fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 
 	json = fy_emit_is_json_mode(emit);
 
-	is_null_scalar = !atom || fyt->scalar.is_null;
+	is_null_scalar = !atom || (fyt->type == FYTT_SCALAR && fyt->scalar.is_null);
 
 	/* is this a plain json atom? */
 	is_json_plain = (json || emit->source_json || fy_emit_is_dejson_mode(emit)) &&
@@ -1300,27 +1415,23 @@ fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 		return FYNS_DOUBLE_QUOTED;
 	}
 
-	aflags = fy_token_text_analyze(fyt);
+	ta = fy_token_text_analyze(fyt);
+
+	/* if the style is block and we're a simple scalar key, this is not going to work */
+	if ((style == FYNS_LITERAL || style == FYNS_FOLDED) && (flags & DDNF_SIMPLE_SCALAR_KEY))
+		style = (ta->flags & FYTTAF_CAN_BE_PLAIN) ? FYNS_PLAIN : FYNS_DOUBLE_QUOTED;
 
 	if (flow && (style == FYNS_ANY || style == FYNS_LITERAL || style == FYNS_FOLDED)) {
 
-		if (fyt && !value)
-			value = fy_token_get_text(fyt, &len);
-
-		/* if there's a linebreak, use double quoted style */
-		if (fy_find_any_lb(value, len)) {
+		/* if there's a linebreak, or ends in a colon, use double quoted style */
+		if (ta->flags & (FYTTAF_HAS_ANY_LB | FYTTAF_ENDS_WITH_COLON)) {
 			style = FYNS_DOUBLE_QUOTED;
 			goto out;
 		}
 
-		/* check if there's a non printable */
-		if (!fy_find_non_print(value, len)) {
-			style = FYNS_SINGLE_QUOTED;
-			goto out;
-		}
-
 		/* anything not empty is double quoted here */
-		style = !(aflags & FYTTAF_EMPTY) ? FYNS_PLAIN : FYNS_DOUBLE_QUOTED;
+		style = (ta->flags & FYTTAF_EMPTY) ? FYNS_PLAIN :
+			((ta->flags & FYTTAF_CAN_BE_PLAIN) ? FYNS_PLAIN : FYNS_DOUBLE_QUOTED);
 	}
 
 	/* try to pretify */
@@ -1328,44 +1439,69 @@ fy_emit_token_scalar_style(struct fy_emitter *emit, struct fy_token *fyt,
 		(style == FYNS_ANY || style == FYNS_DOUBLE_QUOTED || style == FYNS_SINGLE_QUOTED)) {
 
 		/* any original style can be a plain, but contains linebreaks, do a literal */
-		if ((aflags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) {
+		if ((ta->flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) {
 			style = FYNS_LITERAL;
 			goto out;
 		}
 
 		/* any style, can be just a plain, just make it so */
-		if (style == FYNS_ANY && (aflags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == FYTTAF_CAN_BE_PLAIN) {
+		if ((ta->flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == FYTTAF_CAN_BE_PLAIN) {
 			style = FYNS_PLAIN;
 			goto out;
 		}
-
 	}
 
 	if (!flow && emit->source_json && fy_emit_is_dejson_mode(emit)) {
-		if (is_json_plain || (aflags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == FYTTAF_CAN_BE_PLAIN) {
+		if (is_json_plain || (ta->flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_HAS_LB)) == FYTTAF_CAN_BE_PLAIN) {
 			style = FYNS_PLAIN;
 			goto out;
 		}
 	}
 
 out:
-	if (style == FYNS_ANY) {
-		if (fyt)
-			value = fy_token_get_text(fyt, &len);
+	/* any zero (or non newline linebreak) -> double quoted */
+	if (ta->flags & (FYTTAF_HAS_ZERO | FYTTAF_HAS_NON_NL_LB))
+		style = FYNS_DOUBLE_QUOTED;
 
-		style = (aflags & FYTTAF_CAN_BE_PLAIN) ?
-				FYNS_PLAIN : FYNS_DOUBLE_QUOTED;
+	if (style == FYNS_ANY && (ta->flags & FYTTAF_CAN_BE_PLAIN)) {
+		if (!flow || (ta->flags & FYTTAF_CAN_BE_PLAIN_FLOW))
+			style = FYNS_PLAIN;
 	}
 
 	if (style == FYNS_PLAIN) {
+		if (flow && !(ta->flags & FYTTAF_CAN_BE_PLAIN_FLOW))
+			style = (ta->flags & FYTTAF_CAN_BE_SINGLE_QUOTED) ? FYNS_SINGLE_QUOTED : FYNS_DOUBLE_QUOTED;
+
 		/* plains in flow mode not being able to be plains
 		 * - plain in block mode that can't be plain in flow mode
 		 * - special handling for plains on start of line
 		 */
-		if ((flow && !(aflags & FYTTAF_CAN_BE_PLAIN_FLOW) && !is_null_scalar) ||
-		    ((aflags & FYTTAF_QUOTE_AT_0) && indent == 0))
+		if ((flow && !(ta->flags & FYTTAF_CAN_BE_PLAIN_FLOW) && !(ta->flags & FYTTAF_CAN_BE_SIMPLE_KEY) && !is_null_scalar) ||
+		    ((ta->flags & FYTTAF_QUOTE_AT_0) && indent == 0))
 			style = FYNS_DOUBLE_QUOTED;
+
+		/* make it double quoted, but only if not already over the width (and contains a space/lb) */
+		if (style == FYNS_PLAIN && (ta->flags & (FYTTAF_HAS_LB | FYTTAF_HAS_WS)) &&
+			emit->column < fy_emit_width(emit) && (emit->column + ta->maxspan) > fy_emit_width(emit))
+			style = FYNS_DOUBLE_QUOTED;
+
+		if (style == FYNS_PLAIN && !(ta->flags & FYTTAF_CAN_BE_PLAIN)) {
+			style = FYNS_DOUBLE_QUOTED;
+		}
 	}
+
+	if (style == FYNS_ANY && (ta->flags & FYTTAF_CAN_BE_SINGLE_QUOTED))
+		style = FYNS_SINGLE_QUOTED;
+
+	if (style == FYNS_SINGLE_QUOTED && !(ta->flags & FYTTAF_CAN_BE_SINGLE_QUOTED))
+		style = FYNS_DOUBLE_QUOTED;
+
+	if (style == FYNS_ANY && (ta->flags & FYTTAF_CAN_BE_DOUBLE_QUOTED))
+		style = FYNS_DOUBLE_QUOTED;
+
+	/* should never happen, but still */
+	if (style == FYNS_ANY)
+		style = FYNS_DOUBLE_QUOTED;
 
 	return style;
 }
@@ -1373,7 +1509,16 @@ out:
 void fy_emit_token_scalar(struct fy_emitter *emit, struct fy_token *fyt, int flags, int indent,
 			  enum fy_node_style style, struct fy_token *fyt_tag)
 {
+	struct fy_emit_save_ctx *sc = &emit->s_sc;
+
 	assert(style != FYNS_FLOW && style != FYNS_BLOCK);
+
+	if (sc->flags & DDNF_HANGING_INDENT)
+		fy_emit_write_indent(emit, sc->indent);
+
+	/* root scalar with a comment needs special handling */
+	if ((flags & DDNF_ROOT) && fy_emit_token_has_comment(emit, fyt, fycp_top))
+		fy_emit_token_comment(emit, fyt, flags, indent, fycp_top);
 
 	indent = fy_emit_increase_indent(emit, flags, indent);
 
@@ -1404,6 +1549,12 @@ void fy_emit_token_scalar(struct fy_emitter *emit, struct fy_token *fyt, int fla
 	default:
 		break;
 	}
+
+	/* root scalar with a comment needs special handling */
+	if ((flags & DDNF_ROOT) && fy_emit_token_has_comment(emit, fyt, fycp_right)) {
+		fy_emit_token_comment(emit, fyt, flags, indent, fycp_right);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 }
 
 void fy_emit_scalar(struct fy_emitter *emit, struct fy_node *fyn, int flags, int indent, bool is_key)
@@ -1423,11 +1574,17 @@ void fy_emit_scalar(struct fy_emitter *emit, struct fy_node *fyn, int flags, int
 			style, fyn->tag);
 }
 
-static void fy_emit_sequence_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
+static void fy_emit_sequence_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
+				    struct fy_token *fyt)
 {
 	bool json = fy_emit_is_json_mode(emit);
-	bool oneline = fy_emit_is_oneline(emit);
 	bool was_flow = sc->flow;
+
+	/* skip top comment if parent sequence_item_prolog already emitted it */
+	if (!(sc->flags & DDNF_SEQ) && fy_emit_token_has_comment(emit, fyt, fycp_top)) {
+		fy_emit_token_comment(emit, fyt, sc->flags, sc->indent, fycp_top);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 
 	sc->old_indent = sc->indent;
 	if (!json) {
@@ -1437,25 +1594,29 @@ static void fy_emit_sequence_prolog(struct fy_emitter *emit, struct fy_emit_save
 			sc->flow = sc->empty;
 		else
 			sc->flow = fy_emit_is_flow_mode(emit) || emit->flow_level || sc->flow_token || sc->empty;
+	} else
+		sc->flow = true;
 
-		if (sc->flow) {
-			if (!emit->flow_level) {
-				sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
-				sc->old_indent = sc->indent;
-			}
-
-			sc->flags = (sc->flags | DDNF_FLOW) | (sc->flags & ~DDNF_INDENTLESS);
-			fy_emit_write_indicator(emit, di_left_bracket, sc->flags, sc->indent, fyewt_indicator);
-		} else {
-			sc->flags = (sc->flags & ~DDNF_FLOW);
+	if (sc->flow) {
+		if (!emit->flow_level) {
+			sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
+			sc->old_indent = sc->indent;
 		}
-	} else {
+
 		sc->flags = (sc->flags | DDNF_FLOW) | (sc->flags & ~DDNF_INDENTLESS);
 		fy_emit_write_indicator(emit, di_left_bracket, sc->flags, sc->indent, fyewt_indicator);
+
+		/* we need an indent afterward if not compact */
+		if (!fy_emit_sc_oneline(emit, sc))
+			sc->flags |= DDNF_HANGING_INDENT;
+	} else {
+		sc->flags = (sc->flags & ~DDNF_FLOW);
 	}
 
-	if (!oneline) {
-		if (was_flow || (sc->flags & (DDNF_ROOT | DDNF_SEQ)))
+	if (!fy_emit_sc_oneline(emit, sc)) {
+		if (was_flow || (sc->flags & (DDNF_ROOT | DDNF_SEQ))
+		    || ((sc->flags & DDNF_MAP)
+			&& (emit->xcfg.xflags & FYEXCF_INDENTED_SEQ_IN_MAP)))
 			sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
 	}
 
@@ -1464,9 +1625,10 @@ static void fy_emit_sequence_prolog(struct fy_emitter *emit, struct fy_emit_save
 
 static void fy_emit_sequence_epilog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
 {
+	if (sc->flow && (sc->flags & DDNF_HANGING_INDENT) && !fy_emit_sc_oneline(emit, sc) && !sc->empty)
+		fy_emit_write_indent(emit, sc->old_indent);
+
 	if (sc->flow || fy_emit_is_json_mode(emit)) {
-		if (!fy_emit_is_oneline(emit) && !sc->empty)
-			fy_emit_write_indent(emit, sc->old_indent);
 		fy_emit_write_indicator(emit, di_right_bracket, sc->flags, sc->old_indent, fyewt_indicator);
 	}
 }
@@ -1474,34 +1636,44 @@ static void fy_emit_sequence_epilog(struct fy_emitter *emit, struct fy_emit_save
 static void fy_emit_sequence_item_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 					 struct fy_token *fyt_value)
 {
-	int tmp_indent;
+	bool has_comment;
 
 	sc->flags |= DDNF_SEQ;
 
-	if (!fy_emit_is_oneline(emit))
+	has_comment = fy_emit_token_has_comment(emit, fyt_value, fycp_top);
+
+	if (!fy_emit_sc_oneline(emit, sc) ||
+	    ((fy_emit_is_compact(emit) || sc->flow) && emit->column >= fy_emit_width(emit)))
 		fy_emit_write_indent(emit, sc->indent);
+
+	if (has_comment) {
+		fy_emit_token_comment(emit, fyt_value, sc->flags, sc->indent, fycp_top);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 
 	if (!sc->flow && !fy_emit_is_json_mode(emit))
 		fy_emit_write_indicator(emit, di_dash, sc->flags, sc->indent, fyewt_indicator);
-
-	tmp_indent = sc->indent;
-	if (fy_emit_token_has_comment(emit, fyt_value, fycp_top)) {
-		if (!sc->flow && !fy_emit_is_json_mode(emit))
-			tmp_indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
-		fy_emit_token_comment(emit, fyt_value, sc->flags, tmp_indent, fycp_top);
-	}
 }
 
 static void fy_emit_sequence_item_epilog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 					 bool last, struct fy_token *fyt_value)
 {
+	bool needs_hanging_indent;
+
 	if ((sc->flow || fy_emit_is_json_mode(emit)) && !last)
 		fy_emit_write_indicator(emit, di_comma, sc->flags, sc->indent, fyewt_indicator);
 
-	fy_emit_token_comment(emit, fyt_value, sc->flags, sc->indent, fycp_right);
+	if (fy_emit_token_has_comment(emit, fyt_value, fycp_right)) {
+		fy_emit_token_comment(emit, fyt_value, sc->flags, sc->indent, fycp_right);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 
-	if (last && (sc->flow || fy_emit_is_json_mode(emit)) && !fy_emit_is_oneline(emit) && !sc->empty)
+	needs_hanging_indent = sc->flow && !fy_emit_sc_oneline(emit, sc) && !sc->empty;
+
+	if (last && needs_hanging_indent && (sc->flags & DDNF_HANGING_INDENT))
 		fy_emit_write_indent(emit, sc->old_indent);
+	else if (needs_hanging_indent)
+		sc->flags |= DDNF_HANGING_INDENT;
 
 	sc->flags &= ~DDNF_SEQ;
 }
@@ -1519,11 +1691,18 @@ void fy_emit_sequence(struct fy_emitter *emit, struct fy_node *fyn, int flags, i
 	sc->indent = indent;
 	sc->empty = fy_node_list_empty(&fyn->sequence);
 	sc->flow_token = fyn->style == FYNS_FLOW;
+	sc->oneline_flow = false;
+	if (sc->flow_token && fy_emit_preserve_flow_layout(emit)) {
+		const struct fy_mark *sm = fy_token_start_mark(fyn->sequence_start);
+		const struct fy_mark *em = fy_token_end_mark(fyn->sequence_end);
+		if (sm && em && sm->line == em->line)
+			sc->oneline_flow = true;
+	}
 	sc->flow = !!(flags & DDNF_FLOW);
 	sc->xstyle = fyn->style;
 	sc->old_indent = sc->indent;
 
-	fy_emit_sequence_prolog(emit, sc);
+	fy_emit_sequence_prolog(emit, sc, fyn->sequence_start);
 
 	for (fyni = fy_node_list_head(&fyn->sequence); fyni; fyni = fynin) {
 
@@ -1532,18 +1711,29 @@ void fy_emit_sequence(struct fy_emitter *emit, struct fy_node *fyn, int flags, i
 		fyt_value = fy_node_value_token(fyni);
 
 		fy_emit_sequence_item_prolog(emit, sc, fyt_value);
-		fy_emit_node_internal(emit, fyni, (sc->flags & ~DDNF_ROOT), sc->indent, false);
+
+		fy_emit_node_internal(emit, fyni, sc->flags & ~DDNF_ROOT, sc->indent, false);
 		fy_emit_sequence_item_epilog(emit, sc, last, fyt_value);
 	}
 
 	fy_emit_sequence_epilog(emit, sc);
+
+	/* emit right-comment attached to the closing bracket token */
+	if (fy_emit_token_has_comment(emit, fyn->sequence_end, fycp_right))
+		fy_emit_token_comment(emit, fyn->sequence_end, sc->flags, sc->indent, fycp_right);
 }
 
-static void fy_emit_mapping_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
+static void fy_emit_mapping_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
+				   struct fy_token *fyt)
 {
 	bool json = fy_emit_is_json_mode(emit);
-	bool oneline = fy_emit_is_oneline(emit);
 	bool was_flow = sc->flow;
+
+	/* skip top comment if parent sequence_item_prolog already emitted it */
+	if (!(sc->flags & DDNF_SEQ) && fy_emit_token_has_comment(emit, fyt, fycp_top)) {
+		fy_emit_token_comment(emit, fyt, sc->flags, sc->indent, fycp_top);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 
 	sc->old_indent = sc->indent;
 	if (!json) {
@@ -1553,24 +1743,26 @@ static void fy_emit_mapping_prolog(struct fy_emitter *emit, struct fy_emit_save_
 			sc->flow = sc->empty;
 		else
 			sc->flow = fy_emit_is_flow_mode(emit) || emit->flow_level || sc->flow_token || sc->empty;
+	} else
+		sc->flow = true;
 
-		if (sc->flow) {
-			if (!emit->flow_level) {
-				sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
-				sc->old_indent = sc->indent;
-			}
-
-			sc->flags = (sc->flags | DDNF_FLOW) | (sc->flags & ~DDNF_INDENTLESS);
-			fy_emit_write_indicator(emit, di_left_brace, sc->flags, sc->indent, fyewt_indicator);
-		} else {
-			sc->flags &= ~(DDNF_FLOW | DDNF_INDENTLESS);
+	if (sc->flow) {
+		if (!emit->flow_level) {
+			sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
+			sc->old_indent = sc->indent;
 		}
-	} else {
+
 		sc->flags = (sc->flags | DDNF_FLOW) | (sc->flags & ~DDNF_INDENTLESS);
 		fy_emit_write_indicator(emit, di_left_brace, sc->flags, sc->indent, fyewt_indicator);
+
+		/* we need an indent afterward if not compact */
+		if (!fy_emit_sc_oneline(emit, sc))
+			sc->flags |= DDNF_HANGING_INDENT;
+	} else {
+		sc->flags &= ~(DDNF_FLOW | DDNF_INDENTLESS);
 	}
 
-	if (!oneline && !sc->empty)
+	if (!fy_emit_sc_oneline(emit, sc) && !sc->empty)
 		sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
 
 	sc->flags &= ~DDNF_ROOT;
@@ -1579,7 +1771,7 @@ static void fy_emit_mapping_prolog(struct fy_emitter *emit, struct fy_emit_save_
 static void fy_emit_mapping_epilog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
 {
 	if (sc->flow || fy_emit_is_json_mode(emit)) {
-		if (!fy_emit_is_oneline(emit) && !sc->empty)
+		if ((sc->flags & DDNF_HANGING_INDENT) && !fy_emit_sc_oneline(emit, sc) && !sc->empty)
 			fy_emit_write_indent(emit, sc->old_indent);
 		fy_emit_write_indicator(emit, di_right_brace, sc->flags, sc->old_indent, fyewt_indicator);
 	}
@@ -1588,9 +1780,24 @@ static void fy_emit_mapping_epilog(struct fy_emitter *emit, struct fy_emit_save_
 static void fy_emit_mapping_key_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 				       struct fy_token *fyt_key, bool simple_key)
 {
+	const struct fy_token_analysis *ta;
+	bool do_indent, key_over, has_comment;
+
 	sc->flags = DDNF_MAP | (sc->flags & DDNF_FLOW);
 
-	if (simple_key) {
+	if (!fy_emit_sc_oneline(emit, sc) ||
+	    ((fy_emit_is_compact(emit) || sc->flow) && emit->column >= fy_emit_width(emit)))
+		fy_emit_write_indent(emit, sc->indent);
+
+	/* emit top comment on key token (interstitial mapping comment) */
+	if (!sc->flow && fy_emit_token_has_comment(emit, fyt_key, fycp_top)) {
+		fy_emit_token_comment(emit, fyt_key, sc->flags, sc->indent, fycp_top);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
+
+	/* if we have a right comment then it's by a definition not a simple key */
+	has_comment = fy_emit_token_has_comment(emit, fyt_key, fycp_right);
+	if (simple_key /* && !has_comment */ ) {
 		sc->flags |= DDNF_SIMPLE;
 		if (fyt_key && fyt_key->type == FYTT_SCALAR)
 			sc->flags |= DDNF_SIMPLE_SCALAR_KEY;
@@ -1600,56 +1807,107 @@ static void fy_emit_mapping_key_prolog(struct fy_emitter *emit, struct fy_emit_s
 			sc->flags |= DDNF_SIMPLE;
 	}
 
-	if (!fy_emit_is_oneline(emit))
+	do_indent = false;
+	if (!has_comment && !fy_emit_sc_oneline(emit, sc)) {
+		if (fyt_key && fyt_key->type != FYTT_SCALAR)
+			/* always indent on non scalar keys */
+			key_over = true;
+		else {
+			/* for scalar keys, check if key + 2 + quotes go over */
+			ta = fy_token_text_analyze(fyt_key);
+			key_over = (emit->column + ta->maxspan + 2 + (!simple_key ? 2 : 0)) >= fy_emit_width(emit);
+		}
+
+		do_indent = key_over;
+		if (!do_indent && !fy_emit_is_compact(emit))
+			do_indent = !sc->flow || (sc->flags & DDNF_HANGING_INDENT);
+	} else
+		do_indent = false;
+
+	if (do_indent)
 		fy_emit_write_indent(emit, sc->indent);
 
 	/* complex? */
-	if (!(sc->flags & DDNF_SIMPLE))
+	if (!(sc->flags & DDNF_SIMPLE)) {
 		fy_emit_write_indicator(emit, di_question_mark, sc->flags, sc->indent, fyewt_indicator);
+	}
 }
 
 static void fy_emit_mapping_key_epilog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 				       struct fy_token *fyt_key)
 {
-	int tmp_indent;
-
 	/* if the key is an alias, always output an extra whitespace */
 	if (fyt_key && fyt_key->type == FYTT_ALIAS)
 		fy_emit_write_ws(emit);
 
 	sc->flags &= ~DDNF_MAP;
 
-	fy_emit_write_indicator(emit, di_colon, sc->flags, sc->indent, fyewt_indicator);
+	if (!(sc->flags & DDNF_SIMPLE)) {
 
-	tmp_indent = sc->indent;
-	if (fy_emit_token_has_comment(emit, fyt_key, fycp_right)) {
+		if (fy_emit_token_has_comment(emit, fyt_key, fycp_right)) {
+			fy_emit_token_comment(emit, fyt_key, sc->flags, sc->indent, fycp_right);
+			sc->flags |= DDNF_HANGING_INDENT;
+		}
 
-		if (!sc->flow && !fy_emit_is_json_mode(emit))
-			tmp_indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
-
-		fy_emit_token_comment(emit, fyt_key, sc->flags, tmp_indent, fycp_right);
-		fy_emit_write_indent(emit, tmp_indent);
+		if (!emit->flow_level && !fy_emit_is_oneline_or_compact(emit))
+			fy_emit_write_indent(emit, sc->indent);
+		if (!fy_emit_whitespace(emit))
+			fy_emit_write_ws(emit);
+	} else {
 	}
 
-	sc->flags = DDNF_MAP | (sc->flags & DDNF_FLOW);
+	fy_emit_write_indicator(emit, di_colon, sc->flags, sc->indent, fyewt_indicator);
+
+	sc->flags &= ~DDNF_HANGING_INDENT;
+	if ((sc->flags & DDNF_SIMPLE) && fy_emit_token_has_comment(emit, fyt_key, fycp_right)) {
+		fy_emit_token_comment(emit, fyt_key, sc->flags, sc->indent, fycp_right);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
+
+	sc->flags = DDNF_MAP | (sc->flags & (DDNF_FLOW | DDNF_HANGING_INDENT));
 }
 
 static void fy_emit_mapping_value_prolog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 					 struct fy_token *fyt_value)
 {
-	/* nothing */
+	const struct fy_token_analysis *ta;
+	bool value_over;
+
+	if (sc->flags & DDNF_HANGING_INDENT)
+		fy_emit_write_indent(emit, sc->indent);
+
+	/* don't do anything for those cases */
+	if (!sc->flow || fy_emit_sc_oneline(emit, sc) || !fyt_value || fyt_value->type != FYTT_SCALAR)
+		return;
+
+	ta = fy_token_text_analyze(fyt_value);
+	value_over = (emit->column + ta->maxspan) >= fy_emit_width(emit);
+
+	if (value_over) {
+		sc->indent = fy_emit_increase_indent(emit, sc->flags, sc->indent);
+		fy_emit_write_indent(emit, sc->indent);
+	}
 }
 
 static void fy_emit_mapping_value_epilog(struct fy_emitter *emit, struct fy_emit_save_ctx *sc,
 					 bool last, struct fy_token *fyt_value)
 {
+	bool needs_hanging_indent;
+
 	if ((sc->flow || fy_emit_is_json_mode(emit)) && !last)
 		fy_emit_write_indicator(emit, di_comma, sc->flags, sc->indent, fyewt_indicator);
 
-	fy_emit_token_comment(emit, fyt_value, sc->flags, sc->indent, fycp_right);
+	if (fy_emit_token_has_comment(emit, fyt_value, fycp_right)) {
+		fy_emit_token_comment(emit, fyt_value, sc->flags, sc->indent, fycp_right);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
 
-	if (last && (sc->flow || fy_emit_is_json_mode(emit)) && !fy_emit_is_oneline(emit) && !sc->empty)
+	needs_hanging_indent = sc->flow && !fy_emit_sc_oneline(emit, sc) && !sc->empty;
+
+	if (last && needs_hanging_indent && (sc->flags & DDNF_HANGING_INDENT))
 		fy_emit_write_indent(emit, sc->old_indent);
+	else if (needs_hanging_indent)
+		sc->flags |= DDNF_HANGING_INDENT;
 
 	sc->flags &= ~DDNF_MAP;
 }
@@ -1659,7 +1917,8 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 	struct fy_node_pair *fynp, *fynpn, **fynpp = NULL;
 	struct fy_token *fyt_key, *fyt_value;
 	bool last, simple_key, used_malloc = false;
-	int aflags, i, count;
+	const struct fy_token_analysis *tak = NULL, *tav;
+	int i, count;
 	struct fy_emit_save_ctx sct, *sc = &sct;
 
 	memset(sc, 0, sizeof(*sc));
@@ -1668,13 +1927,20 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 	sc->indent = indent;
 	sc->empty = fy_node_pair_list_empty(&fyn->mapping);
 	sc->flow_token = fyn->style == FYNS_FLOW;
+	sc->oneline_flow = false;
+	if (sc->flow_token && fy_emit_preserve_flow_layout(emit)) {
+		const struct fy_mark *sm = fy_token_start_mark(fyn->mapping_start);
+		const struct fy_mark *em = fy_token_end_mark(fyn->mapping_end);
+		if (sm && em && sm->line == em->line)
+			sc->oneline_flow = true;
+	}
 	sc->flow = !!(flags & DDNF_FLOW);
 	sc->xstyle = fyn->style;
 	sc->old_indent = sc->indent;
 
-	fy_emit_mapping_prolog(emit, sc);
+	fy_emit_mapping_prolog(emit, sc, fyn->mapping_start);
 
-	if (!(emit->cfg.flags & (FYECF_SORT_KEYS | FYECF_STRIP_EMPTY_KV))) {
+	if (!(emit->xcfg.cfg.flags & (FYECF_SORT_KEYS | FYECF_STRIP_EMPTY_KV))) {
 		fynp = fy_node_pair_list_head(&fyn->mapping);
 		fynpp = NULL;
 	} else {
@@ -1687,7 +1953,7 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 					"malloc() failed");
 			used_malloc = true;
 		} else
-			fynpp = FY_ALLOCA((count + 1) * sizeof(*fynpp));
+			fynpp = alloca((count + 1) * sizeof(*fynpp));
 
 		/* fill (removing empty KVs) */
 		i = 0;
@@ -1695,7 +1961,7 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 				fynp = fy_node_pair_next(&fyn->mapping, fynp)) {
 
 			/* strip key/value pair from the output if it's empty */
-			if ((emit->cfg.flags & FYECF_STRIP_EMPTY_KV) && fy_node_is_empty(fynp->value))
+			if ((emit->xcfg.cfg.flags & FYECF_STRIP_EMPTY_KV) && fy_node_is_empty(fynp->value))
 				continue;
 
 			fynpp[i++] = fynp;
@@ -1704,7 +1970,7 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 		fynpp[count] = NULL;
 
 		/* sort the keys */
-		if (emit->cfg.flags & FYECF_SORT_KEYS)
+		if (emit->xcfg.cfg.flags & FYECF_SORT_KEYS)
 			fy_node_mapping_perform_sort(fyn, NULL, NULL, fynpp, count);
 
 		i = 0;
@@ -1731,9 +1997,9 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 		if (fynp->key) {
 			switch (fynp->key->type) {
 			case FYNT_SCALAR:
-				aflags = fy_token_text_analyze(fynp->key->scalar);
+				tak = fy_token_text_analyze(fynp->key->scalar);
 				simple_key = fy_emit_is_json_mode(emit) ||
-					     !!(aflags & FYTTAF_CAN_BE_SIMPLE_KEY);
+					     !!(tak->flags & FYTTAF_CAN_BE_SIMPLE_KEY);
 				break;
 			case FYNT_SEQUENCE:
 				simple_key = fy_node_list_empty(&fynp->key->sequence);
@@ -1742,6 +2008,17 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 				simple_key = fy_node_pair_list_empty(&fynp->key->mapping);
 				break;
 			}
+		}
+
+		/* special handling for compact mode simple key + scalar value*/
+		if (fy_emit_is_compact(emit) && simple_key &&
+		    fynp->value && fynp->value->type == FYNT_SCALAR && tak) {
+			tav = fy_token_text_analyze(fynp->value->scalar);
+
+			/* for plain key + value if we go over the width */
+			if ((tav->flags & FYTTAF_CAN_BE_PLAIN) &&
+			   (emit->column + tak->maxspan + 2 + tav->maxspan + 1) >= fy_emit_width(emit))
+				fy_emit_write_indent(emit, sc->indent);
 		}
 
 		fy_emit_mapping_key_prolog(emit, sc, fyt_key, simple_key);
@@ -1760,6 +2037,10 @@ void fy_emit_mapping(struct fy_emitter *emit, struct fy_node *fyn, int flags, in
 
 	fy_emit_mapping_epilog(emit, sc);
 
+	/* emit right-comment attached to the closing brace token */
+	if (fy_emit_token_has_comment(emit, fyn->mapping_end, fycp_right))
+		fy_emit_token_comment(emit, fyn->mapping_end, sc->flags, sc->indent, fycp_right);
+
 err_out:
 	return;
 }
@@ -1768,48 +2049,68 @@ int fy_emit_common_document_start(struct fy_emitter *emit,
 				  struct fy_document_state *fyds,
 				  bool root_tag_or_anchor)
 {
+	struct fy_emit_save_ctx *sc = &emit->s_sc;
 	struct fy_token *fyt_chk;
 	const char *td_handle, *td_prefix;
 	size_t td_handle_size, td_prefix_size;
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags;
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags;
 	enum fy_emitter_cfg_flags vd_flags = flags & FYECF_VERSION_DIR(FYECF_VERSION_DIR_MASK);
 	enum fy_emitter_cfg_flags td_flags = flags & FYECF_TAG_DIR(FYECF_TAG_DIR_MASK);
 	enum fy_emitter_cfg_flags dsm_flags = flags & FYECF_DOC_START_MARK(FYECF_DOC_START_MARK_MASK);
 	bool vd, td, dsm;
 	bool had_non_default_tag = false;
+	bool strip_doc = false;
 
 	if (!emit || !fyds || emit->fyds)
 		return -1;
 
-	emit->fyds = fyds;
+	strip_doc = !!(emit->xcfg.cfg.flags & FYECF_STRIP_DOC);
+
+	emit->fyds = fy_document_state_ref(fyds);
 
 	vd = ((vd_flags == FYECF_VERSION_DIR_AUTO && fyds->version_explicit) ||
 	       vd_flags == FYECF_VERSION_DIR_ON) &&
-	      !(emit->cfg.flags & FYECF_STRIP_DOC);
+	      !strip_doc;
 	td = ((td_flags == FYECF_TAG_DIR_AUTO && fyds->tags_explicit) ||
 	       td_flags == FYECF_TAG_DIR_ON) &&
-	      !(emit->cfg.flags & FYECF_STRIP_DOC);
+	      !strip_doc;
 
 	/* if either a version or directive tags exist, and no previous
 	 * explicit document end existed, output one now
 	 */
-	if (!fy_emit_is_json_mode(emit) && (vd || td) && !(emit->flags & FYEF_HAD_DOCUMENT_END)) {
+	if (!fy_emit_is_json_mode(emit) && (vd || td) &&
+		(emit->flags & (FYEF_HAD_DOCUMENT_END | FYEF_HAD_DOCUMENT_OUTPUT)) ==
+			(FYEF_HAD_DOCUMENT_END | FYEF_HAD_DOCUMENT_OUTPUT)) {
 		if (emit->column)
-			fy_emit_putc(emit, fyewt_linebreak, '\n');
-		if (!(emit->cfg.flags & FYECF_STRIP_DOC)) {
-			fy_emit_puts(emit, fyewt_document_indicator, "...");
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		if (!strip_doc) {
+			fy_emit_puts_simple(emit, fyewt_document_indicator, "...");
 			emit->flags &= ~FYEF_WHITESPACE;
 			emit->flags |= FYEF_HAD_DOCUMENT_END;
 		}
 	}
 
+	/* top comment */
+	if (fy_emit_token_has_comment(emit, fyds->fyt_ds, fycp_top)) {
+		if (emit->column)
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		fy_emit_token_comment(emit, fyds->fyt_ds, sc->flags, sc->indent, fycp_top);
+	}
+	/* right comment */
+	if (fy_emit_token_has_comment(emit, fyds->fyt_ds, fycp_right)) {
+		if (emit->column)
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		fy_emit_token_comment(emit, fyds->fyt_ds, sc->flags, sc->indent, fycp_right);
+		sc->flags |= DDNF_HANGING_INDENT;
+	}
+
 	if (!fy_emit_is_json_mode(emit) && vd) {
 		if (emit->column)
-			fy_emit_putc(emit, fyewt_linebreak, '\n');
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 		fy_emit_printf(emit, fyewt_version_directive, "%%YAML %d.%d",
 					fyds->version.major, fyds->version.minor);
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 	}
 
 	if (!fy_emit_is_json_mode(emit) && td) {
@@ -1826,12 +2127,12 @@ int fy_emit_common_document_start(struct fy_emitter *emit,
 			had_non_default_tag = true;
 
 			if (emit->column)
-				fy_emit_putc(emit, fyewt_linebreak, '\n');
+				fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
 			fy_emit_printf(emit, fyewt_tag_directive, "%%TAG %.*s %.*s",
 					(int)td_handle_size, td_handle,
 					(int)td_prefix_size, td_prefix);
-			fy_emit_putc(emit, fyewt_linebreak, '\n');
-			emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+			emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 		}
 	}
 
@@ -1843,8 +2144,8 @@ int fy_emit_common_document_start(struct fy_emitter *emit,
 	 */
 	dsm = (dsm_flags == FYECF_DOC_START_MARK_AUTO &&
 			(!fyds->start_implicit ||
-			  fyds->tags_explicit || fyds->version_explicit ||
-			  had_non_default_tag)) ||
+			(fyds->tags_explicit && had_non_default_tag) ||
+			fyds->version_explicit )) ||
 	       dsm_flags == FYECF_DOC_START_MARK_ON;
 
 	/* if there was previous output without document end */
@@ -1852,8 +2153,13 @@ int fy_emit_common_document_start(struct fy_emitter *emit,
 	           !(emit->flags & FYEF_HAD_DOCUMENT_END))
 		dsm = true;
 
+	/* there was *any* document end output (and no document end) */
+	if (!dsm && (emit->flags & FYEF_HAD_DOCUMENT_END_OUTPUT) &&
+		    !(emit->flags & FYEF_HAD_DOCUMENT_END))
+		dsm = true;
+
 	/* output document start indicator if we should */
-	if (dsm)
+	if (dsm && !fy_emit_is_json_mode(emit))
 		fy_emit_document_start_indicator(emit);
 
 	/* clear that in any case */
@@ -1888,7 +2194,7 @@ int fy_emit_document_start(struct fy_emitter *emit, struct fy_document *fyd,
 int fy_emit_common_document_end(struct fy_emitter *emit, bool override_state, bool implicit_override)
 {
 	const struct fy_document_state *fyds;
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags;
+	enum fy_emitter_cfg_flags flags = emit->xcfg.cfg.flags;
 	enum fy_emitter_cfg_flags dem_flags = flags & FYECF_DOC_END_MARK(FYECF_DOC_END_MARK_MASK);
 	bool implicit, dem;
 
@@ -1898,33 +2204,35 @@ int fy_emit_common_document_end(struct fy_emitter *emit, bool override_state, bo
 	fyds = emit->fyds;
 
 	implicit = fyds->end_implicit;
-	if (override_state)
+	if (fyds->started_explicit)
+		implicit = false;
+	else if (override_state)
 		implicit = implicit_override;
 
 	dem = ((dem_flags == FYECF_DOC_END_MARK_AUTO && !implicit) ||
 		dem_flags == FYECF_DOC_END_MARK_ON) &&
-	       !(emit->cfg.flags & FYECF_STRIP_DOC);
+	       !(emit->xcfg.cfg.flags & FYECF_STRIP_DOC);
 
-	if (!(emit->cfg.flags & FYECF_NO_ENDING_NEWLINE)) {
+	if (!(emit->xcfg.cfg.flags & FYECF_NO_ENDING_NEWLINE)) {
 		if (emit->column != 0) {
-			fy_emit_putc(emit, fyewt_linebreak, '\n');
-			emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+			emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 		}
 
 		if (!fy_emit_is_json_mode(emit) && dem) {
-			fy_emit_puts(emit, fyewt_document_indicator, "...");
-			fy_emit_putc(emit, fyewt_linebreak, '\n');
-			emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+			fy_emit_puts_simple(emit, fyewt_document_indicator, "...");
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+			emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 			emit->flags |= FYEF_HAD_DOCUMENT_END;
 		} else
 			emit->flags &= ~FYEF_HAD_DOCUMENT_END;
 	} else {
 		if (!fy_emit_is_json_mode(emit) && dem) {
 			if (emit->column != 0) {
-				fy_emit_putc(emit, fyewt_linebreak, '\n');
-				emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+				fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+				emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 			}
-			fy_emit_puts(emit, fyewt_document_indicator, "...");
+			fy_emit_puts_simple(emit, fyewt_document_indicator, "...");
 			emit->flags &= ~(FYEF_WHITESPACE | FYEF_INDENTATION);
 			emit->flags |= FYEF_HAD_DOCUMENT_END;
 		} else
@@ -1935,6 +2243,7 @@ int fy_emit_common_document_end(struct fy_emitter *emit, bool override_state, bo
 	emit->flags |= FYEF_HAD_DOCUMENT_OUTPUT;
 
 	/* stop our association with the document */
+	fy_document_state_unref(emit->fyds);
 	emit->fyds = NULL;
 
 	return 0;
@@ -1958,14 +2267,14 @@ int fy_emit_common_explicit_document_end(struct fy_emitter *emit)
 		return -1;
 
 	if (emit->column != 0) {
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 	}
 
 	if (!fy_emit_is_json_mode(emit)) {
-		fy_emit_puts(emit, fyewt_document_indicator, "...");
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+		fy_emit_puts_simple(emit, fyewt_document_indicator, "...");
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 		emit->flags |= FYEF_HAD_DOCUMENT_END;
 	} else
 		emit->flags &= ~FYEF_HAD_DOCUMENT_END;
@@ -1974,6 +2283,7 @@ int fy_emit_common_explicit_document_end(struct fy_emitter *emit)
 	emit->flags |= FYEF_HAD_DOCUMENT_OUTPUT;
 
 	/* stop our association with the document */
+	fy_document_state_unref(emit->fyds);
 	emit->fyds = NULL;
 
 	return 0;
@@ -1999,9 +2309,9 @@ void fy_emit_reset(struct fy_emitter *emit, bool reset_events)
 	emit->column = 0;
 	emit->flow_level = 0;
 	emit->output_error = 0;
-	/* start as if there was a previous document with an explicit end */
-	/* this allows implicit documents start without an indicator */
-	emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION | FYEF_HAD_DOCUMENT_END;
+	/* clear/set flags for a fresh start */
+	emit->flags &= ~(FYEF_OPEN_ENDED | FYEF_HAD_DOCUMENT_START | FYEF_HAD_DOCUMENT_OUTPUT); 
+	emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 
 	emit->state = FYES_NONE;
 
@@ -2013,8 +2323,11 @@ void fy_emit_reset(struct fy_emitter *emit, bool reset_events)
 	/* streaming mode flags */
 	emit->s_flags = DDNF_ROOT;
 
+	fy_emit_save_ctx_cleanup(emit, &emit->s_sc);
+	while (emit->sc_stack_top > 0)
+		fy_emit_save_ctx_cleanup(emit, &emit->sc_stack[--emit->sc_stack_top]);
+
 	emit->state_stack_top = 0;
-	emit->sc_stack_top = 0;
 
 	/* and release any queued events */
 	if (reset_events) {
@@ -2031,10 +2344,42 @@ int fy_emit_setup(struct fy_emitter *emit, const struct fy_emitter_cfg *cfg)
 		return -1;
 
 	memset(emit, 0, sizeof(*emit));
+	emit->output_fd = -1;
 
-	emit->cfg = *cfg;
-	if (!emit->cfg.output)
-		emit->cfg.output = fy_emitter_default_output;
+	/* is it extended config or not? */
+	if (!(cfg->flags & FYECF_EXTENDED_CFG))
+		emit->xcfg.cfg = *cfg;
+	else
+		emit->xcfg = *fy_container_of(cfg, struct fy_emitter_xcfg, cfg);
+
+	fy_emitter_fill_default_colors(emit);
+	emit->output_fp = fy_emitter_get_output_fp(emit);
+	if (!emit->output_fp)
+		emit->output_fd = fy_emitter_get_output_fd(emit);
+
+	if (!emit->xcfg.cfg.output) {
+		if (!emit->output_fp && emit->output_fd < 0) {
+			emit->xcfg.cfg.output = fy_emitter_null_output;
+		} else {
+			emit->xcfg.cfg.output = fy_emitter_default_output;
+			/* for the default, turn on extended indicators */
+			emit->xcfg.xflags |= FYEXCF_EXTENDED_INDICATORS;
+
+			switch (emit->xcfg.xflags & (FYEXCF_COLOR_MASK << FYEXCF_COLOR_SHIFT)) {
+			case FYEXCF_COLOR_AUTO:
+				emit->output_colorize = emit->output_fp ?
+						isatty(fileno(emit->output_fp)) :
+						isatty(emit->output_fd);
+				break;
+			case FYEXCF_COLOR_FORCE:
+				emit->output_colorize = true;
+				break;
+			default:
+				emit->output_colorize = false;
+				break;
+			}
+		}
+	}
 
 	diag = cfg->diag;
 
@@ -2076,6 +2421,15 @@ int fy_emit_setup(struct fy_emitter *emit, const struct fy_emitter_cfg *cfg)
 	return 0;
 }
 
+void fy_emit_save_ctx_cleanup(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
+{
+	fy_token_unref_rl(emit->recycled_token_list, sc->fyt_last_key);
+	sc->fyt_last_key = NULL;
+	fy_token_unref_rl(emit->recycled_token_list, sc->fyt_last_value);
+	sc->fyt_last_value = NULL;
+	memset(sc, 0, sizeof(*sc));
+}
+
 void fy_emit_cleanup(struct fy_emitter *emit)
 {
 	struct fy_eventp *fyep;
@@ -2085,14 +2439,18 @@ void fy_emit_cleanup(struct fy_emitter *emit)
 	if (emit->finalizer)
 		emit->finalizer(emit);
 
+	fy_emit_save_ctx_cleanup(emit, &emit->s_sc);
+	while (emit->sc_stack_top > 0)
+		fy_emit_save_ctx_cleanup(emit, &emit->sc_stack[--emit->sc_stack_top]);
+
 	while ((fyt = fy_token_list_pop(&emit->recycled_token)) != NULL)
 		fy_token_free(fyt);
 
 	while ((fyep = fy_eventp_list_pop(&emit->recycled_eventp)) != NULL)
 		fy_eventp_free(fyep);
 
-	if (!emit->fyd && emit->fyds)
-		fy_document_state_unref(emit->fyds);
+	fy_document_state_unref(emit->fyds);
+	emit->fyds = NULL;
 
 	fy_emit_accum_cleanup(&emit->ea);
 
@@ -2106,6 +2464,9 @@ void fy_emit_cleanup(struct fy_emitter *emit)
 		free(emit->sc_stack);
 
 	fy_diag_unref(emit->diag);
+
+	if (emit->owned_output_fp)
+		fclose(emit->owned_output_fp);
 }
 
 int fy_emit_node_no_check(struct fy_emitter *emit, struct fy_node *fyn)
@@ -2131,16 +2492,7 @@ int fy_emit_root_node_no_check(struct fy_emitter *emit, struct fy_node *fyn)
 	if (!emit || !fyn)
 		return -1;
 
-	/* top comment first */
-	fy_emit_node_comment(emit, fyn, DDNF_ROOT, -1, fycp_top);
-
 	fy_emit_node_internal(emit, fyn, DDNF_ROOT, -1, false);
-
-	/* right comment next */
-	fy_emit_node_comment(emit, fyn, DDNF_ROOT, -1, fycp_right);
-
-	/* bottom comment last */
-	fy_emit_node_comment(emit, fyn, DDNF_ROOT, -1, fycp_bottom);
 
 	return 0;
 }
@@ -2166,7 +2518,7 @@ void fy_emit_prepare_document_state(struct fy_emitter *emit, struct fy_document_
 
 	/* if the original document was JSON and the mode is ORIGINAL turn on JSON mode */
 	emit->source_json = fyds && fyds->json_mode;
-	emit->force_json = (emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK)) == FYECF_MODE_ORIGINAL &&
+	emit->force_json = (emit->xcfg.cfg.flags & FYECF_MODE(FYECF_MODE_MASK)) == FYECF_MODE_ORIGINAL &&
 			   emit->source_json;
 }
 
@@ -2183,6 +2535,8 @@ int fy_emit_document_no_check(struct fy_emitter *emit, struct fy_document *fyd)
 		return rc;
 
 	rc = fy_emit_document_end(emit);
+
+	fy_emit_reset(emit, false);
 
 	return rc;
 }
@@ -2243,7 +2597,7 @@ const struct fy_emitter_cfg *fy_emitter_get_cfg(struct fy_emitter *emit)
 	if (!emit)
 		return NULL;
 
-	return &emit->cfg;
+	return &emit->xcfg.cfg;
 }
 
 struct fy_diag *fy_emitter_get_diag(struct fy_emitter *emit)
@@ -2294,15 +2648,18 @@ struct fy_emit_buffer_state {
 
 static int do_buffer_output(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, int leni, void *userdata)
 {
-	struct fy_emit_buffer_state *state = emit->cfg.userdata;
+	struct fy_emit_buffer_state *state = emit->xcfg.cfg.userdata;
 	size_t left, pagesize, size, len;
 	char *bufnew;
+
+	if (leni < 0)
+		return -1;
 
 	/* convert to unsigned and use that */
 	len = (size_t)leni;
 
 	/* no funky business */
-	if (len < 0)
+	if ((ssize_t)len < 0)
 		return -1;
 
 	state->need += len;
@@ -2311,7 +2668,7 @@ static int do_buffer_output(struct fy_emitter *emit, enum fy_emitter_write_type 
 		if (!state->allocate_buffer)
 			return 0;
 
-		pagesize = fy_get_pagesize();
+		pagesize = sysconf(_SC_PAGESIZE);
 		size = state->need + pagesize - 1;
 		size = size - size % pagesize;
 
@@ -2330,7 +2687,7 @@ static int do_buffer_output(struct fy_emitter *emit, enum fy_emitter_write_type 
 		memcpy(state->buf + state->pos, str, len);
 	state->pos += len;
 
-	return len;
+	return (int)len;
 }
 
 static void
@@ -2338,7 +2695,7 @@ fy_emitter_str_finalizer(struct fy_emitter *emit)
 {
 	struct fy_emit_buffer_state *state;
 
-	if (!emit || !(state = emit->cfg.userdata))
+	if (!emit || !(state = emit->xcfg.cfg.userdata))
 		return;
 
 	/* if the buffer is allowed to allocate_buffer... */
@@ -2346,7 +2703,7 @@ fy_emitter_str_finalizer(struct fy_emitter *emit)
 		free(state->buf);
 	free(state);
 
-	emit->cfg.userdata = NULL;
+	emit->xcfg.cfg.userdata = NULL;
 }
 
 static struct fy_emitter *
@@ -2355,6 +2712,9 @@ fy_emitter_create_str_internal(enum fy_emitter_cfg_flags flags, char **bufp, siz
 	struct fy_emitter *emit;
 	struct fy_emitter_cfg emit_cfg;
 	struct fy_emit_buffer_state *state;
+
+	if (flags & FYECF_EXTENDED_CFG)
+		return NULL;
 
 	state = malloc(sizeof(*state));
 	if (!state)
@@ -2404,9 +2764,10 @@ fy_emitter_collect_str_internal(struct fy_emitter *emit, char **bufp, size_t *si
 {
 	struct fy_emit_buffer_state *state;
 	char *buf;
+	size_t size;
 	int rc;
 
-	state = emit->cfg.userdata;
+	state = emit->xcfg.cfg.userdata;
 	assert(state);
 
 	/* if NULL, then use the values stored on the state */
@@ -2431,7 +2792,10 @@ fy_emitter_collect_str_internal(struct fy_emitter *emit, char **bufp, size_t *si
 	}
 
 	/* retreive the buffer and size */
-	*sizep = state->size;
+	size = state->size;
+	if (size > 0 && state->buf[size-1] == '\0')
+		size--;
+	*sizep = size;
 	*bufp = state->buf;
 
 	/* reset the buffer, ownership now to the caller */
@@ -2495,7 +2859,9 @@ int fy_emit_document_to_buffer(struct fy_document *fyd, enum fy_emitter_cfg_flag
 	rc = fy_emit_str_internal(fyd, flags, NULL, &buf, &size, false);
 	if (rc != 0)
 		return -1;
-	return size;
+	if ((int)size < 0)
+		return -1;
+	return (int)size;
 }
 
 char *fy_emit_document_to_string(struct fy_document *fyd, enum fy_emitter_cfg_flags flags)
@@ -2564,15 +2930,15 @@ fy_emit_to_string_collect(struct fy_emitter *emit, size_t *sizep)
 static int do_file_output(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, int leni, void *userdata)
 {
 	FILE *fp = userdata;
-	size_t len;
-
-	len = (size_t)leni;
+	size_t len, wrn;
 
 	/* no funky stuff */
-	if (len < 0)
+	if (leni < 0)
 		return -1;
 
-	return fwrite(str, 1, len, fp);
+	len = (size_t)leni;
+	wrn = fwrite(str, 1, len, fp);
+	return (int)wrn;
 }
 
 int fy_emit_document_to_fp(struct fy_document *fyd, enum fy_emitter_cfg_flags flags,
@@ -2582,7 +2948,8 @@ int fy_emit_document_to_fp(struct fy_document *fyd, enum fy_emitter_cfg_flags fl
 	struct fy_emitter_cfg emit_cfg;
 	int rc;
 
-	if (!fp)
+	/* we don't allow an extended configuration */
+	if (!fp || (flags & FYECF_EXTENDED_CFG))
 		return -1;
 
 	memset(&emit_cfg, 0, sizeof(emit_cfg));
@@ -2657,7 +3024,7 @@ static int do_fd_output(struct fy_emitter *emit, enum fy_emitter_write_type type
 
 		len -= wrn;
 		str += wrn;
-		total += wrn;
+		total += (int)wrn;
 	}
 
 	return total;
@@ -2669,7 +3036,7 @@ int fy_emit_document_to_fd(struct fy_document *fyd, enum fy_emitter_cfg_flags fl
 	struct fy_emitter_cfg emit_cfg;
 	int rc;
 
-	if (fd < 0)
+	if (fd < 0 || (flags & FYECF_EXTENDED_CFG))
 		return -1;
 
 	memset(&emit_cfg, 0, sizeof(emit_cfg));
@@ -2698,7 +3065,7 @@ int fy_emit_node_to_buffer(struct fy_node *fyn, enum fy_emitter_cfg_flags flags,
 	rc = fy_emit_str_internal(NULL, flags, fyn, &buf, &size, false);
 	if (rc != 0)
 		return -1;
-	return size;
+	return (int)size;
 }
 
 char *fy_emit_node_to_string(struct fy_node *fyn, enum fy_emitter_cfg_flags flags)
@@ -2715,63 +3082,112 @@ char *fy_emit_node_to_string(struct fy_node *fyn, enum fy_emitter_cfg_flags flag
 	return buf;
 }
 
+/* we can consume events only if the lookaheads
+ * are satisfied. The lookaheads depends on the
+ * styling mode. Some styling modes do not require
+ * a lookahead at all but we do it anyway.
+ */
 static bool fy_emit_ready(struct fy_emitter *emit)
 {
 	struct fy_eventp *fyep;
-	int need, count, level;
+	int need, count;
 
-	/* no events in the list, not ready */
+	/* When the head event starts a flow collection in ORIGINAL mode,
+	 * buffer events on the same source line so that oneline_flow
+	 * detection can compare start/end line marks before the prolog
+	 * runs.  We only buffer events that share the start token's line;
+	 * as soon as an event is on a different line we know the collection
+	 * is multi-line and can proceed immediately.  This keeps the buffer
+	 * bounded to a single line's worth of events rather than the
+	 * entire collection.
+	 */
 	fyep = fy_eventp_list_head(&emit->queued_events);
-	if (!fyep)
-		return false;
+	if (fyep && fy_emit_preserve_flow_layout(emit)) {
+		struct fy_token *start_token = NULL;
+		const struct fy_mark *sm;
 
-	/* some events need more than one */
-	switch (fyep->e.type) {
-	case FYET_DOCUMENT_START:
-		need = 1;
-		break;
-	case FYET_SEQUENCE_START:
-		need = 2;
-		break;
-	case FYET_MAPPING_START:
-		need = 3;
-		break;
-	default:
-		need = 0;
-		break;
+		if (fyep->e.type == FYET_SEQUENCE_START)
+			start_token = fyep->e.sequence_start.sequence_start;
+		else if (fyep->e.type == FYET_MAPPING_START)
+			start_token = fyep->e.mapping_start.mapping_start;
+
+		/* Only buffer when we have a flow start token with valid
+		 * source marks (skip synthetic events with 0:0:0 marks) */
+		sm = start_token ? fy_token_start_mark(start_token) : NULL;
+
+		if (start_token &&
+		    (start_token->type == FYTT_FLOW_SEQUENCE_START ||
+		     start_token->type == FYTT_FLOW_MAPPING_START) &&
+		    sm && !(sm->line == 0 && sm->column == 0 && sm->input_pos == 0)) {
+			int depth = 0;
+
+			sm = fy_token_start_mark(start_token);
+
+			/* Skip buffering for synthetic events (no source info) */
+			if (!sm || (sm->line == 0 && sm->column == 0 && sm->input_pos == 0))
+				goto normal;
+
+			for (fyep = fy_eventp_list_head(&emit->queued_events); fyep;
+					fyep = fy_eventp_next(&emit->queued_events, fyep)) {
+
+				switch (fyep->e.type) {
+				case FYET_SEQUENCE_START:
+				case FYET_MAPPING_START:
+					depth++;
+					break;
+				case FYET_SEQUENCE_END:
+				case FYET_MAPPING_END:
+					if (--depth == 0)
+						return true;
+					break;
+				default:
+					break;
+				}
+
+				/* If any event is on a different line, the
+				 * collection is multi-line — stop buffering */
+				if (depth > 0) {
+					struct fy_token *et = fy_event_get_token(&fyep->e);
+					const struct fy_mark *em = et ? fy_token_start_mark(et) : NULL;
+
+					if (em && em->line != sm->line)
+						return true;
+				}
+			}
+			return false;
+		}
 	}
+normal:
 
-	/* if we don't need any more, that's enough */
-	if (!need)
-		return true;
-
-	level = 0;
 	count = 0;
-	for (; fyep; fyep = fy_eventp_next(&emit->queued_events, fyep)) {
+	need = -1;
+	for (fyep = fy_eventp_list_head(&emit->queued_events); fyep;
+			fyep = fy_eventp_next(&emit->queued_events, fyep)) {
+
 		count++;
-
-		if (count > need)
-			return true;
-
 		switch (fyep->e.type) {
-		case FYET_STREAM_START:
 		case FYET_DOCUMENT_START:
+			need++;
+			break;
+
 		case FYET_SEQUENCE_START:
+			if (need < 0)
+				need = 2;
+			break;
+
 		case FYET_MAPPING_START:
-			level++;
+			if (need < 0)
+				need = 2;
 			break;
-		case FYET_STREAM_END:
-		case FYET_DOCUMENT_END:
-		case FYET_SEQUENCE_END:
-		case FYET_MAPPING_END:
-			level--;
-			break;
+
 		default:
+			need = 0;
 			break;
 		}
 
-		if (!level)
+		if (count >= need)
 			return true;
+
 	}
 
 	return false;
@@ -2807,36 +3223,84 @@ fy_emit_next_event(struct fy_emitter *emit)
 struct fy_eventp *
 fy_emit_peek_next_event(struct fy_emitter *emit)
 {
-	if (!fy_emit_ready(emit))
-		return NULL;
-
 	return fy_eventp_list_head(&emit->queued_events);
 }
 
 bool fy_emit_streaming_sequence_empty(struct fy_emitter *emit)
 {
-	enum fy_emitter_cfg_flags flags = emit->cfg.flags & FYECF_MODE(FYECF_MODE_MASK);
 	struct fy_eventp *fyepn;
-	struct fy_event *fyen;
-
-	if (flags == FYECF_MODE_BLOCK || flags == FYECF_MODE_DEJSON)
-		return false;
 
 	fyepn = fy_emit_peek_next_event(emit);
-	fyen = fyepn ? &fyepn->e : NULL;
 
-	return !fyen || fyen->type == FYET_SEQUENCE_END;
+	/* should never happen, check on debugging mode */
+	assert(fyepn);
+	if (!fyepn)
+		return false;
+
+	return fyepn->e.type == FYET_SEQUENCE_END;
 }
 
 bool fy_emit_streaming_mapping_empty(struct fy_emitter *emit)
 {
 	struct fy_eventp *fyepn;
-	struct fy_event *fyen;
 
 	fyepn = fy_emit_peek_next_event(emit);
-	fyen = fyepn ? &fyepn->e : NULL;
 
-	return !fyen || fyen->type == FYET_MAPPING_END;
+	/* should never happen, check on debugging mode */
+	assert(fyepn);
+	if (!fyepn)
+		return false;
+
+	return fyepn->e.type == FYET_MAPPING_END;
+}
+
+/* Scan queued events to determine if a flow collection fits on one line.
+ * Called after the START event has been popped; the queue begins with the
+ * first child event.  We track nesting depth to find the matching END.
+ * Returns true when start and end tokens are on the same source line.
+ * Returns false for synthetic events (marks at 0:0:0) which have no
+ * meaningful source position.
+ */
+static bool fy_emit_streaming_flow_oneline(struct fy_emitter *emit,
+					   struct fy_token *start_token)
+{
+	struct fy_eventp *fyep;
+	const struct fy_mark *sm, *em;
+	struct fy_token *end_token;
+	int depth = 1;
+
+	sm = fy_token_start_mark(start_token);
+	if (!sm || (sm->line == 0 && sm->column == 0 && sm->input_pos == 0))
+		return false;
+
+	for (fyep = fy_eventp_list_head(&emit->queued_events); fyep;
+			fyep = fy_eventp_next(&emit->queued_events, fyep)) {
+
+		switch (fyep->e.type) {
+		case FYET_SEQUENCE_START:
+		case FYET_MAPPING_START:
+			depth++;
+			break;
+		case FYET_SEQUENCE_END:
+			if (--depth == 0) {
+				end_token = fyep->e.sequence_end.sequence_end;
+				em = fy_token_end_mark(end_token);
+				return em && sm->line == em->line;
+			}
+			break;
+		case FYET_MAPPING_END:
+			if (--depth == 0) {
+				end_token = fyep->e.mapping_end.mapping_end;
+				em = fy_token_end_mark(end_token);
+				return em && sm->line == em->line;
+			}
+			break;
+		default:
+			break;
+		}
+	}
+
+	return false;
 }
 
 static void fy_emit_goto_state(struct fy_emitter *emit, enum fy_emitter_state state)
@@ -2905,17 +3369,19 @@ int fy_emit_pop_sc(struct fy_emitter *emit, struct fy_emit_save_ctx *sc)
 	return 0;
 }
 
-static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fyep, int flags)
+static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep, int flags)
 {
 	struct fy_event *fye = &fyep->e;
 	struct fy_emit_save_ctx *sc = &emit->s_sc;
 	enum fy_node_style style, xstyle;
 	int ret, s_flags, s_indent;
 
-	if (fye->type != FYET_ALIAS && fye->type != FYET_SCALAR &&
+	/* force collections after --- to start at a new line */
+	if (!fy_emit_is_oneline(emit) &&
+			fye->type != FYET_ALIAS && fye->type != FYET_SCALAR &&
 			(emit->s_flags & DDNF_ROOT) && emit->column != 0) {
-		fy_emit_putc(emit, fyewt_linebreak, '\n');
-		emit->flags = FYEF_WHITESPACE | FYEF_INDENTATION;
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->flags |= FYEF_WHITESPACE | FYEF_INDENTATION;
 	}
 
 	emit->s_flags = flags;
@@ -2929,9 +3395,11 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 	case FYET_SCALAR:
 		/* if we're pretty and at column 0 (meaning it's a single scalar document) output --- */
 		if ((emit->s_flags & DDNF_ROOT) && fy_emit_is_pretty_mode(emit) && !emit->column &&
-				!fy_emit_is_flow_mode(emit) && !(emit->s_flags & DDNF_FLOW))
+				!fy_emit_is_flow_mode(emit) && !(emit->s_flags & DDNF_FLOW)) {
 			fy_emit_document_start_indicator(emit);
-		fy_emit_common_node_preamble(emit, fye->scalar.anchor, fye->scalar.tag, emit->s_flags, emit->s_indent);
+			emit->fyds->started_explicit = true;
+		}
+		fy_emit_common_node_preamble(emit, fye->scalar.value, fye->scalar.anchor, fye->scalar.tag, emit->s_flags, emit->s_indent);
 		style = fye->scalar.value ?
 				fy_node_style_from_scalar_style(fye->scalar.value->scalar.style) :
 				FYNS_PLAIN;
@@ -2949,10 +3417,15 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 		s_flags = emit->s_flags;
 		s_indent = emit->s_indent;
 
-		xstyle = fye->sequence_start.sequence_start->type == FYTT_BLOCK_SEQUENCE_START ?
-			FYNS_BLOCK : FYNS_FLOW;
+		if (fye->sequence_start.sequence_start)
+			xstyle = fye->sequence_start.sequence_start->type == FYTT_BLOCK_SEQUENCE_START ?
+				FYNS_BLOCK : FYNS_FLOW;
+		else
+			xstyle = FYNS_ANY;
 
-		fy_emit_common_node_preamble(emit, fye->sequence_start.anchor, fye->sequence_start.tag, emit->s_flags, emit->s_indent);
+		fy_emit_common_node_preamble(emit, fye->sequence_start.sequence_start,
+					     fye->sequence_start.anchor, fye->sequence_start.tag,
+					     emit->s_flags, emit->s_indent);
 
 		/* create new context */
 		memset(sc, 0, sizeof(*sc));
@@ -2960,15 +3433,16 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 		sc->indent = emit->s_indent;
 		sc->empty = fy_emit_streaming_sequence_empty(emit);
 		sc->flow_token = xstyle == FYNS_FLOW;
+		if (sc->flow_token && fy_emit_preserve_flow_layout(emit))
+			sc->oneline_flow = fy_emit_streaming_flow_oneline(emit,
+					fye->sequence_start.sequence_start);
 		sc->flow = !!(s_flags & DDNF_FLOW);
 		sc->xstyle = xstyle;
 		sc->old_indent = sc->indent;
 		sc->s_flags = s_flags;
 		sc->s_indent = s_indent;
-		sc->s_flags = s_flags;
-		sc->s_indent = s_indent;
 
-		fy_emit_sequence_prolog(emit, sc);
+		fy_emit_sequence_prolog(emit, sc, fye->sequence_start.sequence_start);
 		sc->flags &= ~DDNF_MAP;
 		sc->flags |= DDNF_SEQ;
 
@@ -2987,10 +3461,15 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 		s_flags = emit->s_flags;
 		s_indent = emit->s_indent;
 
-		xstyle = fye->mapping_start.mapping_start->type == FYTT_BLOCK_MAPPING_START ?
-			FYNS_BLOCK : FYNS_FLOW;
+		if (fye->mapping_start.mapping_start)
+			xstyle = fye->mapping_start.mapping_start->type == FYTT_BLOCK_MAPPING_START ?
+				FYNS_BLOCK : FYNS_FLOW;
+		else
+			xstyle = FYNS_ANY;
 
-		fy_emit_common_node_preamble(emit, fye->mapping_start.anchor, fye->mapping_start.tag, emit->s_flags, emit->s_indent);
+		fy_emit_common_node_preamble(emit, fye->mapping_start.mapping_start,
+					     fye->mapping_start.anchor, fye->mapping_start.tag,
+					     emit->s_flags, emit->s_indent);
 
 		/* create new context */
 		memset(sc, 0, sizeof(*sc));
@@ -2998,15 +3477,16 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 		sc->indent = emit->s_indent;
 		sc->empty = fy_emit_streaming_mapping_empty(emit);
 		sc->flow_token = xstyle == FYNS_FLOW;
+		if (sc->flow_token && fy_emit_preserve_flow_layout(emit))
+			sc->oneline_flow = fy_emit_streaming_flow_oneline(emit,
+					fye->mapping_start.mapping_start);
 		sc->flow = !!(s_flags & DDNF_FLOW);
 		sc->xstyle = xstyle;
 		sc->old_indent = sc->indent;
 		sc->s_flags = s_flags;
 		sc->s_indent = s_indent;
-		sc->s_flags = s_flags;
-		sc->s_indent = s_indent;
 
-		fy_emit_mapping_prolog(emit, sc);
+		fy_emit_mapping_prolog(emit, sc, fye->mapping_start.mapping_start);
 		sc->flags &= ~DDNF_SEQ;
 		sc->flags |= DDNF_MAP;
 
@@ -3024,7 +3504,7 @@ static int fy_emit_streaming_node(struct fy_emitter *emit, struct fy_eventp *fye
 	return 0;
 }
 
-static int fy_emit_handle_stream_start(struct fy_emitter *emit, struct fy_eventp *fyep)
+static int fy_emit_handle_stream_start(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep)
 {
 	struct fy_event *fye = &fyep->e;
 
@@ -3033,6 +3513,9 @@ static int fy_emit_handle_stream_start(struct fy_emitter *emit, struct fy_eventp
 		return -1;
 	}
 
+	fy_document_state_unref(emit->fyds);
+	emit->fyds = NULL;
+
 	fy_emit_reset(emit, false);
 
 	fy_emit_goto_state(emit, FYES_FIRST_DOCUMENT_START);
@@ -3040,7 +3523,7 @@ static int fy_emit_handle_stream_start(struct fy_emitter *emit, struct fy_eventp
 	return 0;
 }
 
-static int fy_emit_handle_document_start(struct fy_emitter *emit, struct fy_eventp *fyep, bool first)
+static int fy_emit_handle_document_start(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep, bool first)
 {
 	struct fy_event *fye = &fyep->e;
 	struct fy_document_state *fyds;
@@ -3058,7 +3541,7 @@ static int fy_emit_handle_document_start(struct fy_emitter *emit, struct fy_even
 
 	/* transfer ownership to the emitter */
 	fyds = fye->document_start.document_state;
-	fye->document_start.document_state = NULL;
+	// fye->document_start.document_state = NULL;
 
 	/* prepare (i.e. adapt to the document state) */
 	fy_emit_prepare_document_state(emit, fyds);
@@ -3070,9 +3553,8 @@ static int fy_emit_handle_document_start(struct fy_emitter *emit, struct fy_even
 	return 0;
 }
 
-static int fy_emit_handle_document_end(struct fy_emitter *emit, struct fy_eventp *fyep)
+static int fy_emit_handle_document_end(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep)
 {
-	struct fy_document_state *fyds;
 	struct fy_event *fye = &fyep->e;
 	int ret;
 
@@ -3081,59 +3563,59 @@ static int fy_emit_handle_document_end(struct fy_emitter *emit, struct fy_eventp
 		return -1;
 	}
 
-	fyds = emit->fyds;
-
 	ret = fy_emit_common_document_end(emit, true, fye->document_end.implicit);
 	if (ret)
 		return ret;
 
-	fy_document_state_unref(fyds);
-
 	fy_emit_reset(emit, false);
 	fy_emit_goto_state(emit, FYES_DOCUMENT_START);
+	emit->flags |= FYEF_HAD_DOCUMENT_END_OUTPUT;
 	return 0;
 }
 
-static int fy_emit_handle_document_content(struct fy_emitter *emit, struct fy_eventp *fyep)
+static int fy_emit_handle_document_content(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep)
 {
 	struct fy_event *fye = &fyep->e;
 	int ret;
 
 	/* empty document? */
 	if (fye->type == FYET_DOCUMENT_END)
-		return fy_emit_handle_document_end(emit, fyep);
+		return fy_emit_handle_document_end(emit, fyp, fyep);
 
 	ret = fy_emit_push_state(emit, FYES_DOCUMENT_END);
 	if (ret)
 		return ret;
 
-	return fy_emit_streaming_node(emit, fyep, DDNF_ROOT);
+	return fy_emit_streaming_node(emit, fyp, fyep, DDNF_ROOT);
 }
 
-static int fy_emit_handle_sequence_item(struct fy_emitter *emit, struct fy_eventp *fyep, bool first)
+static int fy_emit_handle_sequence_item(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep, bool first)
 {
 	struct fy_event *fye = &fyep->e;
 	struct fy_emit_save_ctx *sc = &emit->s_sc;
 	struct fy_token *fyt_item = NULL;
 	int ret;
 
-	fy_token_unref_rl(emit->recycled_token_list, sc->fyt_last_value);
-	sc->fyt_last_value = NULL;
-
 	switch (fye->type) {
 	case FYET_SEQUENCE_END:
 		fy_emit_sequence_item_epilog(emit, sc, true, sc->fyt_last_value);
 
+		fy_emit_token_unref(emit, fyp, sc->fyt_last_value);
+		sc->fyt_last_value = NULL;
+
 		/* emit epilog */
 		fy_emit_sequence_epilog(emit, sc);
-		/* pop state */
-		ret = fy_emit_pop_sc(emit, sc);
-		/* pop state */
-		fy_emit_goto_state(emit, fy_emit_pop_state(emit));
 
 		/* restore indent and flags */
 		emit->s_indent = sc->s_indent;
 		emit->s_flags = sc->s_flags;
+
+		/* pop state */
+		ret = fy_emit_pop_sc(emit, sc);
+		assert(!ret);
+
+		/* pop state */
+		fy_emit_goto_state(emit, fy_emit_pop_state(emit));
 		return ret;
 
 	case FYET_ALIAS:
@@ -3153,6 +3635,11 @@ static int fy_emit_handle_sequence_item(struct fy_emitter *emit, struct fy_event
 		return -1;
 	}
 
+	if (!first)
+		fy_emit_sequence_item_epilog(emit, sc, false, sc->fyt_last_value);
+	fy_emit_token_unref(emit, fyp, sc->fyt_last_value);
+	sc->fyt_last_value = NULL;
+
 	ret = fy_emit_push_state(emit, FYES_SEQUENCE_ITEM);
 	if (ret)
 		return ret;
@@ -3161,14 +3648,11 @@ static int fy_emit_handle_sequence_item(struct fy_emitter *emit, struct fy_event
 	emit->s_indent = sc->indent;
 	emit->s_flags = sc->flags;
 
-	if (!first)
-		fy_emit_sequence_item_epilog(emit, sc, false, sc->fyt_last_value);
-
 	sc->fyt_last_value = fyt_item;
 
 	fy_emit_sequence_item_prolog(emit, sc, fyt_item);
 
-	ret = fy_emit_streaming_node(emit, fyep, sc->flags);
+	ret = fy_emit_streaming_node(emit, fyp, fyep, sc->flags);
 
 	switch (fye->type) {
 	case FYET_ALIAS:
@@ -3190,18 +3674,14 @@ static int fy_emit_handle_sequence_item(struct fy_emitter *emit, struct fy_event
 	return ret;
 }
 
-static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_eventp *fyep, bool first)
+static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep, bool first)
 {
 	struct fy_event *fye = &fyep->e;
 	struct fy_emit_save_ctx *sc = &emit->s_sc;
 	struct fy_token *fyt_key = NULL;
-	int ret, aflags;
+	const struct fy_token_analysis *ta;
+	int ret;
 	bool simple_key;
-
-	fy_token_unref_rl(emit->recycled_token_list, sc->fyt_last_key);
-	sc->fyt_last_key = NULL;
-	fy_token_unref_rl(emit->recycled_token_list, sc->fyt_last_value);
-	sc->fyt_last_value = NULL;
 
 	simple_key = false;
 
@@ -3211,14 +3691,22 @@ static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_eventp 
 
 		/* emit epilog */
 		fy_emit_mapping_epilog(emit, sc);
-		/* pop state */
-		ret = fy_emit_pop_sc(emit, sc);
-		/* pop state */
-		fy_emit_goto_state(emit, fy_emit_pop_state(emit));
+
+		fy_emit_token_unref(emit, fyp, sc->fyt_last_key);
+		sc->fyt_last_key = NULL;
+		fy_emit_token_unref(emit, fyp, sc->fyt_last_value);
+		sc->fyt_last_value = NULL;
 
 		/* restore indent and flags */
 		emit->s_indent = sc->s_indent;
 		emit->s_flags = sc->s_flags;
+
+		/* pop state */
+		ret = fy_emit_pop_sc(emit, sc);
+		assert(!ret);
+
+		/* pop state */
+		fy_emit_goto_state(emit, fy_emit_pop_state(emit));
 		return ret;
 
 	case FYET_ALIAS:
@@ -3227,8 +3715,8 @@ static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_eventp 
 		break;
 	case FYET_SCALAR:
 		fyt_key = fye->scalar.value;
-		aflags = fy_token_text_analyze(fyt_key);
-		simple_key = !!(aflags & FYTTAF_CAN_BE_SIMPLE_KEY);
+		ta = fy_token_text_analyze(fyt_key);
+		simple_key = !!(ta->flags & FYTTAF_CAN_BE_SIMPLE_KEY);
 		break;
 	case FYET_SEQUENCE_START:
 		fyt_key = fye->sequence_start.sequence_start;
@@ -3254,11 +3742,16 @@ static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_eventp 
 	if (!first)
 		fy_emit_mapping_value_epilog(emit, sc, false, sc->fyt_last_value);
 
+	fy_emit_token_unref(emit, fyp, sc->fyt_last_key);
+	sc->fyt_last_key = NULL;
+	fy_emit_token_unref(emit, fyp, sc->fyt_last_value);
+	sc->fyt_last_value = NULL;
+
 	sc->fyt_last_key = fyt_key;
 
 	fy_emit_mapping_key_prolog(emit, sc, fyt_key, simple_key);
 
-	ret = fy_emit_streaming_node(emit, fyep, sc->flags);
+	ret = fy_emit_streaming_node(emit, fyp, fyep, sc->flags);
 
 	switch (fye->type) {
 	case FYET_ALIAS:
@@ -3280,7 +3773,7 @@ static int fy_emit_handle_mapping_key(struct fy_emitter *emit, struct fy_eventp 
 	return ret;
 }
 
-static int fy_emit_handle_mapping_value(struct fy_emitter *emit, struct fy_eventp *fyep, bool simple)
+static int fy_emit_handle_mapping_value(struct fy_emitter *emit, struct fy_parser *fyp, struct fy_eventp *fyep, bool simple)
 {
 	struct fy_event *fye = &fyep->e;
 	struct fy_emit_save_ctx *sc = &emit->s_sc;
@@ -3315,7 +3808,7 @@ static int fy_emit_handle_mapping_value(struct fy_emitter *emit, struct fy_event
 
 	fy_emit_mapping_value_prolog(emit, sc, fyt_value);
 
-	ret = fy_emit_streaming_node(emit, fyep, sc->flags);
+	ret = fy_emit_streaming_node(emit, fyp, fyep, sc->flags);
 
 	switch (fye->type) {
 	case FYET_ALIAS:
@@ -3349,6 +3842,15 @@ int fy_emit_event_from_parser(struct fy_emitter *emit, struct fy_parser *fyp, st
 	if (emit->state == FYES_NONE)
 		emit->state = FYES_STREAM_START;
 
+	/* handle reset (parser error recovery) */
+	if (fye->type == FYET_STREAM_START && emit->state != FYES_STREAM_START) {
+		if (emit->column != 0)
+			fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		fy_emit_puts_simple(emit, fyewt_document_indicator, "...");
+		fy_emit_putc_simple(emit, fyewt_linebreak, '\n');
+		emit->state = FYES_STREAM_START;
+	}
+
 	fyep = fy_container_of(fye, struct fy_eventp, e);
 
 	fy_eventp_list_add_tail(&emit->queued_events, fyep);
@@ -3358,38 +3860,38 @@ int fy_emit_event_from_parser(struct fy_emitter *emit, struct fy_parser *fyp, st
 
 		switch (emit->state) {
 		case FYES_STREAM_START:
-			ret = fy_emit_handle_stream_start(emit, fyep);
+			ret = fy_emit_handle_stream_start(emit, fyp, fyep);
 			break;
 
 		case FYES_FIRST_DOCUMENT_START:
 		case FYES_DOCUMENT_START:
-			ret = fy_emit_handle_document_start(emit, fyep,
+			ret = fy_emit_handle_document_start(emit, fyp, fyep,
 					emit->state == FYES_FIRST_DOCUMENT_START);
 			break;
 
 		case FYES_DOCUMENT_CONTENT:
-			ret = fy_emit_handle_document_content(emit, fyep);
+			ret = fy_emit_handle_document_content(emit, fyp, fyep);
 			break;
 
 		case FYES_DOCUMENT_END:
-			ret = fy_emit_handle_document_end(emit, fyep);
+			ret = fy_emit_handle_document_end(emit, fyp, fyep);
 			break;
 
 		case FYES_SEQUENCE_FIRST_ITEM:
 		case FYES_SEQUENCE_ITEM:
-			ret = fy_emit_handle_sequence_item(emit, fyep,
+			ret = fy_emit_handle_sequence_item(emit, fyp, fyep,
 					emit->state == FYES_SEQUENCE_FIRST_ITEM);
 			break;
 
 		case FYES_MAPPING_FIRST_KEY:
 		case FYES_MAPPING_KEY:
-			ret = fy_emit_handle_mapping_key(emit, fyep,
+			ret = fy_emit_handle_mapping_key(emit, fyp, fyep,
 					emit->state == FYES_MAPPING_FIRST_KEY);
 			break;
 
 		case FYES_MAPPING_SIMPLE_VALUE:
 		case FYES_MAPPING_VALUE:
-			ret = fy_emit_handle_mapping_value(emit, fyep,
+			ret = fy_emit_handle_mapping_value(emit, fyp, fyep,
 					emit->state == FYES_MAPPING_SIMPLE_VALUE);
 			break;
 
@@ -3425,124 +3927,237 @@ fy_emitter_get_document_state(struct fy_emitter *emit)
 	return emit ? emit->fyds : NULL;
 }
 
+/* ANSI colors and escapes */
+#define A_RESET			"\x1b[0m"
+#define A_BLACK			"\x1b[30m"
+#define A_RED			"\x1b[31m"
+#define A_GREEN			"\x1b[32m"
+#define A_YELLOW		"\x1b[33m"
+#define A_BLUE			"\x1b[34m"
+#define A_MAGENTA		"\x1b[35m"
+#define A_CYAN			"\x1b[36m"
+#define A_LIGHT_GRAY		"\x1b[37m"	/* dark white is gray */
+#define A_GRAY			"\x1b[1;30m"
+#define A_BRIGHT_RED		"\x1b[1;31m"
+#define A_BRIGHT_GREEN		"\x1b[1;32m"
+#define A_BRIGHT_YELLOW		"\x1b[1;33m"
+#define A_BRIGHT_BLUE		"\x1b[1;34m"
+#define A_BRIGHT_MAGENTA	"\x1b[1;35m"
+#define A_BRIGHT_CYAN		"\x1b[1;36m"
+#define A_WHITE			"\x1b[1;37m"
+
+static const char *default_colors[FYEWT_COUNT] = {
+	[fyewt_document_indicator] 		= A_CYAN,
+	[fyewt_tag_directive]			= A_YELLOW,
+	[fyewt_version_directive]		= A_YELLOW,
+	[fyewt_indent]				= A_GREEN,	// when visible only
+	[fyewt_indicator]			= A_YELLOW,	// in extended mode we produce more
+	[fyewt_whitespace]			= A_GREEN,	// when visible only
+	[fyewt_plain_scalar]			= A_WHITE,
+	[fyewt_single_quoted_scalar]		= A_YELLOW,
+	[fyewt_double_quoted_scalar]		= A_YELLOW,
+	[fyewt_literal_scalar]			= A_YELLOW,
+	[fyewt_folded_scalar]			= A_YELLOW,
+	[fyewt_anchor]				= A_BRIGHT_GREEN,
+	[fyewt_tag]				= A_BRIGHT_GREEN,
+	[fyewt_linebreak]			= A_GREEN,	// when visible only
+	[fyewt_alias]				= A_BRIGHT_GREEN,
+	[fyewt_terminating_zero]		= A_BRIGHT_RED,	// when visible only
+	[fyewt_plain_scalar_key]		= A_BRIGHT_CYAN,
+	[fyewt_single_quoted_scalar_key]	= A_BRIGHT_CYAN,
+	[fyewt_double_quoted_scalar_key]	= A_BRIGHT_CYAN,
+	[fyewt_comment]				= A_BRIGHT_BLUE,
+	// extended
+	[fyewt_indicator_question_mark]		= A_MAGENTA,
+	[fyewt_indicator_colon]			= A_MAGENTA,
+	[fyewt_indicator_dash]			= A_MAGENTA,
+	[fyewt_indicator_left_bracket]		= A_MAGENTA,
+	[fyewt_indicator_right_bracket]		= A_MAGENTA,
+	[fyewt_indicator_left_brace]		= A_MAGENTA,
+	[fyewt_indicator_right_brace]		= A_MAGENTA,
+	[fyewt_indicator_comma]			= A_MAGENTA,
+	[fyewt_indicator_bar]			= A_MAGENTA,
+	[fyewt_indicator_greater]		= A_MAGENTA,
+	[fyewt_indicator_single_quote_start]	= A_YELLOW,
+	[fyewt_indicator_single_quote_end]	= A_YELLOW,
+	[fyewt_indicator_double_quote_start]	= A_YELLOW,
+	[fyewt_indicator_double_quote_end]	= A_YELLOW,
+	[fyewt_indicator_ambersand]		= A_BRIGHT_GREEN,
+	[fyewt_indicator_star]			= A_MAGENTA,
+	[fyewt_indicator_chomp]			= A_MAGENTA,
+	[fyewt_indicator_explicit_indent]	= A_MAGENTA,
+};
+
+static void fy_emitter_fill_default_colors(struct fy_emitter *fye)
+{
+	unsigned int i;
+
+	for (i = 0; i < FYEWT_COUNT; i++) {
+		if (!fye->xcfg.colors[i])
+			fye->xcfg.colors[i] = default_colors[i];
+	}
+}
+
+static FILE *fy_emitter_get_output_fp(struct fy_emitter *fye)
+{
+	switch (fye->xcfg.xflags & (FYEXCF_OUTPUT_MASK << FYEXCF_OUTPUT_SHIFT)) {
+	case FYEXCF_OUTPUT_STDOUT:
+		return stdout;
+	case FYEXCF_OUTPUT_STDERR:
+		return stderr;
+	case FYEXCF_OUTPUT_FILE:
+		return fye->xcfg.output_fp;
+	case FYEXCF_OUTPUT_FILENAME:
+		if (!fye->owned_output_fp && fye->xcfg.output_filename)
+			fye->owned_output_fp = fopen(fye->xcfg.output_filename, "wb");
+		return fye->owned_output_fp;
+	default:
+		break;
+	}
+	return NULL;
+}
+
+static int fy_emitter_get_output_fd(struct fy_emitter *fye)
+{
+	switch (fye->xcfg.xflags & (FYEXCF_OUTPUT_MASK << FYEXCF_OUTPUT_SHIFT)) {
+	case FYEXCF_OUTPUT_STDOUT:
+		return STDOUT_FILENO;
+	case FYEXCF_OUTPUT_STDERR:
+		return STDERR_FILENO;
+	case FYEXCF_OUTPUT_FD:
+		return fye->xcfg.output_fd;
+	default:
+		break;
+	}
+	return -1;
+}
+
+
+static int fy_emitter_null_output(struct fy_emitter *fye, enum fy_emitter_write_type type, const char *str, int len, void *userdata)
+{
+	return len;
+}
+
+static inline ssize_t raw_default_output(FILE *fp, int fd, const char *data, size_t len)
+{
+	ssize_t wrn, twrn;
+
+	if (fp)
+		return fwrite(data, 1, len, fp);
+
+	wrn = 0;
+	if (fd >= 0) {
+		while (len > 0) {
+			do {
+				twrn = write(fd, data, len);
+			} while (twrn == -1 && errno == EAGAIN);
+			if (twrn <= 0)
+				return wrn;
+			data += twrn;
+			len -= (size_t)twrn;
+			wrn += twrn;
+		}
+	}
+	return wrn;
+}
+
 int fy_emitter_default_output(struct fy_emitter *fye, enum fy_emitter_write_type type, const char *str, int len, void *userdata)
 {
 	struct fy_emitter_default_output_data d_local, *d;
 	FILE *fp;
+	int fd;
 	int ret, w;
 	const char *color = NULL;
 	const char *s, *e;
+	const char *visible;
 
 	d = userdata;
 	if (!d) {
-		/* kinda inneficient but should not matter */
 		d = &d_local;
-		d->fp = stdout;
-		d->colorize = isatty(STDOUT_FILENO);
-		d->visible = false;
+		fp = fye->output_fp;
+		fd = fye->output_fd;
+		d->colorize = fye->output_colorize;
+		d->visible = !!(fye->xcfg.xflags & FYEXCF_VISIBLE_WS);
+	} else {
+		fp = d->fp;
+		fd = -1;
 	}
-	fp = d->fp;
+
+	if (!fp && fd < 0)
+		return len;
 
 	s = str;
 	e = str + len;
+
 	if (d->colorize) {
+
+		color = fye->xcfg.colors[type];
+
+		/* visible whitespace */
 		switch (type) {
-		case fyewt_document_indicator:
-			color = "\x1b[36m";
-			break;
-		case fyewt_tag_directive:
-		case fyewt_version_directive:
-			color = "\x1b[33m";
-			break;
 		case fyewt_indent:
-			if (d->visible) {
-				fputs("\x1b[32m", fp);
-				while (s < e && (w = fy_utf8_width_by_first_octet(((uint8_t)*s))) > 0) {
-					/* open box - U+2423 */
-					fputs("\xe2\x90\xa3", fp);
-					s += w;
-				}
-				fputs("\x1b[0m", fp);
-				return len;
-			}
-			break;
-		case fyewt_indicator:
-			if (len == 1 && (str[0] == '\'' || str[0] == '"'))
-				color = "\x1b[33m";
-			else if (len == 1 && str[0] == '&')
-				color = "\x1b[32;1m";
-			else
-				color = "\x1b[35m";
-			break;
 		case fyewt_whitespace:
-			if (d->visible) {
-				fputs("\x1b[32m", fp);
-				while (s < e && (w = fy_utf8_width_by_first_octet(((uint8_t)*s))) > 0) {
-					/* symbol for space - U+2420 */
-					/* symbol for interpunct - U+00B7 */
-					fputs("\xc2\xb7", fp);
-					s += w;
-				}
-				fputs("\x1b[0m", fp);
-				return len;
-			}
-			break;
-		case fyewt_plain_scalar:
-			color = "\x1b[37;1m";
-			break;
-		case fyewt_single_quoted_scalar:
-		case fyewt_double_quoted_scalar:
-			color = "\x1b[33m";
-			break;
-		case fyewt_literal_scalar:
-		case fyewt_folded_scalar:
-			color = "\x1b[33m";
-			break;
-		case fyewt_anchor:
-		case fyewt_tag:
-		case fyewt_alias:
-			color = "\x1b[32;1m";
-			break;
 		case fyewt_linebreak:
-			if (d->visible) {
-				fputs("\x1b[32m", fp);
-				while (s < e && (w = fy_utf8_width_by_first_octet(((uint8_t)*s))) > 0) {
-					/* symbol for space - ^M */
-					/* fprintf(fp, "^M\n"); */
-					/* down arrow - U+2193 */
-					fputs("\xe2\x86\x93\n", fp);
-					s += w;
-				}
-				fputs("\x1b[0m", fp);
-				return len;
-			}
-			color = NULL;
-			break;
 		case fyewt_terminating_zero:
-			color = NULL;
-			break;
-		case fyewt_plain_scalar_key:
-		case fyewt_single_quoted_scalar_key:
-		case fyewt_double_quoted_scalar_key:
-			color = "\x1b[36;1m";
-			break;
-		case fyewt_comment:
-			color = "\x1b[34;1m";
+
+			/* if not visible don't bother */
+			if (!d->visible) {
+				color = NULL;
+				break;
+			}
+
+			if (color)
+				raw_default_output(fp, fd, color, strlen(color));
+
+			switch (type) {
+			case fyewt_indent:
+				/* open box - U+2423 */
+				visible = "\xe2\x90\xa3";
+				break;
+			case fyewt_whitespace:
+				/* symbol for space - U+2420 */
+				/* symbol for interpunct - U+00B7 */
+				visible = "\xc2\xb7";
+				break;
+			case fyewt_linebreak:
+				/* down arrow - U+2193 */
+				visible = "\xe2\x86\x93" "\n";
+				break;
+			case fyewt_terminating_zero:
+				visible = "\\0";
+				break;
+			default:
+				visible = "";	/* should never happen */
+				break;
+
+			}
+
+			while (s < e && (w = fy_utf8_width_by_first_octet(((uint8_t)*s))) > 0) {
+				raw_default_output(fp, fd, visible, strlen(visible));
+				s += w;
+			}
+
+			if (color)
+				raw_default_output(fp, fd, A_RESET, strlen(A_RESET));
+			return len;
+
+		default:
 			break;
 		}
-	}
+	} else
+		color = NULL;
 
 	/* don't output the terminating zero */
 	if (type == fyewt_terminating_zero)
 		return len;
 
 	if (color)
-		fputs(color, fp);
+		raw_default_output(fp, fd, color, strlen(color));
 
-	ret = fwrite(str, 1, len, fp);
+	ret = (int)raw_default_output(fp, fd, str, len);
 
 	if (color)
-		fputs("\x1b[0m", fp);
+		raw_default_output(fp, fd, A_RESET, strlen(A_RESET));
 
 	return ret;
 }
@@ -3584,5 +4199,35 @@ int fy_document_default_emit_to_fp(struct fy_document *fyd, FILE *fp)
 err_emit:
 	fy_emit_cleanup(emit);
 err_setup:
+	return -1;
+}
+
+int fy_emit_body_node(struct fy_emitter *emit, struct fy_node *fyn)
+{
+	struct fy_document_iterator *fydi = NULL;
+	struct fy_event *fye;
+	struct fy_document_iterator_cfg cfg;
+	int rc;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.flags = FYDICF_WANT_BODY_EVENTS;
+	cfg.fyd = fyn->fyd;
+	cfg.iterate_root = fyn;
+
+	fydi = fy_document_iterator_create_cfg(&cfg);
+	if (!fydi)
+		goto err_out;
+
+	while ((fye = fy_document_iterator_generate_next(fydi)) != NULL) {
+		rc = fy_emit_event(emit, fye);
+		if (rc)
+			goto err_out;
+	}
+
+	fy_document_iterator_destroy(fydi);
+	return 0;
+
+err_out:
+	fy_document_iterator_destroy(fydi);
 	return -1;
 }

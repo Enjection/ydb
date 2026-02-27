@@ -6,12 +6,12 @@ LICENSE(MIT)
 
 LICENSE_TEXTS(.yandex_meta/licenses.list.txt)
 
-VERSION(0.8)
+VERSION(0.9.4)
 
-ORIGINAL_SOURCE(https://github.com/pantoniou/libfyaml/archive/v0.8.tar.gz)
+ORIGINAL_SOURCE(https://github.com/pantoniou/libfyaml/archive/v0.9.4.tar.gz)
 
 PEERDIR(
-    contrib/libs/xxhash
+    contrib/libs/libfyaml/b3portable
 )
 
 ADDINCL(
@@ -19,7 +19,11 @@ ADDINCL(
     contrib/libs/libfyaml/include
     contrib/libs/libfyaml/src
     contrib/libs/libfyaml/src/lib
-    contrib/libs/xxhash
+    contrib/libs/libfyaml/src/util
+    contrib/libs/libfyaml/src/xxhash
+    contrib/libs/libfyaml/src/thread
+    contrib/libs/libfyaml/src/allocator
+    contrib/libs/libfyaml/src/blake3
 )
 
 NO_COMPILER_WARNINGS()
@@ -34,22 +38,40 @@ SRCS(
     src/lib/fy-accel.c
     src/lib/fy-atom.c
     src/lib/fy-composer.c
-    src/lib/fy-ctype.c
+    src/lib/fy-composer-diag.c
     src/lib/fy-diag.c
     src/lib/fy-doc.c
+    src/lib/fy-doc-diag.c
     src/lib/fy-docbuilder.c
+    src/lib/fy-docbuilder-diag.c
     src/lib/fy-docstate.c
     src/lib/fy-dump.c
     src/lib/fy-emit.c
     src/lib/fy-event.c
     src/lib/fy-input.c
+    src/lib/fy-input-diag.c
     src/lib/fy-parse.c
+    src/lib/fy-parse-diag.c
     src/lib/fy-path.c
     src/lib/fy-token.c
     src/lib/fy-types.c
-    src/lib/fy-utf8.c
-    src/lib/fy-utils.c
     src/lib/fy-walk.c
+    src/util/fy-blob.c
+    src/util/fy-ctype.c
+    src/util/fy-utf8.c
+    src/util/fy-utils.c
+    src/xxhash/xxhash.c
+    src/thread/fy-thread.c
+    src/allocator/fy-allocator.c
+    src/allocator/fy-allocator-auto.c
+    src/allocator/fy-allocator-dedup.c
+    src/allocator/fy-allocator-linear.c
+    src/allocator/fy-allocator-malloc.c
+    src/allocator/fy-allocator-mremap.c
+    src/blake3/blake3_host_state.c
+    src/blake3/blake3_backend.c
+    src/blake3/blake3_be_cpusimd.c
+    src/blake3/fy-blake3.c
 )
 
 END()

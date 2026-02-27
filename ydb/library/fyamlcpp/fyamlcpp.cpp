@@ -26,6 +26,10 @@ enum class EErrorModule {
     Build = FYEM_BUILD,
     Internal = FYEM_INTERNAL,
     System = FYEM_SYSTEM,
+    Emit = FYEM_EMIT,
+    Typeset = FYEM_TYPESET,
+    Decode = FYEM_DECODE,
+    Encode = FYEM_ENCODE,
     Max = FYEM_MAX,
 };
 
@@ -97,6 +101,24 @@ enum class EEmitterWriteType {
     SingleQuotedScalarKey = fyewt_single_quoted_scalar_key,
     DoubleQuotedScalarKey = fyewt_double_quoted_scalar_key,
     Comment = fyewt_comment,
+    IndicatorQuestionMark = fyewt_indicator_question_mark,
+    IndicatorColon = fyewt_indicator_colon,
+    IndicatorDash = fyewt_indicator_dash,
+    IndicatorLeftBracket = fyewt_indicator_left_bracket,
+    IndicatorRightBracket = fyewt_indicator_right_bracket,
+    IndicatorLeftBrace = fyewt_indicator_left_brace,
+    IndicatorRightBrace = fyewt_indicator_right_brace,
+    IndicatorComma = fyewt_indicator_comma,
+    IndicatorBar = fyewt_indicator_bar,
+    IndicatorGreater = fyewt_indicator_greater,
+    IndicatorSingleQuoteStart = fyewt_indicator_single_quote_start,
+    IndicatorSingleQuoteEnd = fyewt_indicator_single_quote_end,
+    IndicatorDoubleQuoteStart = fyewt_indicator_double_quote_start,
+    IndicatorDoubleQuoteEnd = fyewt_indicator_double_quote_end,
+    IndicatorAmbersand = fyewt_indicator_ambersand,
+    IndicatorStar = fyewt_indicator_star,
+    IndicatorChomp = fyewt_indicator_chomp,
+    IndicatorExplicitIndent = fyewt_indicator_explicit_indent,
 };
 
 enum class ECommentPlacement {
@@ -113,6 +135,7 @@ enum EEmitterCfgFlags {
     StripDoc = FYECF_STRIP_DOC,
     NoEndingNewline = FYECF_NO_ENDING_NEWLINE,
     StripEmptyKv = FYECF_STRIP_EMPTY_KV,
+    ExtendedCfg = FYECF_EXTENDED_CFG,
     IndentDefault = FYECF_INDENT_DEFAULT,
     Indent1 = FYECF_INDENT_1,
     Indent2 = FYECF_INDENT_2,
@@ -136,6 +159,9 @@ enum EEmitterCfgFlags {
     ModeJsonOneline = FYECF_MODE_JSON_ONELINE,
     ModeDejson = FYECF_MODE_DEJSON,
     ModePretty = FYECF_MODE_PRETTY,
+    ModeManual = FYECF_MODE_MANUAL,
+    ModeFlowCompact = FYECF_MODE_FLOW_COMPACT,
+    ModeJsonCompact = FYECF_MODE_JSON_COMPACT,
     DocStartMarkAuto = FYECF_DOC_START_MARK_AUTO,
     DocStartMarkOff = FYECF_DOC_START_MARK_OFF,
     DocStartMarkOn = FYECF_DOC_START_MARK_ON,
@@ -245,6 +271,8 @@ enum class ETokenType {
 
     PeMethod = FYTT_PE_METHOD,
     SeMethod = FYTT_SE_METHOD,
+    PeBang = FYTT_PE_BANG,
+    PeAt = FYTT_PE_AT,
 };
 
 enum class EComposerReturn {

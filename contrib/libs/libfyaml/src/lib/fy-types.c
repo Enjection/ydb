@@ -11,13 +11,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -33,3 +26,4 @@ FY_PARSE_TYPE_DEFINE_SIMPLE(indent);
 FY_PARSE_TYPE_DEFINE_SIMPLE(simple_key);
 FY_PARSE_TYPE_DEFINE_SIMPLE(parse_state_log);
 FY_PARSE_TYPE_DEFINE_SIMPLE(flow);
+FY_PARSE_TYPE_DEFINE_SIMPLE(streaming_alias);

@@ -30,6 +30,7 @@
 #include "fy-docstate.h"
 #include "fy-accel.h"
 #include "fy-token.h"
+#include "fy-input.h"
 
 struct fy_document;
 
@@ -53,6 +54,7 @@ struct fy_walk_result {
 	struct fy_path_exec *fypx;
 	enum fy_walk_result_type type;
 	union {
+		uintptr_t _clean[2];
 		struct fy_node *fyn;
 		double number;
 		char *string;
@@ -123,6 +125,9 @@ enum fy_path_expr_type {
 	fpet_logical_or,	/* first non null result set */
 	fpet_logical_and,	/* the last non null result set */
 
+	fpet_select,		/* set selection */
+	fpet_unselect,		/* negation of set selection */
+
 	fpet_eq,		/* equal expression */
 	fpet_neq,		/* not equal */
 	fpet_lt,		/* less than */
@@ -155,6 +160,7 @@ static inline bool fy_path_expr_type_is_valid(enum fy_path_expr_type type)
 	return type >= fpet_root && type < FPET_COUNT;
 }
 
+/* XXX do neg and reg check */
 static inline bool fy_path_expr_type_is_single_result(enum fy_path_expr_type type)
 {
 	return type == fpet_root ||
@@ -259,7 +265,8 @@ struct fy_method {
 		struct fy_path_exec *fypx, int level,
 		struct fy_path_expr *expr,
 		struct fy_walk_result *input,
-		struct fy_walk_result **args, int nargs);
+		struct fy_walk_result **args, int nargs,
+		bool *errorp);
 };
 
 FY_TYPE_FWD_DECL_LIST(path_expr);
@@ -316,6 +323,7 @@ struct fy_path_parser {
 	bool stream_start_produced;
 	bool stream_end_produced;
 	bool stream_error;
+	bool owns_diag;
 	int token_activity_counter;
 
 	struct fy_input *fyi;
@@ -387,7 +395,8 @@ fy_path_exec_unref(struct fy_path_exec *fypx)
 
 struct fy_walk_result *
 fy_path_expr_execute(struct fy_path_exec *fypx, int level, struct fy_path_expr *expr,
-		     struct fy_walk_result *input, enum fy_path_expr_type ptype);
+		     struct fy_walk_result *input, enum fy_path_expr_type ptype,
+		     bool *errorp);
 
 static inline struct fy_walk_result_list *
 fy_path_exec_walk_result_rl(struct fy_path_exec *fypx)

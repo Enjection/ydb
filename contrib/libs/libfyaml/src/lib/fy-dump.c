@@ -11,13 +11,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -91,6 +84,9 @@ const char *fy_token_type_txt[FYTT_COUNT] = {
 
 	[FYTT_PE_METHOD]		= "PE_METHOD",
 	[FYTT_SE_METHOD]		= "SE_METHOD",
+
+	[FYTT_PE_BANG]			= "PE_BANG",
+	[FYTT_PE_AT]			= "PE_AT",
 };
 
 char *fy_token_dump_format(struct fy_token *fyt, char *buf, size_t bufsz)
@@ -136,7 +132,7 @@ char *fy_token_dump_format(struct fy_token *fyt, char *buf, size_t bufsz)
 		/* not too large */
 		if (size > 20)
 			size = 20;
-		fy_utf8_format_text_a(text, size, fyue_doublequote, &text);
+		text = fy_utf8_format_text_a(text, size, fyue_doublequote);
 		size = strlen(text);
 		if (size > 10) {
 			sfx = "...\"";

@@ -162,7 +162,7 @@ fy_composer_process_event_private(struct fy_composer *fyc, struct fy_event *fye,
 		if (!stop_req)
 			stop_req = ret == FYCR_OK_STOP;
 
-		rc = fy_document_builder_process_event(fypp->fydb, fyep);
+		rc = fy_document_builder_process_event(fypp->fydb, fyep ? &fyep->e : NULL);
 		if (rc == 0)
 			return FYCR_OK_CONTINUE;
 		fyc_error_check(fyc, rc > 0, err_out,
@@ -172,6 +172,9 @@ fy_composer_process_event_private(struct fy_composer *fyc, struct fy_event *fye,
 		fyd = fy_document_builder_take_document(fypp->fydb);
 		fyc_error_check(fyc, fyd, err_out,
 				"fy_document_builder_take_document() failed\n");
+
+		fy_document_builder_destroy(fypp->fydb);
+		fypp->fydb = NULL;
 
 		fypc_last->map.is_complex_key = true;
 		fypc_last->map.accumulating_complex_key = false;
@@ -206,7 +209,7 @@ fy_composer_process_event_private(struct fy_composer *fyc, struct fy_event *fye,
 				"ops->create_document_builder() failed\n");
 
 		/* and pass the current event; must return 0 since we know it's a collection start */
-		rc = fy_document_builder_process_event(fypp->fydb, fyep);
+		rc = fy_document_builder_process_event(fypp->fydb, fyep ? &fyep->e : NULL);
 		fyc_error_check(fyc, !rc, err_out,
 				"fy_document_builder_process_event() failed\n");
 
@@ -313,6 +316,49 @@ err_out:
 	return FYCR_ERROR;
 }
 
+void
+fy_composer_halt_one(struct fy_composer *fyc, struct fy_path *fypp, enum fy_composer_return rc)
+{
+	const struct fy_composer_ops *ops;
+	struct fy_eventp ev_none;
+	struct fy_path_component *fypc;
+
+	/* for normal stop, we don't teardown */
+	if (rc == FYCR_OK_STOP)
+		return;
+
+	ops = fyc->cfg.ops;
+	assert(ops);
+
+	memset(&ev_none, 0, sizeof(ev_none));
+	ev_none.e.type = FYET_NONE;
+
+	/* pump FYET_NONEs to clean the stack */
+
+	while ((fypc = fy_path_component_list_tail(&fypp->components)) != NULL) {
+
+		ops->process_event(fyc, fypp, &ev_none.e);
+
+		fy_path_component_list_del(&fypp->components, fypc);
+		fy_path_component_free(fypc);
+	}
+
+	/* and the final one to clean the root */
+	ops->process_event(fyc, fypp, &ev_none.e);
+}
+
+void fy_composer_halt(struct fy_composer *fyc, enum fy_composer_return rc)
+{
+	struct fy_path *fypp;
+
+	/* for normal stop, we don't teardown */
+	if (rc == FYCR_OK_STOP)
+		return;
+
+	for (fypp = fy_path_list_head(&fyc->paths); fypp; fypp = fy_path_next(&fyc->paths, fypp))
+		fy_composer_halt_one(fyc, fypp, rc);
+}
+
 enum fy_composer_return
 fy_composer_process_event(struct fy_composer *fyc, struct fy_event *fye)
 {
@@ -320,16 +366,19 @@ fy_composer_process_event(struct fy_composer *fyc, struct fy_event *fye)
 	int rc;
 
 	if (!fyc || !fye)
-		return -1;
+		return FYCR_ERROR;
 
 	/* start at the head */
 	fypp = fy_path_list_head(&fyc->paths);
 
 	/* no top? something's very out of order */
 	if (!fypp)
-		return -1;
+		return FYCR_ERROR;
 
 	rc = fy_composer_process_event_private(fyc, fye, fypp);
+
+	if (rc == FYCR_ERROR || rc == FYCR_OK_STOP)
+		fy_composer_halt(fyc, rc);
 
 	return rc;
 }
@@ -353,4 +402,44 @@ struct fy_diag *fy_composer_get_diag(struct fy_composer *fyc)
 	if (!fyc)
 		return NULL;
 	return fyc->cfg.diag;
+}
+
+struct fy_path *fy_composer_get_root_path(struct fy_composer *fyc)
+{
+	if (!fyc)
+		return NULL;
+	return fy_path_list_head(&fyc->paths);
+}
+
+struct fy_path *fy_composer_get_next_path(struct fy_composer *fyc, struct fy_path *fypp)
+{
+	if (!fyc || !fypp)
+		return NULL;
+	return fy_path_next(&fyc->paths, fypp);
+}
+
+struct fy_path *fy_composer_get_path(struct fy_composer *fyc)
+{
+	struct fy_path *fypp, *fyppt;
+	struct fy_path_component *fypc_last;
+
+	if (!fyc)
+		return NULL;
+
+	fypp = fy_path_list_head(&fyc->paths);
+	if (!fypp)
+		return NULL;
+
+	/* traverse until we find the last non complex key acculating */
+	for (;;) {
+		fypc_last = fy_path_component_list_tail(&fypp->components);
+		if (!fy_path_component_is_mapping(fypc_last) || !fypc_last->map.accumulating_complex_key)
+			break;
+		fyppt = fy_path_next(&fyc->paths, fypp);
+		if (!fyppt)
+			break;
+		fypp = fyppt;
+	}
+
+	return fypp;
 }
