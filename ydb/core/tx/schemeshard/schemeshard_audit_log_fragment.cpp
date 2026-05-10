@@ -1,5 +1,7 @@
 #include "schemeshard_audit_log_fragment.h"
 
+#include "schemeshard__op_traits.h"
+
 #include <ydb/core/base/path.h>
 #include <ydb/core/protos/flat_scheme_op.pb.h>
 #include <ydb/core/protos/index_builder.pb.h>
@@ -322,7 +324,9 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetMkDir().GetName()}));
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable:
-        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreateTable().GetName()}));
+        // Per-op module: see schemeshard__operation_create_table.cpp.
+        TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::
+            CollectChangingPaths(tx, result);
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreatePersQueueGroup:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreatePersQueueGroup().GetName()}));

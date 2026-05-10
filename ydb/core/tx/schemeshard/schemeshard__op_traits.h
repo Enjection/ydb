@@ -15,10 +15,19 @@ namespace NKikimr::NSchemeShard {
 
 using TTxTransaction = NKikimrSchemeOp::TModifyScheme;
 
+enum EOperationClass {
+    Create = 0,
+    Alter,
+    Drop,
+    Other,
+    Unknown
+};
+
 struct TSchemeTxTraitsFallback {
     constexpr inline static bool CreateDirsFromName = false;
     constexpr inline static bool CreateAdditionalDirs = false;
     constexpr inline static bool NeedRewrite = false;
+    constexpr inline static EOperationClass Class = EOperationClass::Unknown;
 };
 
 template <NKikimrSchemeOp::EOperationType opType>
@@ -36,6 +45,16 @@ struct TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>
     : public TSchemeTxTraitsFallback
 {
     constexpr inline static bool CreateDirsFromName = true;
+    constexpr inline static EOperationClass Class = EOperationClass::Create;
+
+    static TVector<ISubOperation::TPtr> MakeOperationParts(
+        const TOperation& op,
+        const TTxTransaction& tx,
+        TOperationContext& context);
+
+    static void CollectChangingPaths(
+        const TTxTransaction& tx,
+        TVector<TString>& out);
 };
 
 template <>

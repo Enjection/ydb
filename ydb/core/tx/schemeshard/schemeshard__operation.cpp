@@ -1363,10 +1363,9 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
     case NKikimrSchemeOp::EOperationType::ESchemeOpForceDropUnsafe:
         return {CreateForceDropUnsafe(op.NextPartId(), tx)};
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable:
-        if (tx.GetCreateTable().HasCopyFromTable()) {
-            return CreateCopyTable(op.NextPartId(), tx, context); // Copy indexes table as well as common table
-        }
-        return {CreateNewTable(op.NextPartId(), tx)};
+        // Per-op module: see schemeshard__operation_create_table.cpp.
+        return TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::
+            MakeOperationParts(op, tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable:
         return CreateConsistentAlterTable(op.NextPartId(), tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpSplitMergeTablePartitions:
