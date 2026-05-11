@@ -34,6 +34,34 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
 
 One line. The codegen-emitted `CollectChangingPaths` is the dispatch.
 
+### Audit log example end-to-end
+
+```cpp
+// A CREATE TABLE request arrives:
+NKikimrSchemeOp::TModifyScheme tx;
+tx.SetOperationType(NKikimrSchemeOp::ESchemeOpCreateTable);
+tx.SetWorkingDir("/Root/Db");
+tx.MutableCreateTable()->SetName("Users");
+
+// Audit subsystem calls:
+const auto fragment = MakeAuditLogFragment(tx);
+
+// fragment.Paths == {"/Root/Db/Users"}
+```
+
+What happened:
+
+1. `MakeAuditLogFragment` calls `ExtractChangingPaths(tx)`.
+2. End state: `ExtractChangingPaths` is one-line delegation to `NGenerated::NOpHandlers::CollectChangingPaths(tx)`.
+3. Codegen-emitted switch routes by `tx.GetOperationType()` to `CollectChangingPaths_ESchemeOpCreateTable`.
+4. That handler (defined in `schemeshard__operation_create_table.cpp` via `YDB_DEFINE_OP_AUDIT`) runs:
+   ```cpp
+   paths.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreateTable().GetName()}));
+   ```
+5. Audit fragment's `Paths` field carries `["/Root/Db/Users"]`.
+
+The path from the request to the audit fragment is fully type-checked at compile time and resolved at link time. No virtual dispatch, no `if constexpr` chains, no runtime registry.
+
 ## Migration-time scaffolding (temporary)
 
 Until every op is migrated we need a way to incrementally move ops without breaking everything else. **The pieces below are scaffolding — they all get deleted at the end.**
@@ -67,7 +95,6 @@ After full migration only step 1 remains.
 
 - `ESchemeOpCreateTable` migrated as the pilot (1 of ~130).
 - All scaffolding in place: YAML, codegen, macros, central preludes.
-- Trait pattern alternative is in PR #23; this codegen pattern is PR #25.
 
 ## End-state cleanup (the "we're done" PR)
 
