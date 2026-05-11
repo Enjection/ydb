@@ -6,8 +6,15 @@ SRCS(
 
 PEERDIR(
     library/cpp/getopt
-    ydb/core/protos
-    ydb/core/tx/schemeshard
+    ydb/tools/ss_tool/lib
 )
 
 END()
+
+RECURSE(
+    lib
+)
+
+RECURSE_FOR_TESTS(
+    ut
+)

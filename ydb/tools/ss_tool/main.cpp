@@ -4,83 +4,23 @@
 // per-op metadata at compile time. The per-op `.cpp` view ("show me everything
 // about CreateTable") lives in the source. This tool exposes the orthogonal
 // by-aspect view ("show me all Create-class ops", "show me ops that still
-// lack CollectChangingPaths") by iterating the proto enum and reading the
-// trait fields via the existing DispatchOp infrastructure.
+// lack CollectChangingPaths") via the testable helpers in lib/op_inspect.
 
-#include <ydb/core/tx/schemeshard/schemeshard__dispatch_op.h>
-#include <ydb/core/tx/schemeshard/schemeshard__op_traits.h>
-
-#include <ydb/core/protos/flat_scheme_op.pb.h>
-#include <ydb/core/protos/schemeshard/operations.pb.h>
+#include <ydb/tools/ss_tool/lib/op_inspect.h>
 
 #include <library/cpp/getopt/last_getopt.h>
 
 #include <util/generic/hash.h>
-#include <util/generic/hash_set.h>
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
 #include <util/stream/output.h>
 #include <util/string/builder.h>
 
-#include <utility>
-
 namespace {
 
 using namespace NKikimr::NSchemeShard;
+using namespace NKikimr::NSchemeShard::NSsTool;
 namespace NSO = NKikimrSchemeOp;
-
-// One row in the tool's tables: identity (name + enum number) plus the
-// trait-derived metadata. Identity is purely runtime info that does not
-// belong on the trait; the rest is mirrored from TOpDescriptor in
-// schemeshard__op_traits.h, which is the single source of truth for trait
-// fields. Extending the trait does NOT require changing this file unless we
-// want to expose the new field in `ops list` formatting.
-struct TOpRow {
-    TString Name;
-    NSO::EOperationType Type{};
-    TOpDescriptor Desc;
-};
-
-TStringBuf ClassName(EOperationClass c) {
-    switch (c) {
-        case EOperationClass::Create:  return "Create";
-        case EOperationClass::Alter:   return "Alter";
-        case EOperationClass::Drop:    return "Drop";
-        case EOperationClass::Other:   return "Other";
-        case EOperationClass::Unknown: return "Unknown";
-    }
-    return "?";
-}
-
-TOpRow CollectRow(NSO::EOperationType opType) {
-    TOpRow row;
-    row.Type = opType;
-    row.Name = NSO::EOperationType_Name(opType);
-
-    // DispatchOp routes by tx.GetOperationType(); feed it a synthetic tx and
-    // hand the matched trait type to NSchemeShard::Describe<>().
-    NSO::TModifyScheme tx;
-    tx.SetOperationType(opType);
-    DispatchOp(tx, [&](auto traits) {
-        row.Desc = Describe<decltype(traits)>();
-    });
-
-    return row;
-}
-
-TVector<TOpRow> AllOps() {
-    TVector<TOpRow> result;
-    THashSet<int> seen;
-    const auto* d = NSO::EOperationType_descriptor();
-    for (int i = 0; i < d->value_count(); ++i) {
-        const auto* v = d->value(i);
-        if (!seen.insert(v->number()).second) {
-            continue; // proto enum may carry aliases sharing one number
-        }
-        result.push_back(CollectRow(static_cast<NSO::EOperationType>(v->number())));
-    }
-    return result;
-}
 
 TString FormatFlags(const TOpDescriptor& d) {
     TStringBuilder sb;
@@ -112,16 +52,6 @@ void PrintRow(const TOpRow& op) {
          << "\t" << (op.Desc.HasCollectChangingPaths ? "yes" : "no")
          << "\t" << FormatFlags(op.Desc)
          << Endl;
-}
-
-bool MethodKnown(const TString& name) {
-    return name == "MakeOperationParts" || name == "CollectChangingPaths";
-}
-
-bool HasMethod(const TOpDescriptor& d, const TString& name) {
-    if (name == "MakeOperationParts")   return d.HasMakeOperationParts;
-    if (name == "CollectChangingPaths") return d.HasCollectChangingPaths;
-    return false;
 }
 
 int CmdList(int argc, const char** argv) {
