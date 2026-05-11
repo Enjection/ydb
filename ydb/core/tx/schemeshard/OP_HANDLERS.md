@@ -96,12 +96,14 @@ No silent failures. Every mistake is caught before the change reaches users.
 
 ## Tooling
 
-`ss_tool` (`ydb/tools/ss_tool/`) reports migration progress:
+`ss_tool` (`ydb/tools/ss_tool/`) is the by-aspect view of what the schemeshard supports — the cross-cutting counterpart to the per-op `.cpp` view. Permanent surface, useful long after migration finishes.
 
 ```
-ss_tool ops list [--registered|--unregistered]
-ss_tool ops show <OpName>
-ss_tool ops migration-status
+ss_tool ops list                  # every op the schemeshard knows about
+ss_tool ops show <OpName>         # everything about one op
+ss_tool ops migration-status      # progress dashboard (mid-migration only)
 ```
 
-This tool itself is migration-time scaffolding — once every op is registered, `migration-status` always reports "100% — done." Keep it for documentation; or delete after the cleanup PR.
+During migration the rows include `IsRegistered` so the tool doubles as a progress dashboard. The fields the tool exposes will grow as the codegen learns more about each op (e.g. inferred audit field, factory signature class, related sub-ops); the tool framework stays the same.
+
+Only `migration-status` is migration-scoped — it returns "100% — done" once the YAML is empty and can be removed in the cleanup PR. `list` and `show` stay.
