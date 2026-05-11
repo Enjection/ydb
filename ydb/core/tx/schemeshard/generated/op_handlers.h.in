@@ -69,9 +69,10 @@ inline std::optional<TVector<TString>> TryCollectChangingPaths(
     }
 }
 
-// Runtime mirror of IsRegistered<>::value, for tooling that iterates the
-// proto enum at runtime (e.g. ss_tool).
-inline bool IsOpRegistered(NKikimrSchemeOp::EOperationType opType) {
+// Runtime mirror of IsRegistered<>::value, usable in both runtime contexts
+// (ss_tool walking the proto enum) and constexpr contexts (static_assert in
+// tests). Single entry point for "is this op migrated?"
+inline constexpr bool IsOpRegistered(NKikimrSchemeOp::EOperationType opType) {
     switch (opType) {
 {% for op in migratedOps %}
     case NKikimrSchemeOp::{{op}}:

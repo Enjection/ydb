@@ -134,6 +134,41 @@ Y_UNIT_TEST_SUITE(SchemeshardOpHandlers) {
 
     // --- fake context demo ---
 
+    Y_UNIT_TEST(DispatchAndAuditFragmentAgreeForAllRegisteredOps) {
+        // Auto-growing cross-check: for every op listed in
+        // op_handler_overrides.yaml, assert that direct dispatch via
+        // TryCollectChangingPaths produces the same paths as the public
+        // MakeAuditLogFragment surface. Catches central-wiring regressions
+        // (e.g. someone wraps the dispatch differently in one path).
+        // No edits needed when a new op migrates — it's picked up via
+        // IsOpRegistered. Field setup below grows as ops migrate.
+        const auto* d = NSO::EOperationType_descriptor();
+        for (int i = 0; i < d->value_count(); ++i) {
+            const auto opType = static_cast<NSO::EOperationType>(d->value(i)->number());
+            if (!NHandlers::IsOpRegistered(opType)) {
+                continue;
+            }
+
+            NSO::TModifyScheme tx;
+            tx.SetOperationType(opType);
+            tx.SetWorkingDir("/Root");
+            // Generic field setup. Add per-op cases as they migrate if the
+            // op needs sub-message fields beyond what's set here.
+            tx.MutableCreateTable()->SetName("X");
+            tx.MutableMkDir()->SetName("X");
+
+            const auto direct = NHandlers::TryCollectChangingPaths(tx);
+            UNIT_ASSERT_C(direct.has_value(),
+                          "TryCollectChangingPaths returned nullopt for migrated op "
+                          << NSO::EOperationType_Name(opType));
+
+            const auto fragment = MakeAuditLogFragment(tx);
+            UNIT_ASSERT_VALUES_EQUAL_C(fragment.Paths, *direct,
+                                       "central wiring diverges from direct dispatch for "
+                                       << NSO::EOperationType_Name(opType));
+        }
+    }
+
     Y_UNIT_TEST(FactoryNonCopyEmitsOnePartViaFakeContext) {
         // Tier-2 demonstration: invoke the factory handler directly with a
         // fake TOperationContext. CreateTable's non-copy branch never reads

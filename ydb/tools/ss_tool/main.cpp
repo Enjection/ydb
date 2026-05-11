@@ -27,20 +27,40 @@ void PrintRow(const TOpRow& op) {
 int CmdList(int argc, const char** argv) {
     bool registeredOnly = false;
     bool unregisteredOnly = false;
+    TString format;
 
     NLastGetopt::TOpts opts;
     opts.AddLongOption("registered", "only show ops listed in op_handler_overrides.yaml")
         .NoArgument().SetFlag(&registeredOnly);
     opts.AddLongOption("unregistered", "only show ops still using the legacy switch")
         .NoArgument().SetFlag(&unregisteredOnly);
+    opts.AddLongOption("format", "output format: tsv (default) or json")
+        .StoreResult(&format);
     opts.AddHelpOption();
     NLastGetopt::TOptsParseResult res(&opts, argc, argv);
 
-    PrintHeader();
+    TVector<TOpRow> filtered;
     for (const auto& op : AllOps()) {
         if (registeredOnly && !op.IsRegistered) continue;
         if (unregisteredOnly && op.IsRegistered) continue;
-        PrintRow(op);
+        filtered.push_back(op);
+    }
+
+    if (format == "json") {
+        Cout << "[" << Endl;
+        for (size_t i = 0; i < filtered.size(); ++i) {
+            const auto& op = filtered[i];
+            Cout << "  {\"name\": \"" << op.Name << "\""
+                 << ", \"number\": " << static_cast<int>(op.Type)
+                 << ", \"registered\": " << (op.IsRegistered ? "true" : "false")
+                 << "}" << (i + 1 < filtered.size() ? "," : "") << Endl;
+        }
+        Cout << "]" << Endl;
+    } else {
+        PrintHeader();
+        for (const auto& op : filtered) {
+            PrintRow(op);
+        }
     }
     return 0;
 }
