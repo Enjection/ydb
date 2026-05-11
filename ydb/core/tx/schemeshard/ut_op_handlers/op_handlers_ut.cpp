@@ -1,3 +1,6 @@
+#include "fake_operation_context.h"
+#include "parity_helpers.h"
+
 #include <ydb/core/tx/schemeshard/generated/op_handlers.h>
 #include <ydb/core/tx/schemeshard/schemeshard_audit_log_fragment.h>
 
@@ -103,5 +106,49 @@ Y_UNIT_TEST_SUITE(SchemeshardOpHandlers) {
             }
         }
         UNIT_ASSERT_C(registered >= 1, "at least CreateTable should be registered");
+    }
+
+    // --- parity_helpers demo ---
+
+    Y_UNIT_TEST(ParityFixturePinsCreateTableAuditOutput) {
+        NTesting::AssertOpAuditPaths(
+            NSO::ESchemeOpCreateTable,
+            [](NSO::TModifyScheme& tx) {
+                tx.SetWorkingDir("/Root/Db");
+                tx.MutableCreateTable()->SetName("Users");
+            },
+            {"/Root/Db/Users"});
+    }
+
+    Y_UNIT_TEST(ParityFixturePinsCreateTableCopyVariant) {
+        NTesting::AssertOpAuditPaths(
+            NSO::ESchemeOpCreateTable,
+            [](NSO::TModifyScheme& tx) {
+                tx.SetWorkingDir("/Root/Db");
+                auto* createTable = tx.MutableCreateTable();
+                createTable->SetName("UsersCopy");
+                createTable->SetCopyFromTable("/Root/Db/Users");
+            },
+            {"/Root/Db/UsersCopy"});
+    }
+
+    // --- fake context demo ---
+
+    Y_UNIT_TEST(FactoryNonCopyEmitsOnePartViaFakeContext) {
+        // Tier-2 demonstration: invoke the factory handler directly with a
+        // fake TOperationContext. CreateTable's non-copy branch never reads
+        // ctx, so the fake suffices. If a future change makes the handler
+        // touch ctx.SS or ctx.GetTxc(), this test crashes — by design.
+        NTesting::TFakeOperationContextHarness fakeCtx;
+        TOperation op(TTxId(42));
+
+        NSO::TModifyScheme tx;
+        tx.SetOperationType(NSO::ESchemeOpCreateTable);
+        tx.SetWorkingDir("/Root/Db");
+        tx.MutableCreateTable()->SetName("Orders");
+
+        const auto parts = NHandlers::MakeOperationParts_ESchemeOpCreateTable(op, tx, fakeCtx.Get());
+        UNIT_ASSERT_VALUES_EQUAL(parts.size(), 1u);
+        UNIT_ASSERT(parts[0] != nullptr);
     }
 }

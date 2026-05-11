@@ -121,6 +121,67 @@ After this PR: missing handlers are linker errors permanently. Adding a new op =
 
 No silent failures. Every mistake is caught before the change reaches users.
 
+## Testing
+
+The per-op pattern unlocks a real test pyramid. Today every schemeshard op test boots the full actor runtime; only 4 of 28 test targets are SMALL. The handlers exposed by this PR are pure functions over protos and synthetic operation context, so they can be exercised at function granularity.
+
+### Tier 1 — pure handlers, no fixtures (SMALL, ms-scale)
+
+Audit handlers take only `(const TModifyScheme&, TVector<TString>&)` — no operation context. Call them directly:
+
+```cpp
+NSO::TModifyScheme tx;
+tx.SetOperationType(NSO::ESchemeOpCreateTable);
+tx.SetWorkingDir("/Root/Db");
+tx.MutableCreateTable()->SetName("Users");
+
+TVector<TString> paths;
+NHandlers::CollectChangingPaths_ESchemeOpCreateTable(tx, paths);
+// paths == ["/Root/Db/Users"]
+```
+
+`ut_op_handlers/parity_helpers.h` provides `AssertOpAuditPaths(opType, populate, expected)` that exercises the handler AND the public `MakeAuditLogFragment` surface, asserting both produce the same paths.
+
+### Tier 2 — factory handlers with a fake context (SMALL, ms-scale)
+
+Factory handlers take `TOperationContext&`. For ops whose body doesn't dereference `ctx.SS` / `ctx.GetTxc()` (e.g. CreateTable's non-copy branch), `ut_op_handlers/fake_operation_context.h` provides `TFakeOperationContextHarness`:
+
+```cpp
+NTesting::TFakeOperationContextHarness fakeCtx;
+TOperation op(TTxId(42));
+NSO::TModifyScheme tx;
+tx.SetOperationType(NSO::ESchemeOpCreateTable);
+tx.SetWorkingDir("/Root/Db");
+tx.MutableCreateTable()->SetName("Orders");
+
+const auto parts = NHandlers::MakeOperationParts_ESchemeOpCreateTable(op, tx, fakeCtx.Get());
+// parts.size() == 1, parts[0] is the constructed sub-op
+```
+
+The fake's `SS` is `nullptr` and `Ctx`/`Txc` reference uninitialized storage — handlers that touch them crash loudly (segfault or sanitizer hit). This is a feature: it forces ops with deep schema dependencies to use Tier 3.
+
+### Tier 3 — full runtime (MEDIUM/LARGE, existing tests)
+
+State machine progress, persistence, multi-op transactions, reboot recovery — same `TTestEnv` harness as today. Unchanged.
+
+### Cross-op invariants
+
+The codegen-emitted `IsOpRegistered` makes it cheap to assert properties across every migrated op:
+
+```cpp
+for (auto opType : AllRegisteredOps()) {
+    auto paths = NHandlers::TryCollectChangingPaths(MinimalTx(opType));
+    UNIT_ASSERT_C(paths.has_value() && !paths->empty(),
+                  EOperationType_Name(opType) << " produced no audit paths");
+}
+```
+
+Add invariants here as the migration progresses (e.g., "every Create-class op produces ≥1 path", "every audit handler is idempotent").
+
+### Migration parity
+
+Before deleting an op's case from the legacy switch, write an `AssertOpAuditPaths` golden test with the expected paths derived from the legacy code. The test stays as the regression guard after the legacy case is gone.
+
 ## Tooling
 
 `ss_tool` (`ydb/tools/ss_tool/`) is the by-aspect view of what the schemeshard supports — the cross-cutting counterpart to the per-op `.cpp` view. Permanent surface, useful long after migration finishes.

@@ -4,6 +4,8 @@ SIZE(SMALL)
 
 PEERDIR(
     ydb/core/protos
+    ydb/core/tablet_flat
+    ydb/library/actors/core
 )
 
 SRCS(
