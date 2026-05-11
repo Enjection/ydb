@@ -10,6 +10,7 @@
 #include <util/generic/string.h>
 
 #include <optional>
+#include <utility>  // std::declval, used by Describe<>()
 
 namespace NKikimr::NSchemeShard {
 
@@ -280,5 +281,45 @@ bool Rewrite(TTraits traits, TTxTransaction& tx) {
 }
 
 bool IsCreatePathOperation(NKikimrSchemeOp::EOperationType op);
+
+// --- Trait description -----------------------------------------------------
+//
+// Materialized snapshot of the static-constexpr fields of a TSchemeTxTraits<>
+// specialization. Lives next to the trait itself so the trait header is the
+// single source of truth for "what an op-trait carries"; tooling (ss_tool,
+// docs codegen, etc.) consumes this struct instead of mirroring the field
+// list. When you add a field to TSchemeTxTraitsFallback, also add it here
+// and extend Describe() below; nothing else needs to change.
+
+struct TOpDescriptor {
+    EOperationClass Class = EOperationClass::Unknown;
+    bool CreateDirsFromName = false;
+    bool CreateAdditionalDirs = false;
+    bool NeedRewrite = false;
+    // Derived: which of the per-op module static methods the trait declares.
+    bool HasMakeOperationParts = false;
+    bool HasCollectChangingPaths = false;
+};
+
+template <class Traits>
+constexpr TOpDescriptor Describe() {
+    TOpDescriptor d;
+    d.Class                = Traits::Class;
+    d.CreateDirsFromName   = Traits::CreateDirsFromName;
+    d.CreateAdditionalDirs = Traits::CreateAdditionalDirs;
+    d.NeedRewrite          = Traits::NeedRewrite;
+    d.HasMakeOperationParts = requires {
+        Traits::MakeOperationParts(
+            std::declval<const TOperation&>(),
+            std::declval<const TTxTransaction&>(),
+            std::declval<TOperationContext&>());
+    };
+    d.HasCollectChangingPaths = requires {
+        Traits::CollectChangingPaths(
+            std::declval<const TTxTransaction&>(),
+            std::declval<TVector<TString>&>());
+    };
+    return d;
+}
 
 }  // namespace NKikimr::NSchemeShard

@@ -29,17 +29,16 @@ namespace {
 using namespace NKikimr::NSchemeShard;
 namespace NSO = NKikimrSchemeOp;
 
-// Snapshot of the metadata we read out of TSchemeTxTraits<op>. Extend this
-// struct (and CollectInfo below) when new trait fields land.
-struct TOpInfo {
+// One row in the tool's tables: identity (name + enum number) plus the
+// trait-derived metadata. Identity is purely runtime info that does not
+// belong on the trait; the rest is mirrored from TOpDescriptor in
+// schemeshard__op_traits.h, which is the single source of truth for trait
+// fields. Extending the trait does NOT require changing this file unless we
+// want to expose the new field in `ops list` formatting.
+struct TOpRow {
     TString Name;
     NSO::EOperationType Type{};
-    EOperationClass Class = EOperationClass::Unknown;
-    bool CreateDirsFromName = false;
-    bool CreateAdditionalDirs = false;
-    bool NeedRewrite = false;
-    bool HasMakeOperationParts = false;
-    bool HasCollectChangingPaths = false;
+    TOpDescriptor Desc;
 };
 
 TStringBuf ClassName(EOperationClass c) {
@@ -53,39 +52,24 @@ TStringBuf ClassName(EOperationClass c) {
     return "?";
 }
 
-TOpInfo CollectInfo(NSO::EOperationType opType) {
-    TOpInfo info;
-    info.Type = opType;
-    info.Name = NSO::EOperationType_Name(opType);
+TOpRow CollectRow(NSO::EOperationType opType) {
+    TOpRow row;
+    row.Type = opType;
+    row.Name = NSO::EOperationType_Name(opType);
 
-    // DispatchOp routes by tx.GetOperationType(); we feed it a synthetic tx.
+    // DispatchOp routes by tx.GetOperationType(); feed it a synthetic tx and
+    // hand the matched trait type to NSchemeShard::Describe<>().
     NSO::TModifyScheme tx;
     tx.SetOperationType(opType);
-
     DispatchOp(tx, [&](auto traits) {
-        using Traits = decltype(traits);
-        info.Class = Traits::Class;
-        info.CreateDirsFromName = Traits::CreateDirsFromName;
-        info.CreateAdditionalDirs = Traits::CreateAdditionalDirs;
-        info.NeedRewrite = Traits::NeedRewrite;
-        info.HasMakeOperationParts = requires {
-            Traits::MakeOperationParts(
-                std::declval<const TOperation&>(),
-                std::declval<const TTxTransaction&>(),
-                std::declval<TOperationContext&>());
-        };
-        info.HasCollectChangingPaths = requires {
-            Traits::CollectChangingPaths(
-                std::declval<const TTxTransaction&>(),
-                std::declval<TVector<TString>&>());
-        };
+        row.Desc = Describe<decltype(traits)>();
     });
 
-    return info;
+    return row;
 }
 
-TVector<TOpInfo> AllOps() {
-    TVector<TOpInfo> result;
+TVector<TOpRow> AllOps() {
+    TVector<TOpRow> result;
     THashSet<int> seen;
     const auto* d = NSO::EOperationType_descriptor();
     for (int i = 0; i < d->value_count(); ++i) {
@@ -93,12 +77,12 @@ TVector<TOpInfo> AllOps() {
         if (!seen.insert(v->number()).second) {
             continue; // proto enum may carry aliases sharing one number
         }
-        result.push_back(CollectInfo(static_cast<NSO::EOperationType>(v->number())));
+        result.push_back(CollectRow(static_cast<NSO::EOperationType>(v->number())));
     }
     return result;
 }
 
-TString FormatFlags(const TOpInfo& op) {
+TString FormatFlags(const TOpDescriptor& d) {
     TStringBuilder sb;
     auto add = [&](const char* tag) {
         if (sb.size() > 0) {
@@ -106,9 +90,9 @@ TString FormatFlags(const TOpInfo& op) {
         }
         sb << tag;
     };
-    if (op.CreateDirsFromName)   add("CreateDirsFromName");
-    if (op.CreateAdditionalDirs) add("CreateAdditionalDirs");
-    if (op.NeedRewrite)          add("NeedRewrite");
+    if (d.CreateDirsFromName)   add("CreateDirsFromName");
+    if (d.CreateAdditionalDirs) add("CreateAdditionalDirs");
+    if (d.NeedRewrite)          add("NeedRewrite");
     return sb;
 }
 
@@ -121,12 +105,12 @@ void PrintHeader() {
          << Endl;
 }
 
-void PrintRow(const TOpInfo& op) {
+void PrintRow(const TOpRow& op) {
     Cout << op.Name
-         << "\t" << ClassName(op.Class)
-         << "\t" << (op.HasMakeOperationParts   ? "yes" : "no")
-         << "\t" << (op.HasCollectChangingPaths ? "yes" : "no")
-         << "\t" << FormatFlags(op)
+         << "\t" << ClassName(op.Desc.Class)
+         << "\t" << (op.Desc.HasMakeOperationParts   ? "yes" : "no")
+         << "\t" << (op.Desc.HasCollectChangingPaths ? "yes" : "no")
+         << "\t" << FormatFlags(op.Desc)
          << Endl;
 }
 
@@ -134,9 +118,9 @@ bool MethodKnown(const TString& name) {
     return name == "MakeOperationParts" || name == "CollectChangingPaths";
 }
 
-bool HasMethod(const TOpInfo& op, const TString& name) {
-    if (name == "MakeOperationParts")   return op.HasMakeOperationParts;
-    if (name == "CollectChangingPaths") return op.HasCollectChangingPaths;
+bool HasMethod(const TOpDescriptor& d, const TString& name) {
+    if (name == "MakeOperationParts")   return d.HasMakeOperationParts;
+    if (name == "CollectChangingPaths") return d.HasCollectChangingPaths;
     return false;
 }
 
@@ -168,13 +152,13 @@ int CmdList(int argc, const char** argv) {
 
     PrintHeader();
     for (const auto& op : AllOps()) {
-        if (!classFilter.empty() && TStringBuf(ClassName(op.Class)) != classFilter) {
+        if (!classFilter.empty() && TStringBuf(ClassName(op.Desc.Class)) != classFilter) {
             continue;
         }
-        if (!hasFilter.empty() && !HasMethod(op, hasFilter)) {
+        if (!hasFilter.empty() && !HasMethod(op.Desc, hasFilter)) {
             continue;
         }
-        if (!missingFilter.empty() && HasMethod(op, missingFilter)) {
+        if (!missingFilter.empty() && HasMethod(op.Desc, missingFilter)) {
             continue;
         }
         PrintRow(op);
@@ -192,15 +176,16 @@ int CmdShow(int argc, const char** argv) {
         Cerr << "Unknown op: " << argv[1] << Endl;
         return 1;
     }
-    auto info = CollectInfo(opType);
-    Cout << "Name:                     " << info.Name << Endl;
-    Cout << "Number:                   " << static_cast<int>(info.Type) << Endl;
-    Cout << "Class:                    " << ClassName(info.Class) << Endl;
-    Cout << "CreateDirsFromName:       " << (info.CreateDirsFromName   ? "true" : "false") << Endl;
-    Cout << "CreateAdditionalDirs:     " << (info.CreateAdditionalDirs ? "true" : "false") << Endl;
-    Cout << "NeedRewrite:              " << (info.NeedRewrite          ? "true" : "false") << Endl;
-    Cout << "HasMakeOperationParts:    " << (info.HasMakeOperationParts   ? "true" : "false") << Endl;
-    Cout << "HasCollectChangingPaths:  " << (info.HasCollectChangingPaths ? "true" : "false") << Endl;
+    const auto row = CollectRow(opType);
+    const auto& d = row.Desc;
+    Cout << "Name:                     " << row.Name << Endl;
+    Cout << "Number:                   " << static_cast<int>(row.Type) << Endl;
+    Cout << "Class:                    " << ClassName(d.Class) << Endl;
+    Cout << "CreateDirsFromName:       " << (d.CreateDirsFromName       ? "true" : "false") << Endl;
+    Cout << "CreateAdditionalDirs:     " << (d.CreateAdditionalDirs     ? "true" : "false") << Endl;
+    Cout << "NeedRewrite:              " << (d.NeedRewrite              ? "true" : "false") << Endl;
+    Cout << "HasMakeOperationParts:    " << (d.HasMakeOperationParts    ? "true" : "false") << Endl;
+    Cout << "HasCollectChangingPaths:  " << (d.HasCollectChangingPaths  ? "true" : "false") << Endl;
     return 0;
 }
 
@@ -210,9 +195,9 @@ int CmdMigrationStatus(int /*argc*/, const char** /*argv*/) {
     size_t fullyMigrated = 0;
     size_t partial = 0;
     for (const auto& op : ops) {
-        if (op.HasMakeOperationParts && op.HasCollectChangingPaths) {
+        if (op.Desc.HasMakeOperationParts && op.Desc.HasCollectChangingPaths) {
             ++fullyMigrated;
-        } else if (op.HasMakeOperationParts || op.HasCollectChangingPaths) {
+        } else if (op.Desc.HasMakeOperationParts || op.Desc.HasCollectChangingPaths) {
             ++partial;
         }
     }
@@ -224,12 +209,12 @@ int CmdMigrationStatus(int /*argc*/, const char** /*argv*/) {
     Cout << Endl;
 
     Cout << "Pending ops grouped by Class:" << Endl;
-    THashMap<EOperationClass, TVector<const TOpInfo*>> byClass;
+    THashMap<EOperationClass, TVector<const TOpRow*>> byClass;
     for (const auto& op : ops) {
-        if (op.HasMakeOperationParts || op.HasCollectChangingPaths) {
+        if (op.Desc.HasMakeOperationParts || op.Desc.HasCollectChangingPaths) {
             continue;
         }
-        byClass[op.Class].push_back(&op);
+        byClass[op.Desc.Class].push_back(&op);
     }
     for (auto cls : {EOperationClass::Create, EOperationClass::Alter,
                      EOperationClass::Drop,   EOperationClass::Other,
