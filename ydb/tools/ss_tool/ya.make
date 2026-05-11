@@ -6,6 +6,7 @@ SRCS(
 
 PEERDIR(
     library/cpp/getopt
+    library/cpp/json
     ydb/tools/ss_tool/lib
 )
 

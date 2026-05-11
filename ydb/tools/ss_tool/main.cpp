@@ -3,6 +3,8 @@
 #include <ydb/tools/ss_tool/lib/op_inspect.h>
 
 #include <library/cpp/getopt/last_getopt.h>
+#include <library/cpp/json/json_writer.h>
+#include <library/cpp/json/json_value.h>
 
 #include <util/generic/string.h>
 #include <util/stream/output.h>
@@ -47,15 +49,16 @@ int CmdList(int argc, const char** argv) {
     }
 
     if (format == "json") {
-        Cout << "[" << Endl;
-        for (size_t i = 0; i < filtered.size(); ++i) {
-            const auto& op = filtered[i];
-            Cout << "  {\"name\": \"" << op.Name << "\""
-                 << ", \"number\": " << static_cast<int>(op.Type)
-                 << ", \"registered\": " << (op.IsRegistered ? "true" : "false")
-                 << "}" << (i + 1 < filtered.size() ? "," : "") << Endl;
+        NJson::TJsonValue root(NJson::JSON_ARRAY);
+        for (const auto& op : filtered) {
+            NJson::TJsonValue entry(NJson::JSON_MAP);
+            entry.InsertValue("name", op.Name);
+            entry.InsertValue("number", static_cast<int>(op.Type));
+            entry.InsertValue("registered", op.IsRegistered);
+            root.AppendValue(std::move(entry));
         }
-        Cout << "]" << Endl;
+        NJson::WriteJson(&Cout, &root, /*formatOutput=*/true);
+        Cout << Endl;
     } else {
         PrintHeader();
         for (const auto& op : filtered) {
