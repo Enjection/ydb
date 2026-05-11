@@ -58,4 +58,50 @@ Y_UNIT_TEST_SUITE(SchemeshardOpHandlers) {
         UNIT_ASSERT_VALUES_EQUAL(fragment.Paths.size(), 1u);
         UNIT_ASSERT_VALUES_EQUAL(fragment.Paths[0], "/Root/NewDir");
     }
+
+    Y_UNIT_TEST(MakeAuditLogFragmentHandlesCopyFromTableVariant) {
+        NSO::TModifyScheme tx;
+        tx.SetOperationType(NSO::ESchemeOpCreateTable);
+        tx.SetWorkingDir("/Root/Db");
+        auto* createTable = tx.MutableCreateTable();
+        createTable->SetName("UsersCopy");
+        createTable->SetCopyFromTable("/Root/Db/Users");
+
+        const auto fragment = MakeAuditLogFragment(tx);
+        UNIT_ASSERT_VALUES_EQUAL(fragment.Paths.size(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(fragment.Paths[0], "/Root/Db/UsersCopy");
+    }
+
+    Y_UNIT_TEST(DirectAuditHandlerProducesExpectedPath) {
+        NSO::TModifyScheme tx;
+        tx.SetOperationType(NSO::ESchemeOpCreateTable);
+        tx.SetWorkingDir("/Root/Db");
+        tx.MutableCreateTable()->SetName("Users");
+
+        TVector<TString> paths;
+        NHandlers::CollectChangingPaths_ESchemeOpCreateTable(tx, paths);
+        UNIT_ASSERT_VALUES_EQUAL(paths.size(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(paths[0], "/Root/Db/Users");
+    }
+
+    Y_UNIT_TEST(MigrationProgressReflectsYaml) {
+        // The yaml currently lists ESchemeOpCreateTable. As more ops migrate
+        // this count grows; pin the lower bound to catch accidental
+        // regressions where an op silently drops off the registered set.
+        size_t registered = 0;
+        const auto* d = NSO::EOperationType_descriptor();
+        for (int i = 0; i < d->value_count(); ++i) {
+            const auto opType = static_cast<NSO::EOperationType>(d->value(i)->number());
+            // Build a minimal tx and ask the dispatch — equivalent to checking
+            // IsRegistered_v at runtime.
+            NSO::TModifyScheme tx;
+            tx.SetOperationType(opType);
+            tx.MutableCreateTable()->SetName("x");
+            tx.MutableMkDir()->SetName("x");
+            if (NHandlers::TryCollectChangingPaths(tx).has_value()) {
+                ++registered;
+            }
+        }
+        UNIT_ASSERT_C(registered >= 1, "at least CreateTable should be registered");
+    }
 }

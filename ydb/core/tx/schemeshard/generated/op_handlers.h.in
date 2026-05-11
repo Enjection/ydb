@@ -69,5 +69,18 @@ inline std::optional<TVector<TString>> TryCollectChangingPaths(
     }
 }
 
+// Runtime mirror of IsRegistered<>::value, for tooling that iterates the
+// proto enum at runtime (e.g. ss_tool).
+inline bool IsOpRegistered(NKikimrSchemeOp::EOperationType opType) {
+    switch (opType) {
+{% for op in migratedOps %}
+    case NKikimrSchemeOp::{{op}}:
+        return true;
+{% endfor %}
+    default:
+        return false;
+    }
+}
+
 } // namespace NGenerated::NOpHandlers
 } // namespace NKikimr::NSchemeShard
