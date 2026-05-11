@@ -1,10 +1,4 @@
-// ss_tool — read-only inspector for the schemeshard operation trait system.
-//
-// The schemeshard trait registry (TSchemeTxTraits<EOperationType>) carries
-// per-op metadata at compile time. The per-op `.cpp` view ("show me everything
-// about CreateTable") lives in the source. This tool exposes the orthogonal
-// by-aspect view ("show me all Create-class ops", "show me ops that still
-// lack CollectChangingPaths") via the testable helpers in lib/op_inspect.
+// Read-only inspector for the schemeshard operation trait system.
 
 #include <ydb/tools/ss_tool/lib/op_inspect.h>
 

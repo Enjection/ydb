@@ -319,11 +319,7 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
 TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) {
     TVector<TString> result;
 
-    // Per-op module path: dispatches via the generated DispatchOp switch to
-    // TSchemeTxTraits<op>. If the trait specialization defines
-    // CollectChangingPaths, the module owns audit-path extraction and we're
-    // done. Migrated ops are deleted from the legacy switch below; new ops
-    // should be added as per-op modules, not switch cases.
+    // Per-op module dispatch: trait owns extraction if it provides the method.
     const bool handled = DispatchOp(tx, [&](auto traits) {
         using Traits = decltype(traits);
         if constexpr (requires { Traits::CollectChangingPaths(tx, result); }) {
@@ -340,8 +336,6 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
     case NKikimrSchemeOp::EOperationType::ESchemeOpMkDir:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetMkDir().GetName()}));
         break;
-    // ESchemeOpCreateTable: owned by TSchemeTxTraits<ESchemeOpCreateTable>,
-    // see schemeshard__operation_create_table.cpp.
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreatePersQueueGroup:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreatePersQueueGroup().GetName()}));
         break;

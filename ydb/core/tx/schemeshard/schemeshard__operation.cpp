@@ -1350,11 +1350,7 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
         const TTxTransaction& tx,
         TOperationContext& context) const
 {
-    // Per-op module path: dispatches via the generated DispatchOp switch to
-    // TSchemeTxTraits<op>. If the trait specialization defines
-    // MakeOperationParts, the module owns construction and we're done.
-    // Migrated ops are deleted from the legacy switch below; new ops should
-    // be added as per-op modules, not switch cases.
+    // Per-op module dispatch: trait owns construction if it provides the method.
     TVector<ISubOperation::TPtr> result;
     const bool handled = DispatchOp(tx, [&](auto traits) {
         using Traits = decltype(traits);
@@ -1380,8 +1376,6 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
         return {CreateAlterUserAttrs(op.NextPartId(), tx)};
     case NKikimrSchemeOp::EOperationType::ESchemeOpForceDropUnsafe:
         return {CreateForceDropUnsafe(op.NextPartId(), tx)};
-    // ESchemeOpCreateTable: owned by TSchemeTxTraits<ESchemeOpCreateTable>,
-    // see schemeshard__operation_create_table.cpp.
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable:
         return CreateConsistentAlterTable(op.NextPartId(), tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpSplitMergeTablePartitions:

@@ -22,8 +22,6 @@ TOpRow CollectRow(NKikimrSchemeOp::EOperationType opType) {
     row.Type = opType;
     row.Name = NKikimrSchemeOp::EOperationType_Name(opType);
 
-    // DispatchOp routes by tx.GetOperationType(); feed it a synthetic tx and
-    // hand the matched trait type to NSchemeShard::Describe<>().
     NKikimrSchemeOp::TModifyScheme tx;
     tx.SetOperationType(opType);
     DispatchOp(tx, [&](auto traits) {
@@ -35,12 +33,12 @@ TOpRow CollectRow(NKikimrSchemeOp::EOperationType opType) {
 
 TVector<TOpRow> AllOps() {
     TVector<TOpRow> result;
-    THashSet<int> seen;
+    THashSet<int> seen; // proto enum may carry aliases sharing one number
     const auto* d = NKikimrSchemeOp::EOperationType_descriptor();
     for (int i = 0; i < d->value_count(); ++i) {
         const auto* v = d->value(i);
         if (!seen.insert(v->number()).second) {
-            continue; // proto enum may carry aliases sharing one number
+            continue;
         }
         result.push_back(CollectRow(static_cast<NKikimrSchemeOp::EOperationType>(v->number())));
     }

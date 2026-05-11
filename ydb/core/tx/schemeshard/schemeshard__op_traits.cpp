@@ -5,19 +5,10 @@
 
 namespace NKikimr::NSchemeShard {
 
-// EOperationClass is declared in schemeshard__op_traits.h so that per-op
-// TSchemeTxTraits<> specializations can carry their classification as a
-// compile-time constant. Each migrated op asserts parity with the switch
-// below via static_assert; eventually the switch is replaced by a generated
-// dispatch over TSchemeTxTraits<op>::Class.
-
-// Parity check: classification carried by TSchemeTxTraits<> must match the
-// switch below. Add one of these for every op as it migrates to the per-op
-// module pattern; once all ops are covered the switch goes away entirely.
+// Parity guard: trait Class must match this switch for every migrated op.
 static_assert(
     TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::Class
-    == EOperationClass::Create,
-    "ESchemeOpCreateTable trait Class diverges from GetOperationClass()");
+    == EOperationClass::Create);
 
 EOperationClass GetOperationClass(NKikimrSchemeOp::EOperationType op) {
     switch (op) {

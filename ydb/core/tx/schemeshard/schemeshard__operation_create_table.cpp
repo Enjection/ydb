@@ -3,7 +3,7 @@
 #include "schemeshard__operation_part.h"
 #include "schemeshard_impl.h"
 
-#include <ydb/core/base/path.h>  // for NKikimr::JoinPath used by CollectChangingPaths
+#include <ydb/core/base/path.h>
 #include <ydb/core/base/subdomain.h>
 #include <ydb/core/mind/hive/hive.h>
 #include <ydb/core/protos/datashard_config.pb.h>
@@ -830,14 +830,6 @@ bool SetName<TTag>(
 
 } // namespace NOperation
 
-// --- Per-op module: TSchemeTxTraits<ESchemeOpCreateTable> ---
-// Definitions for the static methods declared in schemeshard__op_traits.h.
-// Co-locating MakeOperationParts and CollectChangingPaths here makes this
-// file the single source of truth for everything CreateTable: trait flags,
-// classification, factory wiring, audit-path extraction, and target-name
-// accessors. The 5+ central switches that previously scattered this knowledge
-// just delegate to these methods.
-
 TVector<ISubOperation::TPtr>
 TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::MakeOperationParts(
     const TOperation& op,
@@ -845,7 +837,6 @@ TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::MakeOper
     TOperationContext& context)
 {
     if (tx.GetCreateTable().HasCopyFromTable()) {
-        // Copy indexes table as well as common table.
         return CreateCopyTable(op.NextPartId(), tx, context);
     }
     return {CreateNewTable(op.NextPartId(), tx)};

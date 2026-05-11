@@ -10,7 +10,7 @@
 #include <util/generic/string.h>
 
 #include <optional>
-#include <utility>  // std::declval, used by Describe<>()
+#include <utility>
 
 namespace NKikimr::NSchemeShard {
 
@@ -282,21 +282,13 @@ bool Rewrite(TTraits traits, TTxTransaction& tx) {
 
 bool IsCreatePathOperation(NKikimrSchemeOp::EOperationType op);
 
-// --- Trait description -----------------------------------------------------
-//
-// Materialized snapshot of the static-constexpr fields of a TSchemeTxTraits<>
-// specialization. Lives next to the trait itself so the trait header is the
-// single source of truth for "what an op-trait carries"; tooling (ss_tool,
-// docs codegen, etc.) consumes this struct instead of mirroring the field
-// list. When you add a field to TSchemeTxTraitsFallback, also add it here
-// and extend Describe() below; nothing else needs to change.
-
+// Runtime snapshot of TSchemeTxTraits<> fields. When you add a field to
+// TSchemeTxTraitsFallback, mirror it here and extend Describe() below.
 struct TOpDescriptor {
     EOperationClass Class = EOperationClass::Unknown;
     bool CreateDirsFromName = false;
     bool CreateAdditionalDirs = false;
     bool NeedRewrite = false;
-    // Derived: which of the per-op module static methods the trait declares.
     bool HasMakeOperationParts = false;
     bool HasCollectChangingPaths = false;
 };
