@@ -10,7 +10,7 @@
 #include <library/cpp/getopt/small/last_getopt_opts.h>
 
 #include <util/generic/hash.h>
-#include <util/generic/hash_set.h>
+#include <util/generic/ptr.h>
 #include <util/generic/vector.h>
 #include <util/generic/string.h>
 #include <util/datetime/base.h>
@@ -259,6 +259,16 @@ struct TDebugInfo {
     THashMap<ui32, TConfigItemInfo> InitInfo;
 };
 
+// In-process consumer of resolved config. A client that reuses the configs
+// dispatcher registers handlers via TConfigsDispatcherInitInfo::ConfigHandlers;
+// the dispatcher calls OnConfig (on its own mailbox) with the effective config
+// at startup and on every change. Used e.g. to read an opaque private config
+// section and parse it with a schema the cluster itself does not have.
+struct IConfigHandler : TThrRefBase {
+    virtual ~IConfigHandler() = default;
+    virtual void OnConfig(const NKikimrConfig::TAppConfig& config) = 0;
+};
+
 struct TConfigsDispatcherInitInfo {
     NKikimrConfig::TAppConfig InitialConfig;
     TString StartupConfigYaml;
@@ -268,12 +278,9 @@ struct TConfigsDispatcherInitInfo {
     std::optional<TDebugInfo> DebugInfo;
     std::shared_ptr<NConfig::TRecordedInitialConfiguratorDeps> RecordedInitialConfiguratorDeps = nullptr;
     std::vector<TString> Args;
-    // Extra config-item kinds a custom client wants the dispatcher to serve, on
-    // top of the built-in DYNAMIC_KINDS / NON_YAML_KINDS. Empty by default, so
-    // stock behaviour is unchanged. Each kind must be a TAppConfig field number
-    // (== TConfigItem::EKind value).
-    THashSet<ui32> ExtraServedKinds;
-    THashSet<ui32> ExtraNonYamlServedKinds;
+    // In-process handlers invoked with the effective config at startup and on
+    // every change. Node-local; empty by default (stock behaviour unchanged).
+    TVector<TIntrusivePtr<IConfigHandler>> ConfigHandlers;
 };
 
 class IInitialConfigurator {

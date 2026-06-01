@@ -1,13 +1,14 @@
 #include "configs_dispatcher.h"
 #include "ut_helpers.h"
 
-#include <ydb/core/config/handler_hub/config_handler_hub.h>
 #include <ydb/core/config/init/mock.h>
 #include <ydb/core/cms/console/ut_configs_dispatcher/ut_private_config.pb.h>
 
 #include <ydb/library/fyamlcpp/fyamlcpp.h>
 #include <ydb/library/yaml_config/yaml_config_parser.h>
 #include <library/cpp/protobuf/json/json2proto.h>
+
+#include <atomic>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include <ydb/core/tablet/bootstrapper.h>
 #include <ydb/core/tablet_flat/tablet_flat_executed.h>
@@ -172,7 +173,6 @@ struct TEvPrivate {
         EvSetSubscription,
         EvGotNotification,
         EvComplete,
-        EvParsedPrivate,
         EvEnd
     };
 
@@ -213,11 +213,6 @@ struct TEvPrivate {
     };
 
     struct TEvComplete : public TEventLocal<TEvComplete, EvComplete> {};
-
-    // Carries the result of parsing the opaque payload with the end-node-only proto.
-    struct TEvParsedPrivate : public TEventLocal<TEvParsedPrivate, EvParsedPrivate> {
-        ui32 SecretPort = 0;
-    };
 };
 
 class TTestSubscriber : public TActorBootstrapped<TTestSubscriber> {
@@ -1632,31 +1627,21 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
     }
 }
 
-Y_UNIT_TEST_SUITE(TConfigsDispatcherExtraServedKindsTests) {
+Y_UNIT_TEST_SUITE(TConfigsDispatcherPrivateConfigTests) {
 
     // End-to-end check of the whole "private config" path:
     //   * The operator injects a nested YAML map at config.private_config. The
     //     OpaqueConfig marker makes the shared YAML->proto parse capture that
     //     sub-tree verbatim into the string field TAppConfig.PrivateConfig --
     //     no schema, no allow_unknown_fields. The test runs that real parse.
-    //   * The payload's schema (NKikimrPrivateConfigUt::TUtPrivateConfig) is NOT
-    //     linked into ydb/core/cms/console -- it is compiled only into this test,
-    //     standing in for a custom end-node binary.
-    //   * PrivateConfigItem is not in DYNAMIC_KINDS, so a stock dispatcher would
-    //     Y_ABORT in CheckKinds when the hub subscribes; ExtraServedKinds opens it.
-    //   * Delivery reuses the regular subscription API (TEvSetConfigSubscription
-    //     Request / TEvConfigNotificationRequest) unchanged.
-    //   * The end-node handler parses the opaque blob with the foreign proto --
-    //     something the console cannot do.
-    Y_UNIT_TEST(TestEndNodeParsesOpaquePrivateConfig) {
-        const ui32 kPriv = (ui32)NKikimrConsole::TConfigItem::PrivateConfigItem;
+    //   * A client that reuses the dispatcher registers an in-process
+    //     IConfigHandler (no separate actor, no kind subscription). The dispatcher
+    //     hands it the effective config; the handler parses the opaque blob with
+    //     NKikimrPrivateConfigUt::TUtPrivateConfig -- a schema NOT linked into
+    //     ydb/core/cms/console (compiled only into this test).
+    Y_UNIT_TEST(TestConfigHandlerParsesOpaquePrivateConfig) {
         const ui32 kSecretPort = 1234;
 
-        // The operator injects the opaque section as a nested YAML map in the
-        // MainConfig. Running the very same parse the console/dispatcher use, the
-        // OpaqueConfig marker captures that sub-tree verbatim into the string
-        // field TAppConfig.PrivateConfig -- with no schema and no
-        // allow_unknown_fields. The cluster never interprets secret_port.
         const TString mainYaml = R"(
 metadata:
   cluster: ""
@@ -1669,77 +1654,50 @@ config:
         UNIT_ASSERT_C(captured.HasPrivateConfig(),
                       "config.private_config was not captured into the opaque carrier");
 
+        // End-node handler: parses the opaque blob with the foreign proto.
+        struct THandler : NConfig::IConfigHandler {
+            std::atomic<ui32> SecretPort{0};
+            void OnConfig(const NKikimrConfig::TAppConfig& config) override {
+                if (!config.HasPrivateConfig()) {
+                    return;
+                }
+                auto doc = NFyaml::TDocument::Parse(config.GetPrivateConfig());
+                TStringStream jsonStream;
+                jsonStream << NFyaml::TJsonEmitter(doc.Root());
+                NJson::TJsonValue json;
+                Y_ENSURE(NJson::ReadJsonTree(jsonStream.Str(), &json));
+                NProtobufJson::TJson2ProtoConfig j2p;
+                j2p.SetFieldNameMode(
+                    NProtobufJson::TJson2ProtoConfig::FieldNameSnakeCaseDense);
+                NKikimrPrivateConfigUt::TUtPrivateConfig parsed;
+                NProtobufJson::MergeJson2Proto(json, parsed, j2p);
+                SecretPort.store(parsed.GetSecretPort());
+            }
+        };
+        auto handler = MakeIntrusive<THandler>();
+
+        // Register the handler as a dispatcher member -- no actor, no subscription.
         NConfig::TConfigsDispatcherInitInfo initInfo;
-        initInfo.ExtraServedKinds.insert(kPriv);
+        initInfo.InitialConfig = captured;            // carries the captured PrivateConfig
+        initInfo.ConfigHandlers.push_back(handler);
 
         TTenantTestConfig testConfig = DefaultConsoleTestConfig();
-        testConfig.CreateConfigsDispatcher = false; // we create it ourselves with extras
+        testConfig.CreateConfigsDispatcher = false;   // we create it with the handler
         TTenantTestRuntime runtime(testConfig);
 
-        // Manually create the dispatcher with the extra kind and bind it to the
-        // well-known service id so the hub can reach it.
         auto* dispatcher = NConsole::CreateConfigsDispatcher(initInfo);
         TActorId dispatcherId = runtime.Register(dispatcher);
         runtime.EnableScheduleForActor(dispatcherId, true);
-        runtime.RegisterService(MakeConfigsDispatcherID(runtime.GetNodeId(0)), dispatcherId);
 
-        // Wait until the dispatcher gets its first config from CMS (StateInit -> StateWork).
-        {
-            TDispatchOptions options;
-            options.FinalEvents.emplace_back(TEvConsole::EvConfigSubscriptionNotification);
-            runtime.DispatchEvents(options);
-        }
+        // The dispatcher invokes the handler with the effective config; the
+        // handler recovers secret_port from the opaque blob.
+        TDispatchOptions options;
+        options.CustomFinalCondition = [&]() {
+            return handler->SecretPort.load() == kSecretPort;
+        };
+        runtime.DispatchEvents(options, TDuration::Seconds(10));
 
-        // Register the hub with the end-node handler for the private kind. The
-        // handler parses the opaque string with the foreign proto -- the console
-        // never sees this type.
-        const TActorId sink = runtime.Sender;
-        auto registry = NConfigHub::TConfigHandlerRegistryBuilder()
-            .AddFactory(kPriv, [sink]() -> std::unique_ptr<NConfigHub::IConfigKindHandler> {
-                return std::make_unique<NConfigHub::TFunctionalConfigKindHandler>(
-                    [sink](const NKikimrConfig::TAppConfig& cfg, const TActorContext& ctx) {
-                        if (!cfg.HasPrivateConfig()) {
-                            return; // initial empty notification
-                        }
-                        // End-node-only YAML parse of the opaque payload. The
-                        // console never does this -- it lacks TUtPrivateConfig.
-                        auto doc = NFyaml::TDocument::Parse(cfg.GetPrivateConfig());
-                        TStringStream jsonStream;
-                        jsonStream << NFyaml::TJsonEmitter(doc.Root());
-                        NJson::TJsonValue json;
-                        Y_ENSURE(NJson::ReadJsonTree(jsonStream.Str(), &json));
-                        NProtobufJson::TJson2ProtoConfig j2p;
-                        j2p.SetFieldNameMode(
-                            NProtobufJson::TJson2ProtoConfig::FieldNameSnakeCaseDense);
-                        NKikimrPrivateConfigUt::TUtPrivateConfig parsed;
-                        NProtobufJson::MergeJson2Proto(json, parsed, j2p);
-                        auto* ev = new TEvPrivate::TEvParsedPrivate;
-                        ev->SecretPort = parsed.GetSecretPort();
-                        ctx.Send(sink, ev);
-                    });
-            })
-            .Build();
-        TActorId hubId = runtime.Register(NConfigHub::CreateConfigHandlerHub(std::move(registry)));
-        runtime.EnableScheduleForActor(hubId, true);
-
-        // Deliver only the captured opaque carrier through the dispatcher; it
-        // serves this kind now, so it propagates to the hub.
-        NKikimrConfig::TAppConfig carrier;
-        carrier.SetPrivateConfig(captured.GetPrivateConfig());
-        SendConfigure(runtime, MakeAddAction(
-            MakeConfigItem(kPriv, carrier, {}, {}, "", "", 1,
-                           NKikimrConsole::TConfigItem::MERGE, "")));
-
-        // The end-node handler parses the foreign proto and reports the secret port.
-        TAutoPtr<IEventHandle> handle;
-        bool seen = false;
-        for (int i = 0; i < 10 && !seen; ++i) {
-            auto ev = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvParsedPrivate>(handle);
-            if (ev->SecretPort == kSecretPort) {
-                seen = true;
-            }
-        }
-        UNIT_ASSERT_C(seen, "end-node handler never parsed the opaque PrivateConfig payload");
+        UNIT_ASSERT_VALUES_EQUAL(handler->SecretPort.load(), kSecretPort);
     }
 }
 

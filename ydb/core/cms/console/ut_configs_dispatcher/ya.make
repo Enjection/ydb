@@ -12,7 +12,6 @@ PEERDIR(
     library/cpp/protobuf/util
     library/cpp/regex/pcre
     library/cpp/svnversion
-    ydb/core/config/handler_hub
     ydb/core/testlib/default
     ydb/library/fyamlcpp
 )
