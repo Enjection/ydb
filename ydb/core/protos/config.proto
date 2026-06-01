@@ -3246,11 +3246,13 @@ message TAppConfig {
 
     optional TLongTxServiceConfig LongTxServiceConfig = 121;
 
-    // Opaque, end-node-owned configuration. The console/cluster carries this
-    // string verbatim and never parses it; only the target node interprets it,
-    // with a schema (proto) that need not be linked into the console binary.
+    // Opaque, end-node-owned configuration. Authored as a nested YAML map under
+    // config.private_config; the OpaqueConfig marker makes the YAML->proto parser
+    // capture that sub-tree verbatim (as text) into this string field instead of
+    // validating it, so the console accepts it without allow_unknown_fields and
+    // never needs the payload's schema. Only the target node parses the content.
     // This is the "private config" carrier studied in ydb/core/config/handler_hub.
-    optional string PrivateConfig = 122;
+    optional string PrivateConfig = 122 [(NMarkers.OpaqueConfig) = true];
 }
 
 message TYdbVersion {

@@ -6,6 +6,7 @@
 #include <ydb/core/cms/console/ut_configs_dispatcher/ut_private_config.pb.h>
 
 #include <ydb/library/fyamlcpp/fyamlcpp.h>
+#include <ydb/library/yaml_config/yaml_config_parser.h>
 #include <library/cpp/protobuf/json/json2proto.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include <ydb/core/tablet/bootstrapper.h>
@@ -1634,27 +1635,39 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
 Y_UNIT_TEST_SUITE(TConfigsDispatcherExtraServedKindsTests) {
 
     // End-to-end check of the whole "private config" path:
-    //   * TAppConfig.PrivateConfig (kind PrivateConfigItem) is an OPAQUE string
-    //     carrier -- the console/dispatcher never parses its content.
-    //   * The payload is plain YAML ("private_field:\n  secret_port: 1234"),
-    //     whose schema (NKikimrPrivateConfigUt::TUtPrivateConfig) is NOT linked
-    //     into ydb/core/cms/console -- it is compiled only into this test,
+    //   * The operator injects a nested YAML map at config.private_config. The
+    //     OpaqueConfig marker makes the shared YAML->proto parse capture that
+    //     sub-tree verbatim into the string field TAppConfig.PrivateConfig --
+    //     no schema, no allow_unknown_fields. The test runs that real parse.
+    //   * The payload's schema (NKikimrPrivateConfigUt::TUtPrivateConfig) is NOT
+    //     linked into ydb/core/cms/console -- it is compiled only into this test,
     //     standing in for a custom end-node binary.
     //   * PrivateConfigItem is not in DYNAMIC_KINDS, so a stock dispatcher would
     //     Y_ABORT in CheckKinds when the hub subscribes; ExtraServedKinds opens it.
     //   * Delivery reuses the regular subscription API (TEvSetConfigSubscription
     //     Request / TEvConfigNotificationRequest) unchanged.
-    //   * The end-node handler parses the opaque YAML with the foreign proto --
+    //   * The end-node handler parses the opaque blob with the foreign proto --
     //     something the console cannot do.
     Y_UNIT_TEST(TestEndNodeParsesOpaquePrivateConfig) {
         const ui32 kPriv = (ui32)NKikimrConsole::TConfigItem::PrivateConfigItem;
         const ui32 kSecretPort = 1234;
 
-        // Opaque payload authored as plain YAML. Its schema (private_field.
-        // secret_port) is unknown to the console; only the end node parses it.
-        const TString opaque =
-            "private_field:\n"
-            "  secret_port: " + ToString(kSecretPort) + "\n";
+        // The operator injects the opaque section as a nested YAML map in the
+        // MainConfig. Running the very same parse the console/dispatcher use, the
+        // OpaqueConfig marker captures that sub-tree verbatim into the string
+        // field TAppConfig.PrivateConfig -- with no schema and no
+        // allow_unknown_fields. The cluster never interprets secret_port.
+        const TString mainYaml = R"(
+metadata:
+  cluster: ""
+  version: 0
+config:
+  private_config:
+    secret_port: 1234
+)";
+        NKikimrConfig::TAppConfig captured = NKikimr::NYaml::Parse(mainYaml, /*transform=*/ false);
+        UNIT_ASSERT_C(captured.HasPrivateConfig(),
+                      "config.private_config was not captured into the opaque carrier");
 
         NConfig::TConfigsDispatcherInitInfo initInfo;
         initInfo.ExtraServedKinds.insert(kPriv);
@@ -1701,7 +1714,7 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherExtraServedKindsTests) {
                         NKikimrPrivateConfigUt::TUtPrivateConfig parsed;
                         NProtobufJson::MergeJson2Proto(json, parsed, j2p);
                         auto* ev = new TEvPrivate::TEvParsedPrivate;
-                        ev->SecretPort = parsed.GetPrivateField().GetSecretPort();
+                        ev->SecretPort = parsed.GetSecretPort();
                         ctx.Send(sink, ev);
                     });
             })
@@ -1709,10 +1722,10 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherExtraServedKindsTests) {
         TActorId hubId = runtime.Register(NConfigHub::CreateConfigHandlerHub(std::move(registry)));
         runtime.EnableScheduleForActor(hubId, true);
 
-        // Push the opaque payload into TAppConfig.PrivateConfig via CMS. The
-        // dispatcher serves this kind now, so it propagates to the hub.
+        // Deliver only the captured opaque carrier through the dispatcher; it
+        // serves this kind now, so it propagates to the hub.
         NKikimrConfig::TAppConfig carrier;
-        carrier.SetPrivateConfig(opaque);
+        carrier.SetPrivateConfig(captured.GetPrivateConfig());
         SendConfigure(runtime, MakeAddAction(
             MakeConfigItem(kPriv, carrier, {}, {}, "", "", 1,
                            NKikimrConsole::TConfigItem::MERGE, "")));

@@ -53,5 +53,11 @@ extend google.protobuf.FieldOptions {
 
     // **Top-level** options marked with that label are allowed to be used in the database configuration.
     optional bool AllowInDatabaseConfig = 82004;
+
+    // Field whose YAML value is opaque to the cluster. During YAML->proto parse
+    // the sub-tree under this key is captured verbatim (serialized to text) into
+    // this (string) field instead of being validated or descended into. Only the
+    // target node interprets the content, with a schema the cluster need not have.
+    optional bool OpaqueConfig = 82005;
 }
 

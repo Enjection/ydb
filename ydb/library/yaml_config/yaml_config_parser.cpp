@@ -18,8 +18,11 @@
 #include <ydb/core/protos/tablet.pb.h>
 #include <library/cpp/json/writer/json.h>
 #include <library/cpp/protobuf/json/util.h>
+#include <library/cpp/json/json_writer.h>
 #include <ydb/library/yaml_json/yaml_to_json.h>
+#include <ydb/core/config/protos/marker.pb.h>
 
+#include <util/generic/hash_set.h>
 #include <util/generic/string.h>
 
 template <>
@@ -1637,6 +1640,44 @@ endDiskTypeCheck:   ;
         return replaceRequest;
     }
 
+    // snake_case names of the top-level TAppConfig fields tagged with the
+    // OpaqueConfig marker (computed once via reflection).
+    const THashSet<TString>& OpaqueConfigFieldNames() {
+        static const THashSet<TString> names = [] {
+            THashSet<TString> result;
+            const auto* desc = NKikimrConfig::TAppConfig::descriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* field = desc->field(i);
+                if (field->options().GetExtension(NKikimrConfig::NMarkers::OpaqueConfig)) {
+                    TString name = field->name();
+                    NProtobufJson::ToSnakeCaseDense(&name);
+                    result.insert(name);
+                }
+            }
+            return result;
+        }();
+        return names;
+    }
+
+    // For each opaque-marked field present as a sub-tree, replace it with its
+    // serialized text so the proto merge stores the content verbatim into the
+    // (string) field instead of validating or rejecting the unknown-to-the-cluster
+    // contents. Only the target node interprets the captured text.
+    void CaptureOpaqueConfigFields(NJson::TJsonValue& configJson) {
+        if (!configJson.IsMap()) {
+            return;
+        }
+        for (const auto& name : OpaqueConfigFieldNames()) {
+            if (!configJson.Has(name)) {
+                continue;
+            }
+            const NJson::TJsonValue& value = configJson[name];
+            if (value.IsMap() || value.IsArray()) {
+                configJson[name] = NJson::WriteJson(value, /*formatOutput=*/ false);
+            }
+        }
+    }
+
     void Parse(const NJson::TJsonValue& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config,
                bool transform, EParsePhase* phase, bool relaxed) {
         auto runPhase = [phase](EParsePhase value, auto&& func) {
@@ -1680,6 +1721,7 @@ endDiskTypeCheck:   ;
             ClearEphemeralFields(jsonNode);
         }
 
+        CaptureOpaqueConfigFields(jsonNode);
         runPhase(EParsePhase::JsonToProto, [&] {
             NProtobufJson::MergeJson2Proto(jsonNode, config, convertConfig);
         });
