@@ -10,6 +10,7 @@
 #include <library/cpp/getopt/small/last_getopt_opts.h>
 
 #include <util/generic/hash.h>
+#include <util/generic/hash_set.h>
 #include <util/generic/vector.h>
 #include <util/generic/string.h>
 #include <util/datetime/base.h>
@@ -267,6 +268,12 @@ struct TConfigsDispatcherInitInfo {
     std::optional<TDebugInfo> DebugInfo;
     std::shared_ptr<NConfig::TRecordedInitialConfiguratorDeps> RecordedInitialConfiguratorDeps = nullptr;
     std::vector<TString> Args;
+    // Extra config-item kinds a custom client wants the dispatcher to serve, on
+    // top of the built-in DYNAMIC_KINDS / NON_YAML_KINDS. Empty by default, so
+    // stock behaviour is unchanged. Each kind must be a TAppConfig field number
+    // (== TConfigItem::EKind value).
+    THashSet<ui32> ExtraServedKinds;
+    THashSet<ui32> ExtraNonYamlServedKinds;
 };
 
 class IInitialConfigurator {

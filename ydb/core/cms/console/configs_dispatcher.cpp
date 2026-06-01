@@ -326,6 +326,13 @@ private:
     NKikimrConfig::TAppConfig YamlProtoConfig;
     bool YamlConfigEnabled = false;
 
+    // Effective served-kinds sets: built-in defaults (DYNAMIC_KINDS /
+    // NON_YAML_KINDS) unioned with caller-provided extras from
+    // TConfigsDispatcherInitInfo. Lets a custom client teach the dispatcher to
+    // serve additional kinds without editing the file-scope constants.
+    THashSet<ui32> ServedKinds;
+    THashSet<ui32> ServedNonYamlKinds;
+
 };
 
 TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInfo)
@@ -340,7 +347,12 @@ TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInf
         , RecordedInitialConfiguratorDeps(std::move(initInfo.RecordedInitialConfiguratorDeps))
         , Args(initInfo.Args)
         , NextRequestCookie(Now().GetValue())
-{}
+{
+    ServedKinds = DYNAMIC_KINDS;
+    ServedKinds.insert(initInfo.ExtraServedKinds.begin(), initInfo.ExtraServedKinds.end());
+    ServedNonYamlKinds = NON_YAML_KINDS;
+    ServedNonYamlKinds.insert(initInfo.ExtraNonYamlServedKinds.begin(), initInfo.ExtraNonYamlServedKinds.end());
+}
 
 void TConfigsDispatcher::Bootstrap()
 {
@@ -368,7 +380,7 @@ void TConfigsDispatcher::Bootstrap()
 
     auto commonClient = CreateConfigsSubscriber(
         SelfId(),
-        TVector<ui32>(DYNAMIC_KINDS.begin(), DYNAMIC_KINDS.end()),
+        TVector<ui32>(ServedKinds.begin(), ServedKinds.end()),
         CurrentConfig,
         0,
         true,
@@ -638,7 +650,7 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                     str << "Coloring: \"<font color=\"red\">config not set</font>\","
                         << " \"<font color=\"green\">config set in dynamic config</font>\", \"<font color=\"#007bff\">config set in static config</font>\"" << Endl;
                     str << "</div>" << Endl;
-                    NHttp::OutputRichConfigHTML(str, BaseConfig, YamlProtoConfig, CurrentConfig, DYNAMIC_KINDS, NON_YAML_KINDS, YamlConfigEnabled);
+                    NHttp::OutputRichConfigHTML(str, BaseConfig, YamlProtoConfig, CurrentConfig, ServedKinds, ServedNonYamlKinds, YamlConfigEnabled);
                 }
                 str << "<br />" << Endl;
                 COLLAPSED_REF_CONTENT("effective-startup-config", "Effective startup config") {
@@ -654,10 +666,10 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                     str << "</div>" << Endl;
                     NKikimrConfig::TAppConfig trunc;
                     if (YamlConfigEnabled) {
-                        ReplaceConfigItems(YamlProtoConfig, trunc, FilterKinds(KindsToBitMap(DYNAMIC_KINDS)), BaseConfig);
-                        ReplaceConfigItems(CurrentConfig, trunc, FilterKinds(KindsToBitMap(NON_YAML_KINDS)), trunc, false);
+                        ReplaceConfigItems(YamlProtoConfig, trunc, FilterKinds(KindsToBitMap(ServedKinds)), BaseConfig);
+                        ReplaceConfigItems(CurrentConfig, trunc, FilterKinds(KindsToBitMap(ServedNonYamlKinds)), trunc, false);
                     } else {
-                        ReplaceConfigItems(CurrentConfig, trunc, FilterKinds(KindsToBitMap(DYNAMIC_KINDS)), BaseConfig);
+                        ReplaceConfigItems(CurrentConfig, trunc, FilterKinds(KindsToBitMap(ServedKinds)), BaseConfig);
                     }
                     NHttp::OutputConfigHTML(str, trunc);
                 }
@@ -698,8 +710,8 @@ void TConfigsDispatcher::Handle(TEvInterconnect::TEvNodesInfo::TPtr &ev)
                                 YamlProtoConfig,
                                 CurrentConfig,
                                 {DebugInfo ? DebugInfo->InitInfo : THashMap<ui32, TConfigItemInfo>{}},
-                                DYNAMIC_KINDS,
-                                NON_YAML_KINDS,
+                                ServedKinds,
+                                ServedNonYamlKinds,
                                 YamlConfigEnabled);
                         }
                         str << "<br />" << Endl;
@@ -1269,13 +1281,13 @@ TConfigsDispatcher::TCheckKindsResult TConfigsDispatcher::CheckKinds(const TVect
     bool yamlKinds = false;
     bool nonYamlKinds = false;
     for (auto kind : kinds) {
-        if (!DYNAMIC_KINDS.contains(kind)) {
+        if (!ServedKinds.contains(kind)) {
             TStringStream sstr;
             sstr << static_cast<NKikimrConsole::TConfigItem::EKind>(kind);
             Y_ABORT("unexpected kind in %s: %s", errorContext, sstr.Str().data());
         }
 
-        if (NON_YAML_KINDS.contains(kind)) {
+        if (ServedNonYamlKinds.contains(kind)) {
             nonYamlKinds = true;
         } else {
             yamlKinds = true;

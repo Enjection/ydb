@@ -8,15 +8,19 @@ PEERDIR(
     library/cpp/getopt
     library/cpp/json
     library/cpp/monlib/service
+    library/cpp/protobuf/json
     library/cpp/protobuf/util
     library/cpp/regex/pcre
     library/cpp/svnversion
+    ydb/core/config/handler_hub
     ydb/core/testlib/default
+    ydb/library/fyamlcpp
 )
 
 YQL_LAST_ABI_VERSION()
 
 SRCS(
+    ut_configs_dispatcher/ut_private_config.proto
     configs_cache_ut.cpp
     configs_dispatcher_ut.cpp
 )

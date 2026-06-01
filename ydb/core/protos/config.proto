@@ -3245,6 +3245,12 @@ message TAppConfig {
     optional TTliConfig TliConfig = 120;
 
     optional TLongTxServiceConfig LongTxServiceConfig = 121;
+
+    // Opaque, end-node-owned configuration. The console/cluster carries this
+    // string verbatim and never parses it; only the target node interprets it,
+    // with a schema (proto) that need not be linked into the console binary.
+    // This is the "private config" carrier studied in ydb/core/config/handler_hub.
+    optional string PrivateConfig = 122;
 }
 
 message TYdbVersion {

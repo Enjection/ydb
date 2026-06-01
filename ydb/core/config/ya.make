@@ -1,4 +1,5 @@
 RECURSE(
+    handler_hub
     init
     tools
     utils
