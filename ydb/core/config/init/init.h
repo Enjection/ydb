@@ -15,6 +15,8 @@
 #include <util/generic/string.h>
 #include <util/datetime/base.h>
 
+#include <memory>
+
 namespace NKikimr::NConfig {
 
 struct TConfigItemInfo {
@@ -259,14 +261,14 @@ struct TDebugInfo {
     THashMap<ui32, TConfigItemInfo> InitInfo;
 };
 
-// In-process consumer of resolved config. A client that reuses the configs
-// dispatcher registers handlers via TConfigsDispatcherInitInfo::ConfigHandlers;
-// the dispatcher calls OnConfig (on its own mailbox) with the effective config
-// at startup and on every change. Used e.g. to read an opaque private config
-// section and parse it with a schema the cluster itself does not have.
-struct IConfigHandler : TThrRefBase {
-    virtual ~IConfigHandler() = default;
-    virtual void OnConfig(const NKikimrConfig::TAppConfig& config) = 0;
+// Parses an opaque config section (carried as a string by the cluster) into a
+// message whose schema the dispatcher itself does not have. Provided by the end
+// node, so the configs dispatcher stays schema-agnostic. The parsed message is
+// attached to the node-local config notification (see TEvConfigNotificationRequest).
+struct IOpaqueConfigParser : TThrRefBase {
+    virtual ~IOpaqueConfigParser() = default;
+    // Return the parsed message, or nullptr to attach nothing.
+    virtual std::shared_ptr<::google::protobuf::Message> Parse(const TString& opaque) const = 0;
 };
 
 struct TConfigsDispatcherInitInfo {
@@ -278,9 +280,10 @@ struct TConfigsDispatcherInitInfo {
     std::optional<TDebugInfo> DebugInfo;
     std::shared_ptr<NConfig::TRecordedInitialConfiguratorDeps> RecordedInitialConfiguratorDeps = nullptr;
     std::vector<TString> Args;
-    // In-process handlers invoked with the effective config at startup and on
-    // every change. Node-local; empty by default (stock behaviour unchanged).
-    TVector<TIntrusivePtr<IConfigHandler>> ConfigHandlers;
+    // Per-kind parsers for opaque config sections (kind == TAppConfig field
+    // number). Node-local; empty by default. When set, the dispatcher parses the
+    // section and attaches the result to the notification for that kind.
+    THashMap<ui32, TIntrusivePtr<IOpaqueConfigParser>> OpaqueConfigParsers;
 };
 
 class IInitialConfigurator {

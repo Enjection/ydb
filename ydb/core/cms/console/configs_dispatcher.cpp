@@ -74,6 +74,10 @@ const THashSet<ui32> DYNAMIC_KINDS({
     (ui32)NKikimrConsole::TConfigItem::BlockstoreConfigItem,
     (ui32)NKikimrConsole::TConfigItem::StatisticsConfigItem,
     (ui32)NKikimrConsole::TConfigItem::TliConfigItem,
+    // Regular served kind; its payload is opaque to the cluster (captured as a
+    // string via the OpaqueConfig marker) and parsed only by the end-node
+    // subscriber with a proto the cluster does not have.
+    (ui32)NKikimrConsole::TConfigItem::PrivateConfigItem,
 });
 
 const THashSet<ui32> NON_YAML_KINDS({
@@ -326,14 +330,29 @@ private:
     NKikimrConfig::TAppConfig YamlProtoConfig;
     bool YamlConfigEnabled = false;
 
-    // In-process handlers invoked with the effective config whenever it changes.
-    // Lets a client that reuses the dispatcher consume config sections (e.g. an
-    // opaque private config) directly, without a separate subscriber actor.
-    TVector<TIntrusivePtr<NConfig::IConfigHandler>> ConfigHandlers;
+    // Per-kind parsers for opaque config sections, injected by a client that
+    // reuses the dispatcher. The dispatcher has no schema for these sections; it
+    // just calls the parser and attaches the result to the node-local notification.
+    THashMap<ui32, TIntrusivePtr<NConfig::IOpaqueConfigParser>> OpaqueConfigParsers;
 
-    void NotifyConfigHandlers(const NKikimrConfig::TAppConfig& config) {
-        for (const auto& handler : ConfigHandlers) {
-            handler->OnConfig(config);
+    void PopulateParsedConfigs(TEvConsole::TEvConfigNotificationRequest& ev) const {
+        if (OpaqueConfigParsers.empty()) {
+            return;
+        }
+        const auto& config = ev.Record.GetConfig();
+        const auto* desc = config.GetDescriptor();
+        const auto* refl = config.GetReflection();
+        for (const auto& [kind, parser] : OpaqueConfigParsers) {
+            const auto* field = desc->FindFieldByNumber(kind);
+            if (!field || field->cpp_type() != ::google::protobuf::FieldDescriptor::CPPTYPE_STRING) {
+                continue;
+            }
+            if (!refl->HasField(config, field)) {
+                continue;
+            }
+            if (auto parsed = parser->Parse(refl->GetString(config, field))) {
+                ev.ParsedConfigs[kind] = std::move(parsed);
+            }
         }
     }
 
@@ -351,8 +370,9 @@ TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInf
         , RecordedInitialConfiguratorDeps(std::move(initInfo.RecordedInitialConfiguratorDeps))
         , Args(initInfo.Args)
         , NextRequestCookie(Now().GetValue())
-        , ConfigHandlers(initInfo.ConfigHandlers)
-{}
+{
+    OpaqueConfigParsers = initInfo.OpaqueConfigParsers;
+}
 
 void TConfigsDispatcher::Bootstrap()
 {
@@ -393,10 +413,6 @@ void TConfigsDispatcher::Bootstrap()
         });
     CommonSubscriptionClient = RegisterWithSameMailbox(commonClient);
 
-    // Give in-process handlers the startup config immediately; config updates
-    // refine it via Handle(TEvConfigSubscriptionNotification).
-    NotifyConfigHandlers(CurrentConfig);
-
     Become(&TThis::StateInit);
 }
 
@@ -424,6 +440,7 @@ void TConfigsDispatcher::SendUpdateToSubscriber(TSubscription::TPtr subscription
 
     auto notification = MakeHolder<TEvConsole::TEvConfigNotificationRequest>();
     notification->Record.CopyFrom(subscription->UpdateInProcess->Record);
+    PopulateParsedConfigs(*notification);
 
     BLOG_TRACE("Send TEvConsole::TEvConfigNotificationRequest to " << subscriber
                 << ": " << notification->Record.ShortDebugString());
@@ -1166,8 +1183,6 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvConfigSubscriptionNotification::T
     AppData()->YamlConfigEnabled = YamlConfigEnabled;
 
     std::swap(YamlProtoConfig, newYamlProtoConfig);
-
-    NotifyConfigHandlers(YamlConfigEnabled ? YamlProtoConfig : CurrentConfig);
 
     THashSet<ui32> affectedKinds;
     for (const auto& kind : ev->Get()->Record.GetAffectedKinds()) {
