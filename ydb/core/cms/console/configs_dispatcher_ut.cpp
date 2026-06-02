@@ -1702,16 +1702,22 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherPrivateConfigTests) {
     Y_UNIT_TEST(TestDispatcherParsesOpaquePrivateConfig) {
         const ui32 kSecretPort = 1234;
         const TString mainYaml = R"(
+---
 metadata:
   cluster: ""
   version: 0
 config:
+  yaml_config_enabled: true
   private_config:
     secret_port: 1234
+selector_config: []
 )";
+        // The OpaqueConfig marker makes the cluster accept config.private_config
+        // WITHOUT allow_unknown_fields and store an EMPTY TPrivateConfig -- the
+        // cluster never holds nor understands the payload.
         NKikimrConfig::TAppConfig captured = NKikimr::NYaml::Parse(mainYaml, /*transform=*/ false);
-        UNIT_ASSERT_C(captured.HasPrivateConfig(),
-                      "config.private_config was not captured into the opaque carrier");
+        UNIT_ASSERT_C(captured.HasPrivateConfig(), "config.private_config was not accepted");
+        UNIT_ASSERT(captured.GetPrivateConfig().ByteSizeLong() == 0);  // stored empty
 
         // Inject the end-node parser for the private kind into the dispatcher.
         NConfig::TConfigsDispatcherInitInfo initInfo;
@@ -1738,12 +1744,10 @@ config:
         TActorId subscriber = runtime.Register(new TPrivateConfigSubscriber(runtime.Sender));
         runtime.EnableScheduleForActor(subscriber, true);
 
-        // Deliver the captured opaque carrier as a normal config item.
-        NKikimrConfig::TAppConfig carrier;
-        carrier.SetPrivateConfig(captured.GetPrivateConfig());
-        SendConfigure(runtime, MakeAddAction(
-            MakeConfigItem(NKikimrConsole::TConfigItem::PrivateConfigItem, carrier,
-                           {}, {}, "", "", 1, NKikimrConsole::TConfigItem::MERGE, "")));
+        // The operator authors the opaque section in the MainConfig YAML; the
+        // dispatcher resolves it and pulls config.private_config from the resolved
+        // YAML for the injected parser (the empty message itself carries nothing).
+        CheckReplaceConfig(runtime, Ydb::StatusIds::SUCCESS, mainYaml);
 
         // The subscriber reports secret_port read from the dispatcher-parsed config.
         TAutoPtr<IEventHandle> handle;

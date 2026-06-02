@@ -22,6 +22,7 @@
 
 #include <library/cpp/json/json_reader.h>
 #include <library/cpp/json/json_writer.h>
+#include <library/cpp/protobuf/json/util.h>
 
 #include <util/generic/bitmap.h>
 #include <util/generic/ptr.h>
@@ -336,21 +337,35 @@ private:
     THashMap<ui32, TIntrusivePtr<NConfig::IOpaqueConfigParser>> OpaqueConfigParsers;
 
     void PopulateParsedConfigs(TEvConsole::TEvConfigNotificationRequest& ev) const {
-        if (OpaqueConfigParsers.empty()) {
+        if (OpaqueConfigParsers.empty() || ResolvedJsonConfig.empty()) {
             return;
+        }
+        // The opaque carrier (PrivateConfig) is an empty message -- it holds no
+        // content. The section lives in the resolved YAML; pull it from there and
+        // hand it to the end-node-provided parser, which has the real schema.
+        NJson::TJsonValue resolved;
+        if (!NJson::ReadJsonTree(ResolvedJsonConfig, &resolved)) {
+            return;
+        }
+        const NJson::TJsonValue* configSection = &resolved;
+        if (const NJson::TJsonValue* c = nullptr; resolved.GetValuePointer("config", &c)) {
+            configSection = c;
         }
         const auto& config = ev.Record.GetConfig();
         const auto* desc = config.GetDescriptor();
         const auto* refl = config.GetReflection();
         for (const auto& [kind, parser] : OpaqueConfigParsers) {
             const auto* field = desc->FindFieldByNumber(kind);
-            if (!field || field->cpp_type() != ::google::protobuf::FieldDescriptor::CPPTYPE_STRING) {
+            if (!field || !refl->HasField(config, field)) {
+                continue;   // section not present in this notification
+            }
+            TString name = field->name();
+            NProtobufJson::ToSnakeCaseDense(&name);
+            const NJson::TJsonValue* section = nullptr;
+            if (!configSection->GetValuePointer(name, &section)) {
                 continue;
             }
-            if (!refl->HasField(config, field)) {
-                continue;
-            }
-            if (auto parsed = parser->Parse(refl->GetString(config, field))) {
+            if (auto parsed = parser->Parse(NJson::WriteJson(*section, /*formatOutput=*/ false))) {
                 ev.ParsedConfigs[kind] = std::move(parsed);
             }
         }

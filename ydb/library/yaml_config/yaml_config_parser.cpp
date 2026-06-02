@@ -1640,40 +1640,51 @@ endDiskTypeCheck:   ;
         return replaceRequest;
     }
 
-    // snake_case names of the top-level TAppConfig fields tagged with the
-    // OpaqueConfig marker (computed once via reflection).
-    const THashSet<TString>& OpaqueConfigFieldNames() {
-        static const THashSet<TString> names = [] {
-            THashSet<TString> result;
+    // Top-level TAppConfig fields tagged with the OpaqueConfig marker, with
+    // whether the field is a message (computed once via reflection).
+    struct TOpaqueField {
+        TString Name;       // snake_case key
+        bool IsMessage;
+    };
+    const TVector<TOpaqueField>& OpaqueConfigFields() {
+        static const TVector<TOpaqueField> fields = [] {
+            TVector<TOpaqueField> result;
             const auto* desc = NKikimrConfig::TAppConfig::descriptor();
             for (int i = 0; i < desc->field_count(); ++i) {
                 const auto* field = desc->field(i);
                 if (field->options().GetExtension(NKikimrConfig::NMarkers::OpaqueConfig)) {
                     TString name = field->name();
                     NProtobufJson::ToSnakeCaseDense(&name);
-                    result.insert(name);
+                    result.push_back({name,
+                        field->cpp_type() == ::google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE});
                 }
             }
             return result;
         }();
-        return names;
+        return fields;
     }
 
-    // For each opaque-marked field present as a sub-tree, replace it with its
-    // serialized text so the proto merge stores the content verbatim into the
-    // (string) field instead of validating or rejecting the unknown-to-the-cluster
-    // contents. Only the target node interprets the captured text.
+    // Handle opaque-marked fields so the cluster accepts their content without
+    // knowing the schema and without allow_unknown_fields:
+    //  * message field -> replace the sub-tree with an empty object, so the proto
+    //    merge stores an empty message and the unknown-field collector never sees
+    //    the content (which is recovered later from the resolved YAML);
+    //  * string field  -> capture the sub-tree as text into the string.
     void CaptureOpaqueConfigFields(NJson::TJsonValue& configJson) {
         if (!configJson.IsMap()) {
             return;
         }
-        for (const auto& name : OpaqueConfigFieldNames()) {
-            if (!configJson.Has(name)) {
+        for (const auto& f : OpaqueConfigFields()) {
+            if (!configJson.Has(f.Name)) {
                 continue;
             }
-            const NJson::TJsonValue& value = configJson[name];
-            if (value.IsMap() || value.IsArray()) {
-                configJson[name] = NJson::WriteJson(value, /*formatOutput=*/ false);
+            if (f.IsMessage) {
+                configJson[f.Name] = NJson::TJsonValue(NJson::JSON_MAP);
+            } else {
+                NJson::TJsonValue& value = configJson[f.Name];
+                if (value.IsMap() || value.IsArray()) {
+                    value = NJson::WriteJson(value, /*formatOutput=*/ false);
+                }
             }
         }
     }
