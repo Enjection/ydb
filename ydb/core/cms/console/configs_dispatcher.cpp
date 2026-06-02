@@ -440,7 +440,8 @@ void TConfigsDispatcher::SendUpdateToSubscriber(TSubscription::TPtr subscription
 
     auto notification = MakeHolder<TEvConsole::TEvConfigNotificationRequest>();
     notification->Record.CopyFrom(subscription->UpdateInProcess->Record);
-    PopulateParsedConfigs(*notification);
+    // Parsed once when UpdateInProcess was built; share the (read-only) result.
+    notification->ParsedConfigs = subscription->UpdateInProcess->ParsedConfigs;
 
     BLOG_TRACE("Send TEvConsole::TEvConfigNotificationRequest to " << subscriber
                 << ": " << notification->Record.ShortDebugString());
@@ -1229,6 +1230,7 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvConfigSubscriptionNotification::T
             Y_FOR_EACH_BIT(kind, FilterKinds(kinds)) {
                 subscription->UpdateInProcess->Record.AddItemKinds(kind);
             }
+            PopulateParsedConfigs(*subscription->UpdateInProcess);
             subscription->UpdateInProcessCookie = ++NextRequestCookie;
             subscription->UpdateInProcessConfigVersion = FilterVersion(ev->Get()->Record.GetConfig().GetVersion(), FilterKinds(kinds));
 
@@ -1373,6 +1375,7 @@ void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvSetConfigSubscriptionRe
             Y_FOR_EACH_BIT(kind, kinds) {
                 subscription->UpdateInProcess->Record.AddItemKinds(kind);
             }
+            PopulateParsedConfigs(*subscription->UpdateInProcess);
             subscription->UpdateInProcessCookie = ++NextRequestCookie;
             subscription->UpdateInProcessConfigVersion = FilterVersion(CurrentConfig.GetVersion(), kinds);
         }
