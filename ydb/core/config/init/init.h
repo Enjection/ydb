@@ -10,9 +10,12 @@
 #include <library/cpp/getopt/small/last_getopt_opts.h>
 
 #include <util/generic/hash.h>
+#include <util/generic/ptr.h>
 #include <util/generic/vector.h>
 #include <util/generic/string.h>
 #include <util/datetime/base.h>
+
+#include <memory>
 
 namespace NKikimr::NConfig {
 
@@ -258,6 +261,16 @@ struct TDebugInfo {
     THashMap<ui32, TConfigItemInfo> InitInfo;
 };
 
+// Parses an opaque config section (carried as a string by the cluster) into a
+// message whose schema the dispatcher itself does not have. Provided by the end
+// node, so the configs dispatcher stays schema-agnostic. The parsed message is
+// attached to the node-local config notification (see TEvConfigNotificationRequest).
+struct IOpaqueConfigParser : TThrRefBase {
+    virtual ~IOpaqueConfigParser() = default;
+    // Return the parsed message, or nullptr to attach nothing.
+    virtual std::shared_ptr<::google::protobuf::Message> Parse(const TString& opaque) const = 0;
+};
+
 struct TConfigsDispatcherInitInfo {
     NKikimrConfig::TAppConfig InitialConfig;
     TString StartupConfigYaml;
@@ -267,6 +280,10 @@ struct TConfigsDispatcherInitInfo {
     std::optional<TDebugInfo> DebugInfo;
     std::shared_ptr<NConfig::TRecordedInitialConfiguratorDeps> RecordedInitialConfiguratorDeps = nullptr;
     std::vector<TString> Args;
+    // Per-kind parsers for opaque config sections (kind == TAppConfig field
+    // number). Node-local; empty by default. When set, the dispatcher parses the
+    // section and attaches the result to the notification for that kind.
+    THashMap<ui32, TIntrusivePtr<IOpaqueConfigParser>> OpaqueConfigParsers;
 };
 
 class IInitialConfigurator {

@@ -3245,6 +3245,20 @@ message TAppConfig {
     optional TTliConfig TliConfig = 120;
 
     optional TLongTxServiceConfig LongTxServiceConfig = 121;
+
+    // Opaque, end-node-owned configuration. Authored as a nested YAML map under
+    // config.private_config. The OpaqueConfig marker makes the YAML->proto parser
+    // accept that sub-tree without validating it (so the console needs no
+    // allow_unknown_fields) and store an EMPTY TPrivateConfig -- the cluster never
+    // holds nor understands the payload. The actual content travels in the
+    // resolved YAML; the configs dispatcher hands it to an end-node-provided
+    // parser, which interprets it with its own schema (e.g. TPrivateConfigImpl).
+    optional TPrivateConfig PrivateConfig = 122 [(NMarkers.OpaqueConfig) = true];
+}
+
+// Intentionally empty: the cluster does not know the private config's schema.
+// The end node interprets the section with its own message (e.g. TPrivateConfigImpl).
+message TPrivateConfig {
 }
 
 message TYdbVersion {

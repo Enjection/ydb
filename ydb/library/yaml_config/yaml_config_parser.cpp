@@ -18,8 +18,11 @@
 #include <ydb/core/protos/tablet.pb.h>
 #include <library/cpp/json/writer/json.h>
 #include <library/cpp/protobuf/json/util.h>
+#include <library/cpp/json/json_writer.h>
 #include <ydb/library/yaml_json/yaml_to_json.h>
+#include <ydb/core/config/protos/marker.pb.h>
 
+#include <util/generic/hash_set.h>
 #include <util/generic/string.h>
 
 template <>
@@ -1637,6 +1640,55 @@ endDiskTypeCheck:   ;
         return replaceRequest;
     }
 
+    // Top-level TAppConfig fields tagged with the OpaqueConfig marker, with
+    // whether the field is a message (computed once via reflection).
+    struct TOpaqueField {
+        TString Name;       // snake_case key
+        bool IsMessage;
+    };
+    const TVector<TOpaqueField>& OpaqueConfigFields() {
+        static const TVector<TOpaqueField> fields = [] {
+            TVector<TOpaqueField> result;
+            const auto* desc = NKikimrConfig::TAppConfig::descriptor();
+            for (int i = 0; i < desc->field_count(); ++i) {
+                const auto* field = desc->field(i);
+                if (field->options().GetExtension(NKikimrConfig::NMarkers::OpaqueConfig)) {
+                    TString name = field->name();
+                    NProtobufJson::ToSnakeCaseDense(&name);
+                    result.push_back({name,
+                        field->cpp_type() == ::google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE});
+                }
+            }
+            return result;
+        }();
+        return fields;
+    }
+
+    // Handle opaque-marked fields so the cluster accepts their content without
+    // knowing the schema and without allow_unknown_fields:
+    //  * message field -> replace the sub-tree with an empty object, so the proto
+    //    merge stores an empty message and the unknown-field collector never sees
+    //    the content (which is recovered later from the resolved YAML);
+    //  * string field  -> capture the sub-tree as text into the string.
+    void CaptureOpaqueConfigFields(NJson::TJsonValue& configJson) {
+        if (!configJson.IsMap()) {
+            return;
+        }
+        for (const auto& f : OpaqueConfigFields()) {
+            if (!configJson.Has(f.Name)) {
+                continue;
+            }
+            if (f.IsMessage) {
+                configJson[f.Name] = NJson::TJsonValue(NJson::JSON_MAP);
+            } else {
+                NJson::TJsonValue& value = configJson[f.Name];
+                if (value.IsMap() || value.IsArray()) {
+                    value = NJson::WriteJson(value, /*formatOutput=*/ false);
+                }
+            }
+        }
+    }
+
     void Parse(const NJson::TJsonValue& json, NProtobufJson::TJson2ProtoConfig convertConfig, NKikimrConfig::TAppConfig& config,
                bool transform, EParsePhase* phase, bool relaxed) {
         auto runPhase = [phase](EParsePhase value, auto&& func) {
@@ -1680,6 +1732,7 @@ endDiskTypeCheck:   ;
             ClearEphemeralFields(jsonNode);
         }
 
+        CaptureOpaqueConfigFields(jsonNode);
         runPhase(EParsePhase::JsonToProto, [&] {
             NProtobufJson::MergeJson2Proto(jsonNode, config, convertConfig);
         });

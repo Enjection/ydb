@@ -2,6 +2,11 @@
 #include "ut_helpers.h"
 
 #include <ydb/core/config/init/mock.h>
+#include <ydb/core/cms/console/ut_configs_dispatcher/ut_private_config.pb.h>
+
+#include <ydb/library/fyamlcpp/fyamlcpp.h>
+#include <ydb/library/yaml_config/yaml_config_parser.h>
+#include <library/cpp/protobuf/json/json2proto.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include <ydb/core/tablet/bootstrapper.h>
 #include <ydb/core/tablet_flat/tablet_flat_executed.h>
@@ -166,6 +171,7 @@ struct TEvPrivate {
         EvSetSubscription,
         EvGotNotification,
         EvComplete,
+        EvParsedPrivate,
         EvEnd
     };
 
@@ -206,6 +212,12 @@ struct TEvPrivate {
     };
 
     struct TEvComplete : public TEventLocal<TEvComplete, EvComplete> {};
+
+    // Carries the secret_port the end-node subscriber read from the dispatcher-
+    // parsed TUtPrivateConfig (ParsedConfigs), proving the dispatcher did the parse.
+    struct TEvParsedPrivate : public TEventLocal<TEvParsedPrivate, EvParsedPrivate> {
+        ui32 SecretPort = 0;
+    };
 };
 
 class TTestSubscriber : public TActorBootstrapped<TTestSubscriber> {
@@ -1617,6 +1629,134 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
             "labels": []
         })json");
         UNIT_ASSERT_C(expected == actual, jsonBody);
+    }
+}
+
+Y_UNIT_TEST_SUITE(TConfigsDispatcherPrivateConfigTests) {
+
+    // End-node-only parser: turns the opaque carrier string into the
+    // end-node-only TUtPrivateConfig. Injected into the configs dispatcher, which
+    // has no schema for it, so the dispatcher does the parse without ever
+    // depending on the end-node proto.
+    struct TUtPrivateConfigParser : NConfig::IOpaqueConfigParser {
+        std::shared_ptr<::google::protobuf::Message> Parse(const TString& opaque) const override {
+            auto msg = std::make_shared<NKikimrPrivateConfigUt::TUtPrivateConfig>();
+            auto doc = NFyaml::TDocument::Parse(opaque);
+            TStringStream jsonStream;
+            jsonStream << NFyaml::TJsonEmitter(doc.Root());
+            NJson::TJsonValue json;
+            Y_ENSURE(NJson::ReadJsonTree(jsonStream.Str(), &json));
+            NProtobufJson::TJson2ProtoConfig j2p;
+            j2p.SetFieldNameMode(NProtobufJson::TJson2ProtoConfig::FieldNameSnakeCaseDense);
+            NProtobufJson::MergeJson2Proto(json, *msg, j2p);
+            return msg;
+        }
+    };
+
+    // End-node subscriber: subscribes to the private kind exactly like SchemeShard
+    // subscribes to SchemeShardConfigItem, and reads the ALREADY-PARSED
+    // TUtPrivateConfig from the notification's ParsedConfigs -- it does not touch
+    // the opaque string itself; the dispatcher parsed it.
+    class TPrivateConfigSubscriber : public TActorBootstrapped<TPrivateConfigSubscriber> {
+        TActorId Sink;
+    public:
+        TPrivateConfigSubscriber(TActorId sink)
+            : Sink(sink)
+        {}
+
+        void Bootstrap(const TActorContext &ctx) {
+            Become(&TThis::StateWork);
+            ctx.Send(MakeConfigsDispatcherID(ctx.SelfID.NodeId()),
+                new TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest(
+                    (ui32)NKikimrConsole::TConfigItem::PrivateConfigItem, ctx.SelfID));
+        }
+
+        void Handle(TEvConsole::TEvConfigNotificationRequest::TPtr &ev, const TActorContext &ctx) {
+            auto &rec = ev->Get()->Record;
+            const auto &parsed = ev->Get()->ParsedConfigs;
+            if (auto it = parsed.find((ui32)NKikimrConsole::TConfigItem::PrivateConfigItem);
+                it != parsed.end() && it->second) {
+                NKikimrPrivateConfigUt::TUtPrivateConfig impl;
+                impl.CopyFrom(*it->second);                 // descriptor-checked, no RTTI
+                auto *event = new TEvPrivate::TEvParsedPrivate;
+                event->SecretPort = impl.GetSecretPort();
+                ctx.Send(Sink, event);
+            }
+            ctx.Send(ev->Sender, new TEvConsole::TEvConfigNotificationResponse(rec), 0, ev->Cookie);
+        }
+
+        STFUNC(StateWork) {
+            switch (ev->GetTypeRewrite()) {
+                HFunc(TEvConsole::TEvConfigNotificationRequest, Handle);
+                IgnoreFunc(TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
+            }
+        }
+    };
+
+    // The private config is a REGULAR kind (PrivateConfigItem) a consumer
+    // subscribes to like SchemeShard. Its payload is OPAQUE to the cluster:
+    // authored as a nested YAML map under config.private_config and captured into
+    // the PrivateConfig string by the OpaqueConfig marker. The parsing into the
+    // end-node-only TUtPrivateConfig is owned by the dispatcher via an injected
+    // IOpaqueConfigParser, and delivered to the subscriber in ParsedConfigs.
+    Y_UNIT_TEST(TestDispatcherParsesOpaquePrivateConfig) {
+        const ui32 kSecretPort = 1234;
+        const TString mainYaml = R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+config:
+  yaml_config_enabled: true
+  private_config:
+    secret_port: 1234
+selector_config: []
+)";
+        // The OpaqueConfig marker makes the cluster accept config.private_config
+        // WITHOUT allow_unknown_fields and store an EMPTY TPrivateConfig -- the
+        // cluster never holds nor understands the payload.
+        NKikimrConfig::TAppConfig captured = NKikimr::NYaml::Parse(mainYaml, /*transform=*/ false);
+        UNIT_ASSERT_C(captured.HasPrivateConfig(), "config.private_config was not accepted");
+        UNIT_ASSERT(captured.GetPrivateConfig().ByteSizeLong() == 0);  // stored empty
+
+        // Inject the end-node parser for the private kind into the dispatcher.
+        NConfig::TConfigsDispatcherInitInfo initInfo;
+        initInfo.OpaqueConfigParsers[(ui32)NKikimrConsole::TConfigItem::PrivateConfigItem] =
+            MakeIntrusive<TUtPrivateConfigParser>();
+
+        TTenantTestConfig testConfig = DefaultConsoleTestConfig();
+        testConfig.CreateConfigsDispatcher = false;   // we create it with the parser
+        TTenantTestRuntime runtime(testConfig);
+
+        auto* dispatcher = NConsole::CreateConfigsDispatcher(initInfo);
+        TActorId dispatcherId = runtime.Register(dispatcher);
+        runtime.EnableScheduleForActor(dispatcherId, true);
+        runtime.RegisterService(MakeConfigsDispatcherID(runtime.GetNodeId(0)), dispatcherId);
+
+        // Wait until the dispatcher gets its first config from CMS (-> StateWork).
+        {
+            TDispatchOptions options;
+            options.FinalEvents.emplace_back(TEvConsole::EvConfigSubscriptionNotification);
+            runtime.DispatchEvents(options);
+        }
+
+        // The end-node consumer subscribes to the private kind, like SchemeShard.
+        TActorId subscriber = runtime.Register(new TPrivateConfigSubscriber(runtime.Sender));
+        runtime.EnableScheduleForActor(subscriber, true);
+
+        // The operator authors the opaque section in the MainConfig YAML; the
+        // dispatcher resolves it and pulls config.private_config from the resolved
+        // YAML for the injected parser (the empty message itself carries nothing).
+        CheckReplaceConfig(runtime, Ydb::StatusIds::SUCCESS, mainYaml);
+
+        // The subscriber reports secret_port read from the dispatcher-parsed config.
+        TAutoPtr<IEventHandle> handle;
+        ui32 seenPort = 0;
+        for (int i = 0; i < 10 && seenPort != kSecretPort; ++i) {
+            auto ev = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvParsedPrivate>(handle);
+            seenPort = ev->SecretPort;
+        }
+        UNIT_ASSERT_VALUES_EQUAL(seenPort, kSecretPort);
     }
 }
 

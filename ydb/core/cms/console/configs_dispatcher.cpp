@@ -22,6 +22,7 @@
 
 #include <library/cpp/json/json_reader.h>
 #include <library/cpp/json/json_writer.h>
+#include <library/cpp/protobuf/json/util.h>
 
 #include <util/generic/bitmap.h>
 #include <util/generic/ptr.h>
@@ -74,6 +75,10 @@ const THashSet<ui32> DYNAMIC_KINDS({
     (ui32)NKikimrConsole::TConfigItem::BlockstoreConfigItem,
     (ui32)NKikimrConsole::TConfigItem::StatisticsConfigItem,
     (ui32)NKikimrConsole::TConfigItem::TliConfigItem,
+    // Regular served kind; its payload is opaque to the cluster (captured as a
+    // string via the OpaqueConfig marker) and parsed only by the end-node
+    // subscriber with a proto the cluster does not have.
+    (ui32)NKikimrConsole::TConfigItem::PrivateConfigItem,
 });
 
 const THashSet<ui32> NON_YAML_KINDS({
@@ -326,6 +331,46 @@ private:
     NKikimrConfig::TAppConfig YamlProtoConfig;
     bool YamlConfigEnabled = false;
 
+    // Per-kind parsers for opaque config sections, injected by a client that
+    // reuses the dispatcher. The dispatcher has no schema for these sections; it
+    // just calls the parser and attaches the result to the node-local notification.
+    THashMap<ui32, TIntrusivePtr<NConfig::IOpaqueConfigParser>> OpaqueConfigParsers;
+
+    void PopulateParsedConfigs(TEvConsole::TEvConfigNotificationRequest& ev) const {
+        if (OpaqueConfigParsers.empty() || ResolvedJsonConfig.empty()) {
+            return;
+        }
+        // The opaque carrier (PrivateConfig) is an empty message -- it holds no
+        // content. The section lives in the resolved YAML; pull it from there and
+        // hand it to the end-node-provided parser, which has the real schema.
+        NJson::TJsonValue resolved;
+        if (!NJson::ReadJsonTree(ResolvedJsonConfig, &resolved)) {
+            return;
+        }
+        const NJson::TJsonValue* configSection = &resolved;
+        if (const NJson::TJsonValue* c = nullptr; resolved.GetValuePointer("config", &c)) {
+            configSection = c;
+        }
+        const auto& config = ev.Record.GetConfig();
+        const auto* desc = config.GetDescriptor();
+        const auto* refl = config.GetReflection();
+        for (const auto& [kind, parser] : OpaqueConfigParsers) {
+            const auto* field = desc->FindFieldByNumber(kind);
+            if (!field || !refl->HasField(config, field)) {
+                continue;   // section not present in this notification
+            }
+            TString name = field->name();
+            NProtobufJson::ToSnakeCaseDense(&name);
+            const NJson::TJsonValue* section = nullptr;
+            if (!configSection->GetValuePointer(name, &section)) {
+                continue;
+            }
+            if (auto parsed = parser->Parse(NJson::WriteJson(*section, /*formatOutput=*/ false))) {
+                ev.ParsedConfigs[kind] = std::move(parsed);
+            }
+        }
+    }
+
 };
 
 TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInfo)
@@ -340,7 +385,9 @@ TConfigsDispatcher::TConfigsDispatcher(const TConfigsDispatcherInitInfo& initInf
         , RecordedInitialConfiguratorDeps(std::move(initInfo.RecordedInitialConfiguratorDeps))
         , Args(initInfo.Args)
         , NextRequestCookie(Now().GetValue())
-{}
+{
+    OpaqueConfigParsers = initInfo.OpaqueConfigParsers;
+}
 
 void TConfigsDispatcher::Bootstrap()
 {
@@ -408,6 +455,8 @@ void TConfigsDispatcher::SendUpdateToSubscriber(TSubscription::TPtr subscription
 
     auto notification = MakeHolder<TEvConsole::TEvConfigNotificationRequest>();
     notification->Record.CopyFrom(subscription->UpdateInProcess->Record);
+    // Parsed once when UpdateInProcess was built; share the (read-only) result.
+    notification->ParsedConfigs = subscription->UpdateInProcess->ParsedConfigs;
 
     BLOG_TRACE("Send TEvConsole::TEvConfigNotificationRequest to " << subscriber
                 << ": " << notification->Record.ShortDebugString());
@@ -1196,6 +1245,7 @@ void TConfigsDispatcher::Handle(TEvConsole::TEvConfigSubscriptionNotification::T
             Y_FOR_EACH_BIT(kind, FilterKinds(kinds)) {
                 subscription->UpdateInProcess->Record.AddItemKinds(kind);
             }
+            PopulateParsedConfigs(*subscription->UpdateInProcess);
             subscription->UpdateInProcessCookie = ++NextRequestCookie;
             subscription->UpdateInProcessConfigVersion = FilterVersion(ev->Get()->Record.GetConfig().GetVersion(), FilterKinds(kinds));
 
@@ -1340,6 +1390,7 @@ void TConfigsDispatcher::Handle(TEvConfigsDispatcher::TEvSetConfigSubscriptionRe
             Y_FOR_EACH_BIT(kind, kinds) {
                 subscription->UpdateInProcess->Record.AddItemKinds(kind);
             }
+            PopulateParsedConfigs(*subscription->UpdateInProcess);
             subscription->UpdateInProcessCookie = ++NextRequestCookie;
             subscription->UpdateInProcessConfigVersion = FilterVersion(CurrentConfig.GetVersion(), kinds);
         }
