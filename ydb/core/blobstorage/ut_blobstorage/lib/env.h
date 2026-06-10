@@ -11,7 +11,7 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 #include <ydb/library/actors/wilson/test_util/fake_wilson_uploader.h>
-#include <ydb/library/actors/retro_tracing/retro_collector.h>
+#include <ydb/library/actors/retro_tracing/collector/retro_collector.h>
 
 static auto& Cconf = Cnull;
 
@@ -162,6 +162,7 @@ struct TEnvironmentSetup {
             for (auto& id : Subscribers) {
                 auto update = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationRequest>();
                 update->Record.CopyFrom(ev->Get()->Record);
+                if (ev->Get()->SharedConfig) { update->Record.MutableConfig()->CopyFrom(*ev->Get()->SharedConfig); }
                 Send(id, update.Release(), IEventHandle::FlagTrackDelivery, cookie);
                 task->RepliesPending.insert(id);
                 const auto [it, inserted] = TasksPending.emplace(std::make_tuple(id, cookie), task);

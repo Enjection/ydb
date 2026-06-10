@@ -27,6 +27,7 @@
 #include <ydb/core/kqp/gateway/behaviour/streaming_query/behaviour.h>
 #include <ydb/core/kqp/node_service/kqp_node_service.h>
 #include <ydb/core/kqp/proxy_service/kqp_query_text_cache_service.h>
+#include <ydb/core/kqp/rm_service/kqp_rm_service.h>
 #include <ydb/core/kqp/session_actor/kqp_worker_common.h>
 #include <ydb/core/kqp/workload_service/kqp_workload_service.h>
 #include <ydb/core/mon/mon.h>
@@ -272,9 +273,11 @@ public:
         ui32 workloadManagerKind = (ui32)NKikimrConsole::TConfigItem::WorkloadManagerConfigItem;
         ui32 queryServiceConfigKind = (ui32)NKikimrConsole::TConfigItem::QueryServiceConfigItem;
         ui32 tliConfigKind = (ui32)NKikimrConsole::TConfigItem::TliConfigItem;
+        auto proxySubReq = MakeHolder<NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest>(
+            TVector<ui32>{tableServiceConfigKind, logConfigKind, featureFlagsKind, workloadManagerKind, queryServiceConfigKind, tliConfigKind});
+        proxySubReq->UseSharedConfig = false; // mutates the notification record inline - needs a private copy
         Send(NConsole::MakeConfigsDispatcherID(SelfId().NodeId()),
-            new NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest(
-                {tableServiceConfigKind, logConfigKind, featureFlagsKind, workloadManagerKind, queryServiceConfigKind, tliConfigKind}),
+            proxySubReq.Release(),
             IEventHandle::FlagTrackDelivery);
 
         WhiteBoardService = NNodeWhiteboard::MakeNodeWhiteboardServiceId(SelfId().NodeId());
@@ -291,8 +294,6 @@ public:
                 NYql::NDq::TFileSpillingServiceConfig{
                     .Root = spillingRoot,
                     .MaxTotalSize = cfg.GetMaxTotalSize(),
-                    .MaxFileSize = cfg.GetMaxFileSize(),
-                    .MaxFilePartSize = cfg.GetMaxFilePartSize(),
                     .IoThreadPoolWorkersCount = cfg.GetIoThreadPool().GetWorkersCount(),
                     .IoThreadPoolQueueSize = cfg.GetIoThreadPool().GetQueueSize(),
                     .CleanupOnShutdown = false
@@ -718,14 +719,8 @@ public:
         bool explicitSession = true;
         if (ev->Get()->GetSessionId().empty()) {
             TProcessResult<TKqpSessionInfo*> result;
-            // TODO(anely-d): workaround — warmup needs ydb_user in GUCSettings to match
-            // explicit sessions for compile cache key. Pass "" instead of Nothing() so
-            // FillGUCSettings sets ydb_user="". Proper fix: normalize GUCSettings globally.
-            auto userName = ev->Get()->GetIsWarmupCompilation()
-                ? TMaybe<TString>("")
-                : Nothing();
             if (!CreateNewSessionWorker(requestInfo, TString(DefaultKikimrPublicClusterName), false,
-                database, false, false, "", "", "", "", "", "", userName, result))
+                database, false, false, "", "", "", "", "", "", Nothing(), result))
             {
                 ReplyProcessError(result.YdbStatus, result.Error, requestId);
                 return;
@@ -1027,8 +1022,17 @@ public:
     void Handle(TEvPrivate::TEvCollectPeerProxyData::TPtr&) {
         if (!ShutdownRequested) {
             TDuration d;
-            if (!WarmupStarted && TableServiceConfig.GetEnableCompileCacheWarmup()) {
-                // Short polling interval until warmup starts
+            // Fast-poll only while warmup may still fire and RM board hasn't converged
+            // (post-convergence the warmup actor self-skips, so 2s polling is pointless).
+            bool fastPoll = false;
+            if (!WarmupStarted
+                && TableServiceConfig.GetEnableCompileCacheWarmup()
+                && PeerProxyNodeResources.size() <= 1)
+            {
+                auto rm = TryGetKqpResourceManager(SelfId().NodeId());
+                fastPoll = !rm || !rm->GetInitialBoardSyncDone();
+            }
+            if (fastPoll) {
                 d = TDuration::Seconds(2);
             } else {
                 const auto& sbs = TableServiceConfig.GetSessionBalancerSettings();

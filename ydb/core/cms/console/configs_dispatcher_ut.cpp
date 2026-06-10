@@ -202,7 +202,12 @@ struct TEvPrivate {
 
     struct TEvGotNotification : public TEventLocal<TEvGotNotification, EvGotNotification> {
         TConfigId ConfigId;
+        // Effective config, read through the GetConfig() accessor.
         NKikimrConfig::TAppConfig Config;
+        // Set when the dispatcher delivered the config via the shared immutable payload.
+        TIntrusiveConstPtr<TEvConsole::TSharedAppConfig> SharedConfig;
+        // True when the config was delivered inline in Record (opt-out subscribers).
+        bool HasInlineConfig = false;
     };
 
     struct TEvComplete : public TEventLocal<TEvComplete, EvComplete> {};
@@ -210,10 +215,11 @@ struct TEvPrivate {
 
 class TTestSubscriber : public TActorBootstrapped<TTestSubscriber> {
 public:
-    TTestSubscriber(TActorId sink, TVector<ui32> kinds, bool hold)
+    TTestSubscriber(TActorId sink, TVector<ui32> kinds, bool hold, bool useSharedConfig = true)
         : Sink(sink)
         , Kinds(std::move(kinds))
         , HoldResponse(hold)
+        , UseSharedConfig(useSharedConfig)
     {
     }
 
@@ -228,6 +234,7 @@ public:
     {
         auto *req = new TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest;
         req->ConfigItemKinds = Kinds;
+        req->UseSharedConfig = UseSharedConfig;
         ctx.Send(MakeConfigsDispatcherID(ctx.SelfID.NodeId()), req);
     }
 
@@ -259,7 +266,9 @@ public:
         if (Sink) {
             auto *event = new TEvPrivate::TEvGotNotification;
             event->ConfigId.Load(rec.GetConfigId());
-            event->Config = rec.GetConfig();
+            event->Config = ev->Get()->GetConfig();
+            event->SharedConfig = ev->Get()->SharedConfig;
+            event->HasInlineConfig = rec.HasConfig();
             ctx.Send(Sink, event);
         }
 
@@ -305,12 +314,13 @@ private:
     TActorId Sink;
     TVector<ui32> Kinds;
     bool HoldResponse;
+    bool UseSharedConfig;
     TDeque<TAutoPtr<IEventHandle>> EventsQueue;
 };
 
-TActorId AddSubscriber(TTenantTestRuntime &runtime, TVector<ui32> kinds, bool hold = false)
+TActorId AddSubscriber(TTenantTestRuntime &runtime, TVector<ui32> kinds, bool hold = false, bool useSharedConfig = true)
 {
-    auto aid = runtime.Register(new TTestSubscriber(runtime.Sender, std::move(kinds), hold));
+    auto aid = runtime.Register(new TTestSubscriber(runtime.Sender, std::move(kinds), hold, useSharedConfig));
     runtime.EnableScheduleForActor(aid, true);
     return aid;
 }
@@ -330,6 +340,18 @@ void UnholdSubscriber(TTenantTestRuntime &runtime, TActorId aid)
 void SetSubscriptions(TTenantTestRuntime &runtime, TActorId aid, TVector<ui32> kinds)
 {
     runtime.Send(new IEventHandle(aid, runtime.Sender, new TEvPrivate::TEvSetSubscription(kinds)));
+}
+
+// Configures notification delivery pacing of the dispatcher via its own config kind.
+void SetDispatcherPacing(TTenantTestRuntime &runtime, ui32 batchSize, ui32 delayMs = 0)
+{
+    NKikimrConfig::TAppConfig config;
+    config.MutableConfigsDispatcherConfig()->SetNotificationsBatchSize(batchSize);
+    config.MutableConfigsDispatcherConfig()->SetNotificationsBatchDelayMs(delayMs);
+    auto item = MakeConfigItem(NKikimrConsole::TConfigItem::ConfigsDispatcherConfigItem,
+                               config, {}, {}, "", "", 1,
+                               NKikimrConsole::TConfigItem::MERGE, "");
+    CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(item));
 }
 
 } // anonymous namespace
@@ -353,6 +375,216 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherTests) {
         TDispatchOptions options;
         options.FinalEvents.emplace_back(TEvConsole::EvConfigNotificationResponse, 2);
         runtime.DispatchEvents(options);
+    }
+
+    Y_UNIT_TEST(TestPacedNotificationsReachAllSubscribers) {
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig());
+        TAutoPtr<IEventHandle> handle;
+        InitConfigsDispatcher(runtime);
+
+        SetDispatcherPacing(runtime, /* batchSize = */ 1);
+
+        constexpr size_t subscriberCount = 5;
+        for (size_t i = 0; i < subscriberCount; ++i) {
+            AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+            runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+        }
+
+        ITEM_DOMAIN_LOG_1.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-paced");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_1));
+
+        // With batch size 1 the fan-out spans multiple dispatcher activations;
+        // every subscriber must still receive the update.
+        THashSet<TActorId> notified;
+        while (notified.size() < subscriberCount) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() == "cluster-paced") {
+                notified.insert(handle->Sender);
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(notified.size(), subscriberCount);
+    }
+
+    Y_UNIT_TEST(TestPacedNotificationsHonorBatchDelay) {
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig());
+        TAutoPtr<IEventHandle> handle;
+        InitConfigsDispatcher(runtime);
+
+        // Batch size 1 with a non-zero delay drives the timed Schedule() drain path
+        // (rather than the immediate self-Send used when the delay is zero).
+        SetDispatcherPacing(runtime, /* batchSize = */ 1, /* delayMs = */ 50);
+
+        constexpr size_t subscriberCount = 4;
+        for (size_t i = 0; i < subscriberCount; ++i) {
+            AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+            runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+        }
+
+        ITEM_DOMAIN_LOG_1.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-delayed");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_1));
+
+        // The runtime advances virtual time across the scheduled batch delays; every
+        // subscriber must still receive the update through the timed drain path.
+        THashSet<TActorId> notified;
+        while (notified.size() < subscriberCount) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() == "cluster-delayed") {
+                notified.insert(handle->Sender);
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(notified.size(), subscriberCount);
+    }
+
+    Y_UNIT_TEST(TestSharedConfigNotificationIsNotSerializable) {
+        // The shared payload is local-only and never serialized; serializing it would
+        // silently drop the config. Guard the contract: a shared-config notification
+        // must report itself as non-serializable, while an inline one stays serializable.
+        TEvConsole::TEvConfigNotificationRequest inlineNotification;
+        inlineNotification.Record.MutableConfig()->MutableLogConfig()->SetClusterName("inline");
+        UNIT_ASSERT(inlineNotification.IsSerializable());
+
+        TEvConsole::TEvConfigNotificationRequest sharedNotification;
+        auto shared = MakeIntrusive<TEvConsole::TSharedAppConfig>();
+        shared->MutableLogConfig()->SetClusterName("shared");
+        sharedNotification.SharedConfig = shared;
+        UNIT_ASSERT(!sharedNotification.IsSerializable());
+        UNIT_ASSERT_VALUES_EQUAL(sharedNotification.GetConfig().GetLogConfig().GetClusterName(), "shared");
+    }
+
+    Y_UNIT_TEST(TestPacedNotificationsSupersededByNewerConfig) {
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig());
+        TAutoPtr<IEventHandle> handle;
+        InitConfigsDispatcher(runtime);
+
+        SetDispatcherPacing(runtime, /* batchSize = */ 1);
+
+        constexpr size_t subscriberCount = 3;
+        for (size_t i = 0; i < subscriberCount; ++i) {
+            AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+            runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+        }
+
+        // Hold the dispatcher's paced-drain self-events (private event, self-addressed)
+        // so the first update's send queue is still pending when the second update
+        // arrives and supersedes it.
+        TVector<THolder<IEventHandle>> heldDrains;
+        auto prevObserver = runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
+            if (ev->GetTypeRewrite() == EventSpaceBegin(TKikimrEvents::ES_PRIVATE)
+                && ev->Sender == ev->Recipient)
+            {
+                heldDrains.emplace_back(ev.Release());
+                return TTestActorRuntimeBase::EEventAction::DROP;
+            }
+            return TTestActorRuntimeBase::EEventAction::PROCESS;
+        });
+
+        ITEM_DOMAIN_LOG_1.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-first");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_1));
+
+        ITEM_DOMAIN_LOG_2.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-final");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_2));
+
+        runtime.SetObserverFunc(prevObserver);
+        for (auto &ev : heldDrains) {
+            runtime.Send(ev.Release());
+        }
+
+        // Queued sends of the superseded update must be dropped by the cookie check;
+        // every subscriber converges to the final config.
+        THashSet<TActorId> converged;
+        while (converged.size() < subscriberCount) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() == "cluster-final") {
+                converged.insert(handle->Sender);
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(converged.size(), subscriberCount);
+    }
+
+    Y_UNIT_TEST(TestSharedConfigPayloadDelivery) {
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig());
+        TAutoPtr<IEventHandle> handle;
+        InitConfigsDispatcher(runtime);
+
+        // Shared payload is the default for subscribers.
+        auto s1 = AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+        runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+        auto s2 = AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+        runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+
+        ITEM_DOMAIN_LOG_1.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-shared");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_1));
+
+        TIntrusiveConstPtr<TEvConsole::TSharedAppConfig> seen1, seen2;
+        while (!seen1 || !seen2) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() != "cluster-shared") {
+                continue;
+            }
+            UNIT_ASSERT_C(reply->SharedConfig, "expected shared config payload by default");
+            // Shared delivery must not duplicate the config inline in the record.
+            UNIT_ASSERT(!reply->HasInlineConfig);
+            if (handle->Sender == s1) {
+                seen1 = reply->SharedConfig;
+            }
+            if (handle->Sender == s2) {
+                seen2 = reply->SharedConfig;
+            }
+        }
+
+        // Both subscribers of one subscription share a single immutable instance.
+        UNIT_ASSERT_EQUAL(seen1.Get(), seen2.Get());
+    }
+
+    Y_UNIT_TEST(TestMixedSharedAndLegacySubscribers) {
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig());
+        TAutoPtr<IEventHandle> handle;
+        InitConfigsDispatcher(runtime);
+
+        auto sharedSub = AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+        runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+        // Opted out: keeps receiving a private inline copy.
+        auto legacySub = AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem},
+                                       /* hold = */ false, /* useSharedConfig = */ false);
+        runtime.GrabEdgeEventRethrow<TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse>(handle);
+
+        ITEM_DOMAIN_LOG_1.MutableConfig()->MutableLogConfig()->SetClusterName("cluster-mixed");
+        CheckConfigure(runtime, Ydb::StatusIds::SUCCESS, MakeAddAction(ITEM_DOMAIN_LOG_1));
+
+        TConfigId sharedConfigId;
+        TConfigId legacyConfigId;
+        bool gotShared = false;
+        bool gotLegacy = false;
+        while (!gotShared || !gotLegacy) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() != "cluster-mixed") {
+                continue;
+            }
+            if (handle->Sender == sharedSub) {
+                UNIT_ASSERT_C(reply->SharedConfig, "expected shared payload for default subscriber");
+                UNIT_ASSERT(!reply->HasInlineConfig);
+                sharedConfigId = reply->ConfigId;
+                gotShared = true;
+            }
+            if (handle->Sender == legacySub) {
+                UNIT_ASSERT_C(!reply->SharedConfig, "expected no shared payload for opted-out subscriber");
+                UNIT_ASSERT(reply->HasInlineConfig);
+                legacyConfigId = reply->ConfigId;
+                gotLegacy = true;
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(sharedConfigId.ToString(), legacyConfigId.ToString());
+
+        // Convergence observable: after both subscribers acked, a late subscriber
+        // receives the same delivered config.
+        AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+        while (true) {
+            auto reply = runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+            if (reply->Config.GetLogConfig().GetClusterName() == "cluster-mixed") {
+                UNIT_ASSERT_VALUES_EQUAL(reply->ConfigId.ToString(), legacyConfigId.ToString());
+                break;
+            }
+        }
     }
 
     Y_UNIT_TEST(TestSubscriptionNotificationForNewSubscriberAfterUpdate) {
@@ -1467,7 +1699,6 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         initInfo.StartupConfigYaml = "config:\n  log_config:\n    cluster_name: test\n";
         initInfo.StartupStorageYaml = storageYaml;
         initInfo.Labels["config_source"] = "seed_nodes";
-        initInfo.Labels["configuration_version"] = "v2";
         initInfo.DebugInfo = NConfig::TDebugInfo{};
         
         TTenantTestRuntime runtime(ConfigWithoutDispatcher(), config);
@@ -1486,7 +1717,6 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         
         UNIT_ASSERT_EQUAL(state.ConfigSource, EConfigSource::SeedNodes);
         UNIT_ASSERT_VALUES_EQUAL(state.ConfigSourceLabel, "seed_nodes");
-        UNIT_ASSERT_VALUES_EQUAL(state.ConfigurationVersion, "v2");
         UNIT_ASSERT(state.HasStorageYaml);
         UNIT_ASSERT(state.StorageYamlSize > 0);
         
@@ -1502,7 +1732,6 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         initInfo.InitialConfig = config;
         initInfo.StartupConfigYaml = "config:\n  log_config:\n    cluster_name: test\n";
         initInfo.Labels["config_source"] = "dynamic";
-        initInfo.Labels["configuration_version"] = "v1";
         initInfo.DebugInfo = NConfig::TDebugInfo{};
         
         TTenantTestRuntime runtime(ConfigWithoutDispatcher(), config);
@@ -1521,7 +1750,6 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         
         UNIT_ASSERT_EQUAL(state.ConfigSource, EConfigSource::DynamicConfig);
         UNIT_ASSERT_VALUES_EQUAL(state.ConfigSourceLabel, "dynamic");
-        UNIT_ASSERT_VALUES_EQUAL(state.ConfigurationVersion, "v1");
         UNIT_ASSERT(!state.HasStorageYaml);
         UNIT_ASSERT_VALUES_EQUAL(state.StorageYamlSize, 0);
         
@@ -1554,6 +1782,83 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         UNIT_ASSERT_EQUAL(state.ConfigSource, EConfigSource::DynamicConfig);
         UNIT_ASSERT(state.ConfigSourceLabel.empty());
         UNIT_ASSERT(!state.HasStorageYaml);
+    }
+
+    // The dispatcher computes unknown/deprecated fields for the *resolved* config it
+    // receives from the console and exposes them in its mon JSON ("unknown_fields").
+    Y_UNIT_TEST(TestMonJsonReportsResolvedUnknownFields) {
+        // The dispatcher (re)computes unknown/deprecated fields in ParseYamlProtoConfig,
+        // which only runs when it receives a config-subscription notification carrying a
+        // changed YAML body. That notification is only produced once the dispatcher has a
+        // subscriber, so we must: replace the YAML on the console (allowing the unknown
+        // field), then add a subscriber and wait for it to be notified -- by which point
+        // the dispatcher has resolved the config and filled ResolvedConfigUnknownFields.
+        NKikimrConfig::TAppConfig bootstrapConfig;
+        auto *label = bootstrapConfig.AddLabels();
+        label->SetName("test");
+        label->SetValue("true");
+
+        const TString yamlWithUnknown = R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+
+config:
+  log_config:
+    cluster_name: cluster1
+  yaml_config_enabled: true
+  unknown_field_for_test: 42
+
+allowed_labels:
+  test:
+    type: enum
+    values:
+      ? true
+
+selector_config: []
+)";
+
+        TTenantTestRuntime runtime(DefaultConsoleTestConfig(), bootstrapConfig);
+        TAutoPtr<IEventHandle> handle;
+        const TActorId dispatcherId = InitConfigsDispatcher(runtime);
+
+        {
+            auto *event = new TEvConsole::TEvReplaceYamlConfigRequest;
+            event->Record.MutableRequest()->set_config(yamlWithUnknown);
+            event->Record.MutableRequest()->set_allow_unknown_fields(true);
+            runtime.SendToConsole(event);
+
+            runtime.GrabEdgeEventRethrow<TEvConsole::TEvReplaceYamlConfigResponse>(handle);
+        }
+
+        // Subscribing drives the dispatcher to fetch & resolve the YAML config; grabbing the
+        // subscriber's notification guarantees ParseYamlProtoConfig has already run.
+        AddSubscriber(runtime, {(ui32)NKikimrConsole::TConfigItem::LogConfigItem});
+        runtime.GrabEdgeEventRethrow<TEvPrivate::TEvGotNotification>(handle);
+
+        const TActorId edge = runtime.AllocateEdgeActor();
+        auto request = MakeHolder<THttpRequest>(HTTP_METHOD_GET);
+        request->HttpHeaders.AddHeader("Content-Type", "application/json");
+        NMonitoring::TMonService2HttpRequest monReq(nullptr, request.Get(), nullptr, nullptr, "", nullptr);
+        runtime.Send(new IEventHandle(dispatcherId, edge, new NMon::TEvHttpInfo(monReq)));
+
+        const auto* response = runtime.GrabEdgeEventRethrow<NMon::TEvHttpInfoRes>(handle);
+        const TString& answer = response->Answer;
+
+        const size_t jsonBegin = answer.find('{');
+        UNIT_ASSERT_UNEQUAL(jsonBegin, TString::npos);
+        const NJson::TJsonValue json = ReadJsonFromString(answer.substr(jsonBegin));
+
+        UNIT_ASSERT_C(json.Has("unknown_fields"), "no unknown_fields in mon json: " << answer);
+        bool found = false;
+        for (const auto& f : json["unknown_fields"].GetArray()) {
+            if (f["name"].GetString() == "unknown_field_for_test") {
+                found = true;
+                UNIT_ASSERT_VALUES_EQUAL(f["deprecated"].GetBoolean(), false);
+            }
+        }
+        UNIT_ASSERT_C(found, "unknown_field_for_test not reported: " << answer);
     }
 
     Y_UNIT_TEST(TestMonJsonMasksSensitiveFieldsInDebugInfo) {
@@ -1593,6 +1898,7 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
         const TString jsonBody = answer.substr(jsonBegin);
         const NJson::TJsonValue actual = ReadJsonFromString(jsonBody);
         const NJson::TJsonValue expected = ReadJsonFromString(R"json({
+            "configuration_version": "v1",
             "last_replay_seed_nodes": false,
             "initial_cms_json_config": {
                 "grpc_config": {
@@ -1609,6 +1915,7 @@ Y_UNIT_TEST_SUITE(TConfigsDispatcherObservabilityTests) {
             "current_json_config": {},
             "has_storage_yaml": false,
             "yaml_config": "",
+            "unknown_fields": [],
             "initial_json_config": {
                 "grpc_config": {
                     "key": "***"

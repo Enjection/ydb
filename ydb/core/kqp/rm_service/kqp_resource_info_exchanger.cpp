@@ -122,8 +122,11 @@ public:
 
         ui32 tableServiceConfigKind = (ui32) NKikimrConsole::TConfigItem::TableServiceConfigItem;
 
+        auto exchSubReq = MakeHolder<NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest>(
+            TVector<ui32>{tableServiceConfigKind});
+        exchSubReq->UseSharedConfig = false; // mutates the notification record inline - needs a private copy
         Send(NConsole::MakeConfigsDispatcherID(SelfId().NodeId()),
-             new NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest({tableServiceConfigKind}),
+             exchSubReq.Release(),
              IEventHandle::FlagTrackDelivery);
 
         Become(&TKqpResourceInfoExchangerActor::WorkState);
@@ -476,6 +479,20 @@ private:
                 << ", with size: " << ev->Get()->InfoEntries.size());
 
         auto [nodeIds, isChanged] = UpdateBoardInfo(ev->Get()->InfoEntries);
+
+        with_lock (ResourceSnapshotState->Lock) {
+            if (!ResourceSnapshotState->InitialBoardSyncReceived) {
+                TVector<ui32> initialNodeIds;
+                initialNodeIds.reserve(ev->Get()->InfoEntries.size());
+                for (const auto& [publisherId, entry] : ev->Get()->InfoEntries) {
+                    if (!entry.Dropped) {
+                        initialNodeIds.push_back(publisherId.NodeId());
+                    }
+                }
+                ResourceSnapshotState->InitialBoardNodeIds = std::move(initialNodeIds);
+                ResourceSnapshotState->InitialBoardSyncReceived = true;
+            }
+        }
 
         if (!nodeIds.empty()) {
             SendInfos({SelfId().NodeId()}, true, std::move(nodeIds));

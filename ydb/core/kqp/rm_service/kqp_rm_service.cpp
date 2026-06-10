@@ -453,6 +453,18 @@ public:
         callback(std::move(resources));
     }
 
+    bool GetInitialBoardSyncDone() const override {
+        with_lock (ResourceSnapshotState->Lock) {
+            return ResourceSnapshotState->InitialBoardSyncReceived;
+        }
+    }
+
+    TVector<ui32> GetInitialBoardNodeIds() const override {
+        with_lock (ResourceSnapshotState->Lock) {
+            return ResourceSnapshotState->InitialBoardNodeIds;
+        }
+    }
+
     TKqpLocalNodeResources GetLocalResources() const override {
         TKqpLocalNodeResources result;
 
@@ -655,8 +667,11 @@ public:
         // Subscribe for TableService config changes
         ui32 tableServiceConfigKind = (ui32) NKikimrConsole::TConfigItem::TableServiceConfigItem;
 
+        auto rmSubReq = MakeHolder<NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest>(
+            TVector<ui32>{tableServiceConfigKind});
+        rmSubReq->UseSharedConfig = false; // mutates the notification record inline - needs a private copy
         Send(NConsole::MakeConfigsDispatcherID(SelfId().NodeId()),
-             new NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest({tableServiceConfigKind}),
+             rmSubReq.Release(),
              IEventHandle::FlagTrackDelivery);
 
         ToBroker(new TEvResourceBroker::TEvResourceBrokerRequest);

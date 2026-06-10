@@ -466,6 +466,7 @@ message TInterconnectConfig {
         PER_DATA_CENTER = 2;
         NO_MERGE = 3;
         PER_HOST = 4;
+        PER_SCOPE_CLASS = 5;
     }
 
     enum EEncryptionMode {
@@ -1147,6 +1148,10 @@ message TSqsConfig {
 }
 
 message TConfigsDispatcherConfig {
+    // Max notifications sent per actor activation; 0 = unlimited.
+    optional uint32 NotificationsBatchSize = 1 [default = 100];
+    // Delay between notification batches, ms; 0 = yield only.
+    optional uint32 NotificationsBatchDelayMs = 2 [default = 0];
 }
 
 message TCompactionPolicy {
