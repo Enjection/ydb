@@ -191,18 +191,19 @@ Measured (relwithdebinfo):
   model: legacy ~n² (20→92→540 ms), A⁺ ~linear (3.7→8.5→24 ms).
 - `AgreesWithLegacyAndIsFaster` (K=1681): identical accept decision, **~23× faster**.
 
-**Second-order caveat (honest):** within a *single* section varied by `n`
-selectors, A⁺ wall time is `O(n²)` — `EnumerateDistinctProjections`
-(`public/yaml_config.cpp:1622`) rebuilds each of the `n+1` representatives by
-cloning + re-parsing the **whole document**, and the firing-signature dedup
-re-scans involved selectors per tuple. This is **polynomial** (vs legacy
-exponential) and negligible at the real shape (gist `bbfba6d`: ~150 selectors
-spread across many sections ⇒ small per-section `n`), but it is **optimizable to
-near-linear** (clone only the base-config subtree per projection; index selectors
-by label value for O(1) signature lookup). Deferred as a perf item — it does NOT
-affect correctness and was left out of the audited hot path on purpose. Tracked
-as `GrowthIsPolynomialNotExponential` (asserts the polynomial, not-exponential
-bound).
+**Single-section growth — now ~linear.** `EnumerateDistinctProjections` builds
+each of the `n+1` representatives by cloning **only the base config** (a small
+doc built once via `SetRoot(model.Config.Copy(...))`) and copying overlays from
+the **once-parsed** `model` — the same cross-document `Copy` trick
+`ResolveUniqueDocs` uses. It no longer clones the whole document nor re-`ParseConfig`s
+the `K` selectors per projection. Measured effect: single-section 100→800 went
+from `30.8→1731 ms` (~`n²`, 56×) to `11.4→132 ms` (~`n¹·²`, 11.6×); the 10⁶-K
+config from `657 ms` to `~95 ms`; head-to-head speedup `23×`→`59×`. A residual
+`O(n²)` term remains in the firing-signature dedup (a `Fit` per involved selector
+per tuple) but its constant is tiny and doesn't dominate at realistic sizes.
+Tracked by `GrowthIsPolynomialNotExponential` (now asserts a ~linear 24× bound
+for 8× input). Correctness unchanged — verified byte-identical by
+`ProjectionSetEqualsFullEnumeration` + the shadow agreement test.
 
 ## Open items / next steps
 
@@ -239,11 +240,12 @@ bound).
    two *dynamic* sections (which the guard can't catch), asserts
    `StructuralShadowRun` never diverges — that failure mode is currently
    audited-not-tested.
-7. **Near-linear projection rebuild (perf, not correctness).** Make
-   `EnumerateDistinctProjections` clone only the base-config subtree per projection
-   (not the whole doc + re-`ParseConfig`) and index selectors by label value for
-   O(1) firing-signature lookup. Turns the single-section `O(n²)` into ~`O(n)`. Guard
-   with `ProjectionSetEqualsFullEnumeration` + the scale suite. See Complexity §.
+7. **Projection rebuild perf — DONE (base-config clone + once-parsed overlays).**
+   `EnumerateDistinctProjections` no longer clones the whole doc or re-`ParseConfig`s
+   per projection; single-section growth is ~linear now (see Complexity §). Optional
+   remaining micro-opt: index selectors by label value to remove the residual
+   `O(n²)` firing-signature `Fit` term (tiny constant; not needed for realistic
+   sizes).
 
 ## Reviewer findings already addressed
 
