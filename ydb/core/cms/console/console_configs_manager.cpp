@@ -172,6 +172,33 @@ void TConfigsManager::ValidateMainConfig(TUpdateConfigOpContext& opCtx) {
                         ythrow yexception() << errors.front();
                     }
                 });
+
+            // Track A+ shadow-run (migration phase P-S4). Runs the K-independent
+            // structural AND semantic validation alongside the legacy per-doc
+            // path above and logs any accept/reject divergence. Strictly
+            // non-blocking: the legacy decision continues to gate acceptance
+            // until zero divergence is observed fleet-wide, then A+ takes over.
+            try {
+                auto shadow = NYamlConfig::StructuralShadowRun(tree, /*allowUnknown*/ true);
+                auto ctx = TActivationContext::AsActorContext();
+                if (shadow.Diverged) {
+                    LOG_ERROR_S(ctx, NKikimrServices::CMS_CONFIGS,
+                        "Track A+ structural shadow-run DIVERGED:"
+                            << " legacyRejected=" << shadow.LegacyRejected
+                            << " aplusRejected=" << shadow.APlusRejected
+                            << " guardViolations=" << shadow.GuardViolations.size()
+                            << " legacyError=\"" << shadow.LegacyError << "\"");
+                }
+                if (shadow.SemanticDiverged) {
+                    LOG_ERROR_S(ctx, NKikimrServices::CMS_CONFIGS,
+                        "Track A+ semantic shadow-run DIVERGED:"
+                            << " legacyRejected=" << shadow.SemanticLegacyRejected
+                            << " aplusRejected=" << shadow.SemanticAPlusRejected
+                            << " legacyError=\"" << shadow.SemanticLegacyError << "\"");
+                }
+            } catch (const std::exception&) {
+                // The shadow-run must never influence acceptance.
+            }
         }
     } catch (const yexception &e) {
         opCtx.Error = e.what();
@@ -269,6 +296,34 @@ void TConfigsManager::ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opC
                         }
                     }
                 });
+
+            // Track A+ shadow-run on the database accept path (migration P-S4),
+            // over the post-AppendDatabaseConfig tree -- same K-independent
+            // structural + semantic validation as the main path, logged
+            // non-blocking. NOTE: the database allowlist check above
+            // (NConfig::ValidateDatabaseConfig) is DB-specific and is NOT part of
+            // A+'s ValidateConfig coverage, so it always runs in addition.
+            try {
+                auto shadow = NYamlConfig::StructuralShadowRun(tree, /*allowUnknown*/ true);
+                auto ctx = TActivationContext::AsActorContext();
+                if (shadow.Diverged) {
+                    LOG_ERROR_S(ctx, NKikimrServices::CMS_CONFIGS,
+                        "Track A+ structural shadow-run (database) DIVERGED:"
+                            << " legacyRejected=" << shadow.LegacyRejected
+                            << " aplusRejected=" << shadow.APlusRejected
+                            << " guardViolations=" << shadow.GuardViolations.size()
+                            << " legacyError=\"" << shadow.LegacyError << "\"");
+                }
+                if (shadow.SemanticDiverged) {
+                    LOG_ERROR_S(ctx, NKikimrServices::CMS_CONFIGS,
+                        "Track A+ semantic shadow-run (database) DIVERGED:"
+                            << " legacyRejected=" << shadow.SemanticLegacyRejected
+                            << " aplusRejected=" << shadow.SemanticAPlusRejected
+                            << " legacyError=\"" << shadow.SemanticLegacyError << "\"");
+                }
+            } catch (const std::exception&) {
+                // The shadow-run must never influence acceptance.
+            }
 
             const auto& deprecatedPaths = NKikimrConfig::TAppConfig::GetReservedChildrenPaths();
 

@@ -332,6 +332,30 @@ Y_UNIT_TEST_SUITE(ValidationTests) {
         UNIT_ASSERT(reserved.contains("/field21/another_reserved_field"));
         UNIT_ASSERT(reserved.contains("/root_reserved_field"));
     }
+
+    Y_UNIT_TEST(HasStaticSectionPaths) {
+        const auto& paths = NKikimrConfig::ActualConfigMessage::GetStaticSectionPaths();
+
+        UNIT_ASSERT_C(paths.contains("/static_section"),
+            "a field marked (NMarkers.SelectorStatic) must be listed");
+        UNIT_ASSERT_C(!paths.contains("/dynamic_field"),
+            "an unmarked field must NOT be listed");
+        UNIT_ASSERT_C(!paths.contains("/field1"),
+            "an unmarked message field must NOT be listed");
+        UNIT_ASSERT_C(!paths.contains("/transform_read_section"),
+            "a transform-read field must NOT be in the static set");
+    }
+
+    Y_UNIT_TEST(HasTransformReadSectionPaths) {
+        const auto& paths = NKikimrConfig::ActualConfigMessage::GetTransformReadSectionPaths();
+
+        UNIT_ASSERT_C(paths.contains("/transform_read_section"),
+            "a field marked (NMarkers.SelectorTransformRead) must be listed");
+        UNIT_ASSERT_C(!paths.contains("/static_section"),
+            "a static field must NOT be in the transform-read set");
+        UNIT_ASSERT_C(!paths.contains("/dynamic_field"),
+            "an unmarked field must NOT be listed");
+    }
 }
 
 template <>

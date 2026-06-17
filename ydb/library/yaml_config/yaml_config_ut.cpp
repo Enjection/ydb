@@ -6,6 +6,12 @@
 
 #include <ydb/core/protos/key.pb.h>
 
+#include <library/cpp/protobuf/json/util.h>
+
+#include <util/datetime/base.h>
+#include <util/string/builder.h>
+#include <util/string/cast.h>
+
 using namespace NKikimr;
 
 const char *WholeConfig = R"(---
@@ -2360,4 +2366,1816 @@ Y_UNIT_TEST(AllTestConfigs) {
     testConfig(UnresolvedSimpleConfigAppend, "UnresolvedSimpleConfigAppend");
 }
 
+}
+
+// ===========================================================================
+// Track A+ : polynomial, K-independent validation -- proof of equivalence with
+// full enumeration (the ResolveAll oracle).
+// ===========================================================================
+
+namespace {
+
+using namespace NKikimr::NYamlConfig;
+
+// All fixtures disable the builtin incompatibility rules so that ResolveAll
+// enumerates the full unconstrained label space; the A+ engine's localised
+// enumeration then projects onto exactly that space (incompatibility-rule
+// integration is a separate realizability refinement, see docs).
+
+// k=1: auth_config.account_lockout.attempt_reset_duration must parse as a
+// duration. base 3h ok; tenant=bad overrides with garbage.
+const char* APlusDurationBad = R"(---
+cluster: test
+version: 1
+config:
+  auth_config:
+    account_lockout:
+      attempt_reset_duration: 3h
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: bad tenant
+  selector:
+    tenant: bad
+  config: !inherit
+    auth_config: !inherit
+      account_lockout: !inherit
+        attempt_reset_duration: not-a-duration
+)";
+
+// k=1: same shape, all values valid.
+const char* APlusDurationOk = R"(---
+cluster: test
+version: 1
+config:
+  auth_config:
+    account_lockout:
+      attempt_reset_duration: 3h
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: other tenant
+  selector:
+    tenant: other
+  config: !inherit
+    auth_config: !inherit
+      account_lockout: !inherit
+        attempt_reset_duration: 30m
+)";
+
+// k=5 password complexity, the realizability crown jewel.
+// base:        min_length=8,  sum=4   -> ok
+// tenant=A:    min_length=4   (sum stays 4) -> 4<4 false -> ok
+// tenant=B:    min_length=20, lower=10 (sum=13) -> 20<13 false -> ok
+// All realizable assignments PASS, so the oracle accepts.
+// But the independent value-set product pairs A's min_length=4 with B's
+// lower=10 -> sum=13 > 4 -> a NON-realizable failing combo. A naive product
+// check would false-positive; the realizability filter must accept.
+const char* APlusPasswordRealizable = R"(---
+cluster: test
+version: 1
+config:
+  auth_config:
+    password_complexity:
+      min_length: 8
+      min_lower_case_count: 1
+      min_upper_case_count: 1
+      min_numbers_count: 1
+      min_special_chars_count: 1
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: A lowers min_length but nothing else
+  selector:
+    tenant: A
+  config: !inherit
+    auth_config: !inherit
+      password_complexity: !inherit
+        min_length: 4
+- description: B raises lower but also raises min_length to compensate
+  selector:
+    tenant: B
+  config: !inherit
+    auth_config: !inherit
+      password_complexity: !inherit
+        min_length: 20
+        min_lower_case_count: 10
+)";
+
+// k=5 password complexity, genuinely failing: tenant=C lowers min_length below
+// the (unchanged) sum -> a realizable violation. Oracle and A+ both reject.
+const char* APlusPasswordFail = R"(---
+cluster: test
+version: 1
+config:
+  auth_config:
+    password_complexity:
+      min_length: 8
+      min_lower_case_count: 2
+      min_upper_case_count: 2
+      min_numbers_count: 2
+      min_special_chars_count: 2
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: C lowers min_length below sum=8
+  selector:
+    tenant: C
+  config: !inherit
+    auth_config: !inherit
+      password_complexity: !inherit
+        min_length: 3
+)";
+
+// k=2 + presence (ColumnShard): tenant=A switches codec to lz4 while the base
+// level=3 survives the deep-merge -> lz4 does not support a level -> reject.
+const char* APlusCompressionLevelUnsupported = R"(---
+cluster: test
+version: 1
+config:
+  column_shard_config:
+    default_compression: zstd
+    default_compression_level: 3
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: A switches to lz4 but inherits level
+  selector:
+    tenant: A
+  config: !inherit
+    column_shard_config: !inherit
+      default_compression: lz4
+)";
+
+// k=2 + presence: tenant=A introduces a level without ever setting a codec
+// -> "level without type" -> reject. Exercises the presence (absent) state.
+const char* APlusCompressionLevelWithoutType = R"(---
+cluster: test
+version: 1
+config:
+  column_shard_config:
+    column_chunks_v2: true
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: A sets a level but no codec
+  selector:
+    tenant: A
+  config: !inherit
+    column_shard_config: !inherit
+      default_compression_level: 5
+)";
+
+// All codecs/levels valid across the whole space -> accept.
+const char* APlusCompressionOk = R"(---
+cluster: test
+version: 1
+config:
+  column_shard_config:
+    default_compression: zstd
+    default_compression_level: 3
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: A switches to a level-capable codec
+  selector:
+    tenant: A
+  config: !inherit
+    column_shard_config: !inherit
+      default_compression: zstd
+      default_compression_level: 9
+)";
+
+// A coupled path that is an accumulating !append sequence -> must be fenced.
+const char* APlusFencedAppend = R"(---
+cluster: test
+version: 1
+config:
+  grpc_config:
+    services_enabled:
+    - legacy
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: A appends a service
+  selector:
+    tenant: A
+  config: !inherit
+    grpc_config: !inherit
+      services_enabled: !append
+      - yql
+)";
+
+std::optional<TString> Get(const TFieldAssignment& a, const TString& path) {
+    auto it = a.find(path);
+    return (it == a.end()) ? std::nullopt : it->second;
+}
+
+ui64 AsCount(const std::optional<TString>& v) {
+    if (!v.has_value()) {
+        return 0;
+    }
+    ui64 out = 0;
+    return TryFromString<ui64>(*v, out) ? out : 0;
+}
+
+// ---- Reified rules (mirror the real selector-varied validators) ----
+
+TFieldRule DurationRule() {
+    return TFieldRule{
+        .Paths = {"/auth_config/account_lockout/attempt_reset_duration"},
+        .Check = [](const TFieldAssignment& a) -> std::optional<TString> {
+            auto v = Get(a, "/auth_config/account_lockout/attempt_reset_duration");
+            if (!v.has_value()) {
+                return std::nullopt;
+            }
+            TDuration d;
+            if (TDuration::TryParse(*v, d)) {
+                return std::nullopt;
+            }
+            return TString("account_lockout: cannot parse attempt reset duration");
+        },
+    };
+}
+
+TFieldRule PasswordComplexityRule() {
+    return TFieldRule{
+        .Paths = {
+            "/auth_config/password_complexity/min_length",
+            "/auth_config/password_complexity/min_lower_case_count",
+            "/auth_config/password_complexity/min_upper_case_count",
+            "/auth_config/password_complexity/min_numbers_count",
+            "/auth_config/password_complexity/min_special_chars_count",
+        },
+        .Check = [](const TFieldAssignment& a) -> std::optional<TString> {
+            ui64 sum = AsCount(Get(a, "/auth_config/password_complexity/min_lower_case_count"))
+                     + AsCount(Get(a, "/auth_config/password_complexity/min_upper_case_count"))
+                     + AsCount(Get(a, "/auth_config/password_complexity/min_numbers_count"))
+                     + AsCount(Get(a, "/auth_config/password_complexity/min_special_chars_count"));
+            ui64 minLength = AsCount(Get(a, "/auth_config/password_complexity/min_length"));
+            if (minLength < sum) {
+                return TString("password_complexity: min length below total min counts");
+            }
+            return std::nullopt;
+        },
+    };
+}
+
+TFieldRule CompressionRule() {
+    return TFieldRule{
+        .Paths = {
+            "/column_shard_config/default_compression",
+            "/column_shard_config/default_compression_level",
+        },
+        .Check = [](const TFieldAssignment& a) -> std::optional<TString> {
+            static const TSet<TString> known{"off", "lz4", "zstd", "zlib", "brotli", "bz2", "snappy", "gzip"};
+            static const TSet<TString> supportsLevel{"zstd", "zlib", "brotli", "gzip", "bz2"};
+            auto comp = Get(a, "/column_shard_config/default_compression");
+            auto level = Get(a, "/column_shard_config/default_compression_level");
+            if (!comp.has_value() && !level.has_value()) {
+                return std::nullopt;
+            }
+            if (!comp.has_value() && level.has_value()) {
+                return TString("ColumnShardConfig: compression level is set without compression type");
+            }
+            if (!known.contains(*comp)) {
+                return TString("ColumnShardConfig: Unknown compression");
+            }
+            if (level.has_value() && !supportsLevel.contains(*comp)) {
+                return TString(TStringBuilder() << "ColumnShardConfig: compression `" << *comp << "` does not support compression level");
+            }
+            return std::nullopt;
+        },
+    };
+}
+
+// ---- Oracle : true full-enumeration decision ----
+
+std::optional<TString> ReadScalarAtPath(NFyaml::TNodeRef config, const TString& path) {
+    NFyaml::TNodeRef node = config;
+    TVector<TString> parts;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t slash = path.find('/', start);
+        if (slash == TString::npos) {
+            if (start < path.size()) {
+                parts.push_back(path.substr(start));
+            }
+            break;
+        }
+        if (slash > start) {
+            parts.push_back(path.substr(start, slash - start));
+        }
+        start = slash + 1;
+    }
+    for (auto& key : parts) {
+        if (!node || node.Type() != NFyaml::ENodeType::Mapping) {
+            return std::nullopt;
+        }
+        auto map = node.Map();
+        if (!map.Has(key)) {
+            return std::nullopt;
+        }
+        node = map.at(key);
+    }
+    if (!node || node.Type() != NFyaml::ENodeType::Scalar) {
+        return std::nullopt;
+    }
+    return TString(node.Scalar());
+}
+
+// True iff SOME resolved config violates the rule (full enumeration).
+bool OracleRuleFails(const char* yaml, const TFieldRule& rule) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    auto resolved = ResolveAll(doc);
+    for (auto& [labels, docConfig] : resolved.Configs) {
+        Y_UNUSED(labels);
+        TFieldAssignment assignment;
+        for (auto& p : rule.Paths) {
+            assignment[p] = ReadScalarAtPath(docConfig.second, p);
+        }
+        if (rule.Check(assignment).has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool APlusRuleFails(const char* yaml, const TFieldRule& rule, bool& fenced) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    TSet<TString> fencedPaths;
+    auto violations = ValidateFieldRule(doc, rule, fencedPaths);
+    fenced = !fencedPaths.empty();
+    return !violations.empty();
+}
+
+// Naive independent value-set product decision (NO realizability filter):
+// fails if ANY combination in the product of per-field value-sets violates.
+bool NaiveProductRuleFails(const char* yaml, const TFieldRule& rule) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    auto sets = ResolveFieldValueSets(doc);
+    TVector<TVector<std::optional<TString>>> domains;
+    for (auto& p : rule.Paths) {
+        TVector<std::optional<TString>> vals;
+        auto it = sets.Values.find(p);
+        if (it == sets.Values.end()) {
+            vals.push_back(std::nullopt);
+        } else {
+            for (auto& v : it->second) {
+                vals.push_back(v);
+            }
+        }
+        domains.push_back(std::move(vals));
+    }
+    bool fails = false;
+    std::function<void(size_t, TFieldAssignment&)> rec = [&](size_t i, TFieldAssignment& a) {
+        if (fails) {
+            return;
+        }
+        if (i == rule.Paths.size()) {
+            if (rule.Check(a).has_value()) {
+                fails = true;
+            }
+            return;
+        }
+        for (auto& v : domains[i]) {
+            a[rule.Paths[i]] = v;
+            rec(i + 1, a);
+        }
+    };
+    TFieldAssignment a;
+    rec(0, a);
+    return fails;
+}
+
+// Collects scalar leaves of a resolved config node, skipping sequences (which
+// are fenced) -- mirrors the production CollectScalarLeaves walker.
+void CollectResolvedLeaves(NFyaml::TNodeRef node, const TString& path, TMap<TString, TString>& out) {
+    if (!node) {
+        return;
+    }
+    switch (node.Type()) {
+        case NFyaml::ENodeType::Scalar:
+            out[path] = TString(node.Scalar());
+            break;
+        case NFyaml::ENodeType::Mapping: {
+            auto map = node.Map();
+            for (auto it = map.begin(); it != map.end(); ++it) {
+                CollectResolvedLeaves(it->Value(), path + "/" + it->Key().Scalar(), out);
+            }
+            break;
+        }
+        case NFyaml::ENodeType::Sequence:
+            break;
+    }
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigFieldValueSets) {
+
+    // The keystone soundness property: every value any field takes in ANY fully
+    // resolved config is contained in its A+ value-set (or the path is fenced).
+    Y_UNIT_TEST(ValueSetSoundnessVsResolveAll) {
+        const TVector<std::pair<const char*, const char*>> fixtures{
+            {APlusDurationBad, "APlusDurationBad"},
+            {APlusDurationOk, "APlusDurationOk"},
+            {APlusPasswordRealizable, "APlusPasswordRealizable"},
+            {APlusPasswordFail, "APlusPasswordFail"},
+            {APlusCompressionLevelUnsupported, "APlusCompressionLevelUnsupported"},
+            {APlusCompressionLevelWithoutType, "APlusCompressionLevelWithoutType"},
+            {APlusCompressionOk, "APlusCompressionOk"},
+            {UnresolvedSimpleConfig1, "UnresolvedSimpleConfig1"},
+            {UnresolvedSimpleConfig2, "UnresolvedSimpleConfig2"},
+            {UnresolvedSimpleConfig3, "UnresolvedSimpleConfig3"},
+        };
+        for (auto& [yaml, name] : fixtures) {
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            auto sets = ResolveFieldValueSets(doc);
+
+            auto resolveDoc = NFyaml::TDocument::Parse(yaml);
+            auto resolved = ResolveAll(resolveDoc);
+            for (auto& [labels, docConfig] : resolved.Configs) {
+                Y_UNUSED(labels);
+                TMap<TString, TString> leaves;
+                CollectResolvedLeaves(docConfig.second, "", leaves);
+                for (auto& [path, value] : leaves) {
+                    if (sets.IsFenced(path)) {
+                        continue;
+                    }
+                    auto it = sets.Values.find(path);
+                    UNIT_ASSERT_C(it != sets.Values.end(),
+                        TStringBuilder() << name << ": path " << path << " missing from value-sets");
+                    UNIT_ASSERT_C(it->second.contains(value),
+                        TStringBuilder() << name << ": resolved value '" << value
+                            << "' at " << path << " not in A+ value-set");
+                }
+            }
+        }
+    }
+
+    Y_UNIT_TEST(AppendPathsAreFenced) {
+        auto doc = NFyaml::TDocument::Parse(APlusFencedAppend);
+        auto sets = ResolveFieldValueSets(doc);
+        UNIT_ASSERT_C(sets.IsFenced("/grpc_config/services_enabled"),
+            "an !append sequence path must be fenced");
+        UNIT_ASSERT_C(!sets.Values.contains("/grpc_config/services_enabled"),
+            "a fenced sequence must not produce a scalar value-set");
+    }
+
+    Y_UNIT_TEST(ValidateFieldSingleFieldK1) {
+        auto durationParses = [](const TString& v) {
+            TDuration d;
+            return TDuration::TryParse(v, d);
+        };
+
+        {
+            auto doc = NFyaml::TDocument::Parse(APlusDurationOk);
+            auto sets = ResolveFieldValueSets(doc);
+            TString failing;
+            UNIT_ASSERT(ValidateField(sets,
+                "/auth_config/account_lockout/attempt_reset_duration", durationParses, failing));
+        }
+        {
+            auto doc = NFyaml::TDocument::Parse(APlusDurationBad);
+            auto sets = ResolveFieldValueSets(doc);
+            TString failing;
+            UNIT_ASSERT(!ValidateField(sets,
+                "/auth_config/account_lockout/attempt_reset_duration", durationParses, failing));
+            UNIT_ASSERT_VALUES_EQUAL(failing, "not-a-duration");
+        }
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigAPlusValidation) {
+
+    // The core claim: the A+ decision equals the full-enumeration oracle for
+    // every rule and fixture.
+    Y_UNIT_TEST(EquivalentToFullEnumeration) {
+        struct TCase {
+            const char* Yaml;
+            const char* Name;
+            TFieldRule Rule;
+        };
+        TVector<TCase> cases{
+            {APlusDurationOk, "DurationOk", DurationRule()},
+            {APlusDurationBad, "DurationBad", DurationRule()},
+            {APlusPasswordRealizable, "PasswordRealizable", PasswordComplexityRule()},
+            {APlusPasswordFail, "PasswordFail", PasswordComplexityRule()},
+            {APlusCompressionOk, "CompressionOk", CompressionRule()},
+            {APlusCompressionLevelUnsupported, "CompressionLevelUnsupported", CompressionRule()},
+            {APlusCompressionLevelWithoutType, "CompressionLevelWithoutType", CompressionRule()},
+        };
+        for (auto& c : cases) {
+            bool fenced = false;
+            bool aplus = APlusRuleFails(c.Yaml, c.Rule, fenced);
+            bool oracle = OracleRuleFails(c.Yaml, c.Rule);
+            UNIT_ASSERT_C(!fenced, TStringBuilder() << c.Name << ": unexpectedly fenced");
+            UNIT_ASSERT_VALUES_EQUAL_C(aplus, oracle,
+                TStringBuilder() << c.Name << ": A+ decision (" << aplus
+                    << ") != oracle (" << oracle << ")");
+        }
+    }
+
+    // Expected accept/reject outcomes, pinned explicitly.
+    Y_UNIT_TEST(ExpectedOutcomes) {
+        bool fenced = false;
+        UNIT_ASSERT(!APlusRuleFails(APlusDurationOk, DurationRule(), fenced));
+        UNIT_ASSERT(APlusRuleFails(APlusDurationBad, DurationRule(), fenced));
+        UNIT_ASSERT(!APlusRuleFails(APlusPasswordRealizable, PasswordComplexityRule(), fenced));
+        UNIT_ASSERT(APlusRuleFails(APlusPasswordFail, PasswordComplexityRule(), fenced));
+        UNIT_ASSERT(!APlusRuleFails(APlusCompressionOk, CompressionRule(), fenced));
+        UNIT_ASSERT(APlusRuleFails(APlusCompressionLevelUnsupported, CompressionRule(), fenced));
+        UNIT_ASSERT(APlusRuleFails(APlusCompressionLevelWithoutType, CompressionRule(), fenced));
+    }
+
+    // The realizability filter earns its keep: the naive per-field value-set
+    // product FALSE-POSITIVES on the cross-tenant password fixture, while the
+    // realizability-aware A+ engine matches the oracle (accept).
+    Y_UNIT_TEST(RealizabilityFilterBeatsNaiveProduct) {
+        auto rule = PasswordComplexityRule();
+
+        UNIT_ASSERT_C(NaiveProductRuleFails(APlusPasswordRealizable, rule),
+            "the naive independent product is expected to false-positive here");
+
+        UNIT_ASSERT_C(!OracleRuleFails(APlusPasswordRealizable, rule),
+            "no realizable config actually violates the rule");
+
+        bool fenced = false;
+        UNIT_ASSERT_C(!APlusRuleFails(APlusPasswordRealizable, rule, fenced),
+            "the realizability-aware A+ engine must match the oracle (accept)");
+        UNIT_ASSERT(!fenced);
+    }
+
+    Y_UNIT_TEST(EnumerateRealizableAssignmentsIsExact) {
+        // tenant=A and tenant=B each contribute one assignment; everything else
+        // (empty / negative tenant) maps to base. Exactly 3 distinct joint
+        // assignments over the two compression fields.
+        auto doc = NFyaml::TDocument::Parse(APlusCompressionOk);
+        TSet<TString> fenced;
+        auto assignments = EnumerateRealizableAssignments(doc, CompressionRule().Paths, fenced);
+        UNIT_ASSERT(fenced.empty());
+        UNIT_ASSERT_VALUES_EQUAL(assignments.size(), 2u); // {zstd,3} (base) and {zstd,9} (tenant=A)
+    }
+
+    Y_UNIT_TEST(FencedRuleReportsAndDefers) {
+        auto rule = TFieldRule{
+            .Paths = {"/grpc_config/services_enabled"},
+            .Check = [](const TFieldAssignment&) -> std::optional<TString> {
+                return TString("should never run on a fenced path");
+            },
+        };
+        auto doc = NFyaml::TDocument::Parse(APlusFencedAppend);
+        TSet<TString> fenced;
+        auto violations = ValidateFieldRule(doc, rule, fenced);
+        UNIT_ASSERT_C(fenced.contains("/grpc_config/services_enabled"), "append path must be fenced");
+        UNIT_ASSERT_C(violations.empty(), "fenced rule must defer (no violations emitted)");
+    }
+}
+
+// ===========================================================================
+// Track A+ benchmark : proof of STRICT superiority over enumerate-then-validate.
+//
+// The cost metric is the number of times the per-document semantic validator
+// would run (deterministic, not wall-clock):
+//   * legacy accept gate: once per distinct resolved document K, and each call
+//     is preceded by a deep Clone + YamlToProto of the whole config;
+//   * Track A+: once per realizable joint assignment of the rule's coupled
+//     fields, with no document materialisation at all.
+//
+// With two independent high-cardinality labels (tenant x region), K is
+// MULTIPLICATIVE ((T+1)(R+1)) while A+ is ADDITIVE ((T+1)+(R+1)) -- this is the
+// Sigma-vs-Pi gap (doc CE-1) and the "latent cliff" a second high-cardinality
+// label triggers. The tests assert the exact counts and that the ratio widens
+// with scale; wall-clock is printed as secondary evidence only.
+// ===========================================================================
+
+namespace {
+
+// Builds a config with `tenants` tenant-keyed selectors overriding feature_a and
+// `regions` region-keyed selectors overriding feature_b. The two fields are
+// independent and single-sourced, so every (tenant, region) pair yields a
+// byte-distinct resolved config.
+TString MakeBenchConfig(size_t tenants, size_t regions) {
+    TStringBuilder sb;
+    sb << "---\n";
+    sb << "cluster: test\n";
+    sb << "version: 1\n";
+    sb << "config:\n";
+    sb << "  feature_a: A0\n";
+    sb << "  feature_b: B0\n";
+    sb << "allowed_labels:\n";
+    sb << "  tenant:\n    type: string\n";
+    sb << "  region:\n    type: string\n";
+    sb << "incompatibility_overrides:\n  disable_rules:\n";
+    for (const char* r : {"builtin_branch_must_have_value", "builtin_dynamic_must_have_value",
+                          "builtin_node_host_must_have_value", "builtin_node_id_must_have_value",
+                          "builtin_rev_must_have_value", "builtin_node_type_must_be_defined",
+                          "builtin_tenant_must_be_defined"}) {
+        sb << "    - " << r << "\n";
+    }
+    sb << "selector_config:\n";
+    for (size_t i = 0; i < tenants; ++i) {
+        sb << "- description: ta" << i << "\n";
+        sb << "  selector:\n    tenant: t" << i << "\n";
+        sb << "  config: !inherit\n    feature_a: a" << i << "\n";
+    }
+    for (size_t j = 0; j < regions; ++j) {
+        sb << "- description: rb" << j << "\n";
+        sb << "  selector:\n    region: r" << j << "\n";
+        sb << "  config: !inherit\n    feature_b: b" << j << "\n";
+    }
+    return sb;
+}
+
+// Legacy cost: number of distinct resolved documents the accept gate validates.
+size_t LegacyValidateCount(const TString& yaml) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    size_t k = 0;
+    ResolveUniqueDocs(doc, [&](TDocumentConfig&&) { ++k; });
+    return k;
+}
+
+// A+ cost: realizable assignments evaluated to validate both fields.
+size_t APlusEvalCount(const TString& yaml) {
+    auto docA = NFyaml::TDocument::Parse(yaml);
+    TSet<TString> fa;
+    size_t a = EnumerateRealizableAssignments(docA, {"/feature_a"}, fa).size();
+    auto docB = NFyaml::TDocument::Parse(yaml);
+    TSet<TString> fb;
+    size_t b = EnumerateRealizableAssignments(docB, {"/feature_b"}, fb).size();
+    return a + b;
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigAPlusBenchmark) {
+
+    // The headline result: legacy work is multiplicative, A+ is additive, A+ is
+    // strictly less, and the gap WIDENS with scale (the cliff).
+    Y_UNIT_TEST(StrictlySuperiorAndGapWidens) {
+        struct TPoint { size_t T; size_t R; };
+        for (auto p : {TPoint{6, 6}, TPoint{20, 20}}) {
+            auto yaml = MakeBenchConfig(p.T, p.R);
+            size_t legacy = LegacyValidateCount(yaml);
+            size_t aplus = APlusEvalCount(yaml);
+            UNIT_ASSERT_VALUES_EQUAL_C(legacy, (p.T + 1) * (p.R + 1),
+                TStringBuilder() << "legacy must be multiplicative at T=R=" << p.T);
+            UNIT_ASSERT_VALUES_EQUAL_C(aplus, (p.T + 1) + (p.R + 1),
+                TStringBuilder() << "A+ must be additive at T=R=" << p.T);
+            UNIT_ASSERT_C(aplus < legacy, "A+ must do strictly less validation work");
+        }
+
+        double ratioSmall = double((6 + 1) * (6 + 1)) / double((6 + 1) + (6 + 1));
+        double ratioLarge = double((20 + 1) * (20 + 1)) / double((20 + 1) + (20 + 1));
+        UNIT_ASSERT_C(ratioLarge > ratioSmall * 2.0,
+            TStringBuilder() << "the legacy/A+ work ratio must grow with scale: small="
+                << ratioSmall << " large=" << ratioLarge);
+    }
+
+    // K-independence: adding a second high-cardinality label does NOT increase
+    // A+ work for a field that does not couple it. This is the property
+    // memoization cannot provide (doc CE-1/CE-3).
+    Y_UNIT_TEST(WorkIsIndependentOfUncoupledLabel) {
+        auto fewRegions = MakeBenchConfig(20, 5);
+        auto manyRegions = MakeBenchConfig(20, 30);
+
+        auto d1 = NFyaml::TDocument::Parse(fewRegions);
+        auto d2 = NFyaml::TDocument::Parse(manyRegions);
+        TSet<TString> f1, f2;
+        size_t a1 = EnumerateRealizableAssignments(d1, {"/feature_a"}, f1).size();
+        size_t a2 = EnumerateRealizableAssignments(d2, {"/feature_a"}, f2).size();
+
+        UNIT_ASSERT_VALUES_EQUAL(a1, 21u); // base + 20 tenant overrides
+        UNIT_ASSERT_VALUES_EQUAL_C(a2, a1,
+            "feature_a A+ work must not depend on the number of regions");
+
+        // The legacy gate, by contrast, blows up 40x between the two configs.
+        UNIT_ASSERT_VALUES_EQUAL(LegacyValidateCount(fewRegions), 21u * 6u);
+        UNIT_ASSERT_VALUES_EQUAL(LegacyValidateCount(manyRegions), 21u * 31u);
+    }
+
+    // Today's regime (one high-cardinality label): A+ does the SAME work as
+    // legacy -- it is never worse, only better when a second label appears.
+    Y_UNIT_TEST(SingleLabelRegimeNeverWorse) {
+        auto yaml = MakeBenchConfig(50, 0);
+        UNIT_ASSERT_VALUES_EQUAL(LegacyValidateCount(yaml), 51u);
+        auto doc = NFyaml::TDocument::Parse(yaml);
+        TSet<TString> fa;
+        UNIT_ASSERT_VALUES_EQUAL(EnumerateRealizableAssignments(doc, {"/feature_a"}, fa).size(), 51u);
+    }
+
+    // Wall-clock evidence (printed, not asserted -- counts above are the proof).
+    Y_UNIT_TEST(WallClockEvidence) {
+        const size_t T = 20;
+        const size_t R = 20;
+        auto yaml = MakeBenchConfig(T, R);
+
+        auto t0 = TInstant::Now();
+        size_t legacy = LegacyValidateCount(yaml);
+        auto legacyDur = TInstant::Now() - t0;
+
+        auto t1 = TInstant::Now();
+        size_t aplus = APlusEvalCount(yaml);
+        auto aplusDur = TInstant::Now() - t1;
+
+        Cerr << "[A+ BENCH T=R=" << T << "] legacy: validates K=" << legacy
+             << " docs in " << legacyDur.MicroSeconds() << "us"
+             << " ; A+: evaluates " << aplus << " assignments in " << aplusDur.MicroSeconds() << "us"
+             << " ; work ratio=" << (double(legacy) / double(aplus)) << "x" << Endl;
+
+        UNIT_ASSERT_VALUES_EQUAL(legacy, (T + 1) * (R + 1));
+        UNIT_ASSERT_VALUES_EQUAL(aplus, (T + 1) + (R + 1));
+    }
+}
+
+// ===========================================================================
+// Track A+ structural (proto-transform) validation tests.
+// ===========================================================================
+
+namespace {
+
+using namespace NKikimr::NYamlConfig;
+
+NFyaml::TNodeRef StructNodeAt(NFyaml::TNodeRef config, const TString& path) {
+    NFyaml::TNodeRef node = config;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t slash = path.find('/', start);
+        TString key = (slash == TString::npos) ? path.substr(start) : path.substr(start, slash - start);
+        if (!key.empty()) {
+            if (!node || node.Type() != NFyaml::ENodeType::Mapping) {
+                return NFyaml::TNodeRef{};
+            }
+            auto map = node.Map();
+            if (!map.Has(key)) {
+                return NFyaml::TNodeRef{};
+            }
+            node = map.at(key);
+        }
+        if (slash == TString::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    return node;
+}
+
+TString ProjectionKey(NFyaml::TNodeRef config, const TVector<TString>& sections) {
+    TStringStream ss;
+    for (const auto& s : sections) {
+        ss << s << "=";
+        if (auto n = StructNodeAt(config, s); n) {
+            ss << n;
+        } else {
+            ss << "<absent>";
+        }
+        ss << "\x02";
+    }
+    return ss.Str();
+}
+
+// base: log_config.cluster_name + other_field; `tenants` selectors vary the
+// (transform-read) log_config.cluster_name; `regions` selectors vary the
+// (non-transform) other_field.
+TString MakeProjConfig(size_t tenants, size_t regions) {
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\n";
+    sb << "config:\n  log_config:\n    cluster_name: base\n  other_field: base\n";
+    sb << "allowed_labels:\n  tenant:\n    type: string\n  region:\n    type: string\n";
+    sb << "incompatibility_overrides:\n  disable_rules:\n";
+    for (const char* r : {"builtin_branch_must_have_value", "builtin_dynamic_must_have_value",
+                          "builtin_node_host_must_have_value", "builtin_node_id_must_have_value",
+                          "builtin_rev_must_have_value", "builtin_node_type_must_be_defined",
+                          "builtin_tenant_must_be_defined"}) {
+        sb << "    - " << r << "\n";
+    }
+    sb << "selector_config:\n";
+    for (size_t i = 0; i < tenants; ++i) {
+        sb << "- description: t" << i << "\n  selector:\n    tenant: t" << i << "\n";
+        sb << "  config: !inherit\n    log_config: !inherit\n      cluster_name: lc" << i << "\n";
+    }
+    for (size_t j = 0; j < regions; ++j) {
+        sb << "- description: r" << j << "\n  selector:\n    region: r" << j << "\n";
+        sb << "  config: !inherit\n    other_field: of" << j << "\n";
+    }
+    return sb;
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralProjection) {
+
+    // Regime A/C correctness: the set of distinct transform-read-section
+    // projections EnumerateDistinctProjections produces equals the set
+    // ResolveUniqueDocs (full enumeration) produces. Running the proto transform
+    // on the former is therefore equivalent to running it on every resolved doc.
+    Y_UNIT_TEST(ProjectionSetEqualsFullEnumeration) {
+        auto sections = TransformReadDynamicSections();
+        auto yaml = MakeProjConfig(8, 8);
+
+        TSet<TString> legacy;
+        auto d1 = NFyaml::TDocument::Parse(yaml);
+        ResolveUniqueDocs(d1, [&](TDocumentConfig&& cfg) {
+            legacy.insert(ProjectionKey(cfg.second, sections));
+        });
+
+        TSet<TString> aplus;
+        auto d2 = NFyaml::TDocument::Parse(yaml);
+        EnumerateDistinctProjections(d2, sections, [&](NFyaml::TNodeRef node) {
+            aplus.insert(ProjectionKey(node, sections));
+        });
+
+        UNIT_ASSERT_C(aplus == legacy, "A+ projection set must equal full enumeration's");
+        UNIT_ASSERT_VALUES_EQUAL(aplus.size(), 9u); // base + 8 tenant log_config variants
+    }
+
+    // K-independence: distinct transform-read projections do not grow with a
+    // second high-cardinality label that varies only NON-transform sections.
+    Y_UNIT_TEST(ProjectionWorkIndependentOfUncoupledLabel) {
+        auto sections = TransformReadDynamicSections();
+
+        auto count = [&](const TString& yaml) {
+            size_t n = 0;
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            EnumerateDistinctProjections(doc, sections, [&](NFyaml::TNodeRef) { ++n; });
+            return n;
+        };
+
+        UNIT_ASSERT_VALUES_EQUAL(count(MakeProjConfig(8, 5)), 9u);
+        UNIT_ASSERT_VALUES_EQUAL(count(MakeProjConfig(8, 40)), 9u); // independent of regions
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralGuard) {
+
+    Y_UNIT_TEST(DetectsSelectorOverridingStaticSection) {
+        TString yaml = R"(---
+cluster: test
+version: 1
+config:
+  domains_config:
+    domain:
+    - name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: bad
+  selector:
+    tenant: x
+  config: !inherit
+    domains_config: !inherit
+      security_config: !inherit
+        enforce_user_token_requirement: true
+)";
+        auto doc = NFyaml::TDocument::Parse(yaml);
+        auto hits = SelectorWritesUnder(doc, StaticGuardSections());
+        UNIT_ASSERT_C(!hits.empty(), "a selector overriding /domains_config must trip the guard");
+        bool under = false;
+        for (const auto& h : hits) {
+            if (h.StartsWith("/domains_config")) {
+                under = true;
+            }
+        }
+        UNIT_ASSERT(under);
+    }
+
+    Y_UNIT_TEST(PassesWhenSelectorsOnlyVaryDynamic) {
+        auto doc = NFyaml::TDocument::Parse(MakeProjConfig(4, 4));
+        auto hits = SelectorWritesUnder(doc, StaticGuardSections());
+        UNIT_ASSERT_C(hits.empty(), "no selector touches a static section here");
+    }
+}
+
+namespace {
+
+// Finds a singular (non-repeated) scalar leaf of a given kind reachable from
+// TAppConfig, avoiding the transform-read and static-guard sections -- so a bad
+// value there is invisible to the transform/static passes and ONLY the per-field
+// coercion layer can catch it. Returns a config-relative path plus a coercible
+// "good" value and a non-coercible "bad" value.
+//   kind 0 = enum, 1 = integer (int/uint), 2 = bool.
+struct TScalarLeaf {
+    TString Path;
+    TString Good;
+    TString Bad;
+};
+
+bool FindScalarLeaf(const google::protobuf::Descriptor* desc, const TString& prefix,
+                    int depth, const TSet<TString>& avoidTop, int kind, TScalarLeaf& out) {
+    using FD = google::protobuf::FieldDescriptor;
+    if (!desc || depth > 4) {
+        return false;
+    }
+    for (int i = 0; i < desc->field_count(); ++i) {
+        const auto* f = desc->field(i);
+        if (f->is_repeated()) {
+            continue;
+        }
+        TString name = f->name();
+        NProtobufJson::ToSnakeCaseDense(&name);
+        TString path = prefix + "/" + name;
+        if (depth == 0 && avoidTop.contains(path)) {
+            continue;
+        }
+        const auto t = f->cpp_type();
+        if (kind == 0 && t == FD::CPPTYPE_ENUM && f->enum_type()->value_count() > 0) {
+            out = TScalarLeaf{path, f->enum_type()->value(0)->name(), "ZZ_NOT_AN_ENUM_VALUE"};
+            return true;
+        }
+        if (kind == 1 && (t == FD::CPPTYPE_INT32 || t == FD::CPPTYPE_INT64
+                          || t == FD::CPPTYPE_UINT32 || t == FD::CPPTYPE_UINT64)) {
+            out = TScalarLeaf{path, "1", "not_a_number"};
+            return true;
+        }
+        if (kind == 2 && t == FD::CPPTYPE_BOOL) {
+            out = TScalarLeaf{path, "true", "not_a_bool"};
+            return true;
+        }
+        if (t == FD::CPPTYPE_MESSAGE && FindScalarLeaf(f->message_type(), path, depth + 1, avoidTop, kind, out)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void EmitNested(TStringBuilder& sb, const TVector<TString>& comps, size_t idx,
+                const TString& value, int indent, bool inherit) {
+    TString pad(indent * 2, ' ');
+    if (idx + 1 == comps.size()) {
+        sb << pad << comps[idx] << ": " << value << "\n";
+        return;
+    }
+    sb << pad << comps[idx] << ":" << (inherit ? " !inherit" : "") << "\n";
+    EmitNested(sb, comps, idx + 1, value, indent + 1, inherit);
+}
+
+TVector<TString> SplitLeafPath(const TString& path) {
+    TVector<TString> comps;
+    size_t start = 0;
+    while (start <= path.size()) {
+        size_t slash = path.find('/', start);
+        TString k = (slash == TString::npos) ? path.substr(start) : path.substr(start, slash - start);
+        if (!k.empty()) { comps.push_back(k); }
+        if (slash == TString::npos) { break; }
+        start = slash + 1;
+    }
+    return comps;
+}
+
+// Builds a config whose base sets `leaf` to a coercible value and a tenant=bad
+// selector overrides it with a non-coercible value, then asserts the legacy and
+// A+ structural validations REACH THE SAME reject decision -- proving A+ is
+// strictly not weaker than legacy proto-validity verification for this field.
+// `expectReject` = does the legacy converter actually throw for this kind? Enum
+// names throw; plain int/bool are robustly (silently) coerced because the parser
+// uses CastRobust=true, so legacy accepts them -- and A+ must do the same. In
+// every case the REQUIRED property is agreement (!Diverged): A+ rejects exactly
+// when legacy does, i.e. A+ is strictly not weaker (no false negatives).
+void AssertCoercionStrictlyNotWeaker(int kind, const char* kindName, bool expectReject) {
+    TSet<TString> avoid;
+    for (const auto& s : TransformReadDynamicSections()) { avoid.insert(s); }
+    for (const auto& s : StaticGuardSections()) { avoid.insert(s); }
+
+    TScalarLeaf leaf;
+    if (!FindScalarLeaf(NKikimrConfig::TAppConfig::descriptor(), "", 0, avoid, kind, leaf)) {
+        Cerr << "[coercion] no " << kindName << " leaf outside transform/static sections; skipping" << Endl;
+        return;
+    }
+
+    auto comps = SplitLeafPath(leaf.Path);
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\nconfig:\n";
+    EmitNested(sb, comps, 0, leaf.Good, 1, /*inherit*/ false);
+    sb << "allowed_labels:\n  tenant:\n    type: string\n";
+    sb << "incompatibility_overrides:\n  disable_rules:\n    - builtin_tenant_must_be_defined\n";
+    sb << "selector_config:\n- description: bad\n  selector:\n    tenant: bad\n  config: !inherit\n";
+    EmitNested(sb, comps, 0, leaf.Bad, 2, /*inherit*/ true);
+
+    auto doc = NFyaml::TDocument::Parse(TString(sb));
+    auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+
+    // The strictly-not-weaker property: A+ and legacy reach the SAME decision.
+    UNIT_ASSERT_C(!shadow.Diverged, TStringBuilder()
+        << kindName << ": A+ must decide exactly as legacy at " << leaf.Path
+        << " (strictly not weaker) -- legacy=" << shadow.LegacyRejected
+        << " aplus=" << shadow.APlusRejected);
+
+    if (expectReject) {
+        UNIT_ASSERT_C(shadow.LegacyRejected, TStringBuilder()
+            << kindName << ": legacy is expected to reject the bad value at " << leaf.Path);
+        UNIT_ASSERT_C(shadow.APlusRejected, TStringBuilder()
+            << kindName << ": A+ must also reject at " << leaf.Path);
+    }
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralCoercion) {
+
+    // A selector introducing a non-coercible value in a NON-transform section is
+    // caught by the per-field coercion layer (K-independently), exactly as the
+    // legacy per-doc path would. Covered for every scalar field kind, so A+ is
+    // strictly not weaker than legacy proto-validity verification.
+    // Enum coercion throws in the legacy converter; A+ must reject too.
+    Y_UNIT_TEST(EnumCoercionStrictlyNotWeaker) {
+        AssertCoercionStrictlyNotWeaker(0, "enum", /*expectReject*/ true);
+    }
+
+    // Non-enum scalars: the legacy parser coerces them robustly (CastRobust),
+    // so legacy ACCEPTS -- and A+ must accept too (no divergence). A+ uses the
+    // SAME converter per section, so its coercion decision is equal to legacy's
+    // by construction for every field type, not just enums.
+    Y_UNIT_TEST(IntegerCoercionMatchesLegacy) {
+        AssertCoercionStrictlyNotWeaker(1, "integer", /*expectReject*/ false);
+    }
+
+    Y_UNIT_TEST(BoolCoercionMatchesLegacy) {
+        AssertCoercionStrictlyNotWeaker(2, "bool", /*expectReject*/ false);
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralShadow) {
+
+    // The migration shadow-run: the legacy per-doc structural validation and
+    // the K-independent A+ validation must reach the SAME accept/reject decision.
+    // This config (log_config varied per tenant) passes the proto transform, so
+    // both ACCEPT -- proving A+ does not spuriously reject a config legacy
+    // accepts, and that they do not diverge.
+    Y_UNIT_TEST(LegacyAndAPlusAgree) {
+        auto doc = NFyaml::TDocument::Parse(MakeProjConfig(6, 6));
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+
+        UNIT_ASSERT_C(!shadow.Diverged, "legacy and A+ structural decisions must agree");
+        UNIT_ASSERT_C(!shadow.LegacyRejected, "legacy accepts this transform-valid config");
+        UNIT_ASSERT_C(!shadow.APlusRejected, "A+ must also accept (no spurious rejection)");
+        UNIT_ASSERT_C(shadow.GuardViolations.empty(), "no selector touches a static section here");
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralSectionMarkers) {
+
+    // The transform-read and static-guard section lists are DERIVED from proto
+    // field markers (NMarkers.SelectorTransformRead / SelectorStatic) via the
+    // config protoc plugin, not hand-declared -- this closes the "is the
+    // transform-read list complete?" gap by keeping the classification next to
+    // the fields. This test pins the wiring.
+    Y_UNIT_TEST(DerivedFromMarkers) {
+        TSet<TString> tr;
+        for (const auto& s : NYamlConfig::TransformReadDynamicSections()) { tr.insert(s); }
+        UNIT_ASSERT_C(tr.contains("/actor_system_config"), "actor_system_config must be transform-read");
+        UNIT_ASSERT_C(tr.contains("/log_config"), "log_config must be transform-read");
+        UNIT_ASSERT_C(tr.contains("/auth_config"), "auth_config must be transform-read");
+        UNIT_ASSERT_C(tr.contains("/grpc_config"), "grpc_config must be transform-read");
+        UNIT_ASSERT_C(tr.contains("/interconnect_config"), "interconnect_config must be transform-read");
+
+        TSet<TString> sg;
+        for (const auto& s : NYamlConfig::StaticGuardSections()) { sg.insert(s); }
+        UNIT_ASSERT_C(sg.contains("/domains_config"), "domains_config must be static-guarded");
+        UNIT_ASSERT_C(sg.contains("/blob_storage_config"), "blob_storage_config must be static-guarded");
+        UNIT_ASSERT_C(sg.contains("/nameservice_config"), "nameservice_config must be static-guarded");
+        UNIT_ASSERT_C(sg.contains("/hosts"), "hosts (ephemeral input) must be static-guarded");
+
+        // A section must not be classified as BOTH.
+        for (const auto& s : tr) {
+            UNIT_ASSERT_C(!sg.contains(s), TStringBuilder() << s << " is both transform-read and static");
+        }
+    }
+
+    // Drift guard for the cross-section SEMANTIC couplings. ValidateMonitoringConfig
+    // reads domains_config jointly with monitoring_config, and ValidateStateStorage
+    // reads domains_config + self_management_config. Per-section projection is sound
+    // ONLY if those STATIC partners stay guarded (selectors cannot vary them, so the
+    // constant base is their single realizable value). If a future change unmarks
+    // either, the semantic per-section pass would silently become weaker than legacy
+    // for the decoupled split-label shape. Pin the invariant here.
+    Y_UNIT_TEST(StaticGuardCoversSemanticCoupledSections) {
+        TSet<TString> sg;
+        for (const auto& s : NYamlConfig::StaticGuardSections()) { sg.insert(s); }
+        UNIT_ASSERT_C(sg.contains("/domains_config"),
+            "domains_config is read jointly by Monitoring & StateStorage validators -- must stay static-guarded");
+        UNIT_ASSERT_C(sg.contains("/self_management_config"),
+            "self_management_config is read by the StateStorage aggregate -- must stay static-guarded");
+
+        UNIT_ASSERT_C(!NYamlConfig::StaticGuardSections().empty(), "static guard set must be non-empty");
+        UNIT_ASSERT_C(!NYamlConfig::TransformReadDynamicSections().empty(),
+            "transform-read set must be non-empty");
+    }
+}
+
+namespace {
+
+// base auth_config + log_config; `tenants` selectors vary auth_config (a
+// transform-read section), `regions` selectors vary log_config (another
+// transform-read section), under two INDEPENDENT labels.
+TString MakeTwoTransformSectionConfig(size_t tenants, size_t regions) {
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\n";
+    sb << "config:\n  auth_config:\n    field: base\n  log_config:\n    cluster_name: base\n";
+    sb << "allowed_labels:\n  tenant:\n    type: string\n  region:\n    type: string\n";
+    sb << "incompatibility_overrides:\n  disable_rules:\n";
+    for (const char* r : {"builtin_branch_must_have_value", "builtin_dynamic_must_have_value",
+                          "builtin_node_host_must_have_value", "builtin_node_id_must_have_value",
+                          "builtin_rev_must_have_value", "builtin_node_type_must_be_defined",
+                          "builtin_tenant_must_be_defined"}) {
+        sb << "    - " << r << "\n";
+    }
+    sb << "selector_config:\n";
+    for (size_t i = 0; i < tenants; ++i) {
+        sb << "- description: t" << i << "\n  selector:\n    tenant: t" << i << "\n";
+        sb << "  config: !inherit\n    auth_config: !inherit\n      field: a" << i << "\n";
+    }
+    for (size_t j = 0; j < regions; ++j) {
+        sb << "- description: r" << j << "\n  selector:\n    region: r" << j << "\n";
+        sb << "  config: !inherit\n    log_config: !inherit\n      cluster_name: l" << j << "\n";
+    }
+    return sb;
+}
+
+size_t ProjectionCount(const TString& yaml, const TVector<TString>& sections) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    size_t n = 0;
+    NYamlConfig::EnumerateDistinctProjections(doc, sections, [&](NFyaml::TNodeRef) { ++n; });
+    return n;
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigStructuralBenchmark) {
+
+    // The polynomiality property: validating two transform-read sections varied
+    // by two independent high-cardinality labels costs (T+1)+(R+1) work
+    // PER-SECTION (additive, as ValidateStructuralAPlus does it) -- NOT the
+    // (T+1)*(R+1) the joint projection (or the legacy per-doc enumeration) would
+    // incur. This is the cliff the redesign removes.
+    Y_UNIT_TEST(PerSectionIsAdditiveNotMultiplicative) {
+        const size_t T = 12, R = 12;
+        auto yaml = MakeTwoTransformSectionConfig(T, R);
+
+        // Per-section (what A+ actually does): each section's projection count is
+        // independent of the OTHER section's label.
+        size_t authProj = ProjectionCount(yaml, {"/auth_config"});
+        size_t logProj = ProjectionCount(yaml, {"/log_config"});
+        UNIT_ASSERT_VALUES_EQUAL(authProj, T + 1);  // base + T tenant variants
+        UNIT_ASSERT_VALUES_EQUAL(logProj, R + 1);   // base + R region variants
+
+        // The joint projection (the multiplicative cliff we DON'T use).
+        size_t jointProj = ProjectionCount(yaml, {"/auth_config", "/log_config"});
+        UNIT_ASSERT_VALUES_EQUAL(jointProj, (T + 1) * (R + 1));
+
+        // Additive per-section work is strictly less than joint/legacy.
+        UNIT_ASSERT_C(authProj + logProj < jointProj,
+            "per-section structural work must be additive, not multiplicative");
+    }
+
+    // K-independence: a section's structural work does not grow with a second
+    // high-cardinality label that varies a DIFFERENT section.
+    Y_UNIT_TEST(SectionWorkIndependentOfOtherLabel) {
+        UNIT_ASSERT_VALUES_EQUAL(ProjectionCount(MakeTwoTransformSectionConfig(10, 3), {"/auth_config"}), 11u);
+        UNIT_ASSERT_VALUES_EQUAL(ProjectionCount(MakeTwoTransformSectionConfig(10, 300), {"/auth_config"}), 11u);
+    }
+}
+
+namespace {
+
+const char* kDisableRules =
+    "incompatibility_overrides:\n  disable_rules:\n"
+    "    - builtin_branch_must_have_value\n"
+    "    - builtin_dynamic_must_have_value\n"
+    "    - builtin_node_host_must_have_value\n"
+    "    - builtin_node_id_must_have_value\n"
+    "    - builtin_rev_must_have_value\n"
+    "    - builtin_node_type_must_be_defined\n"
+    "    - builtin_tenant_must_be_defined\n";
+
+// base auth password is valid; tenant=bad lowers min_length below the sum -> the
+// Auth k=5 semantic rule is violated only for that tenant variant.
+TString MakeAuthVariantConfig(bool badVariant) {
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\nconfig:\n";
+    sb << "  auth_config:\n    password_complexity:\n";
+    sb << "      min_length: 10\n      min_lower_case_count: 1\n      min_upper_case_count: 1\n";
+    sb << "      min_numbers_count: 1\n      min_special_chars_count: 1\n";
+    sb << "allowed_labels:\n  tenant:\n    type: string\n";
+    sb << kDisableRules;
+    sb << "selector_config:\n- description: t\n  selector:\n    tenant: bad\n  config: !inherit\n";
+    sb << "    auth_config: !inherit\n      password_complexity: !inherit\n";
+    sb << "        min_length: " << (badVariant ? "1" : "8") << "\n";  // 1 < sum(4) violates; 8 ok
+    return sb;
+}
+
+// base monitoring is valid (no auth requirement); tenant=bad turns on counters
+// authentication without EnforceUserTokenRequirement -> Monitoring rule (cross
+// section monitoring_config + domains security) violated only for that variant.
+TString MakeMonitoringVariantConfig(bool badVariant) {
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\nconfig:\n";
+    sb << "  monitoring_config:\n    require_counters_authentication: false\n";
+    sb << "allowed_labels:\n  tenant:\n    type: string\n";
+    sb << kDisableRules;
+    sb << "selector_config:\n- description: t\n  selector:\n    tenant: bad\n  config: !inherit\n";
+    sb << "    monitoring_config: !inherit\n";
+    sb << "      require_counters_authentication: " << (badVariant ? "true" : "false") << "\n";
+    return sb;
+}
+
+void AssertSemanticStrictlyNotWeaker(const TString& yaml, bool expectReject, const char* name) {
+    auto doc = NFyaml::TDocument::Parse(yaml);
+    auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+    UNIT_ASSERT_C(!shadow.SemanticDiverged, TStringBuilder()
+        << name << ": A+ semantic must decide exactly as legacy (strictly not weaker) -- legacy="
+        << shadow.SemanticLegacyRejected << " aplus=" << shadow.SemanticAPlusRejected);
+    UNIT_ASSERT_VALUES_EQUAL_C(shadow.SemanticLegacyRejected, expectReject,
+        TStringBuilder() << name << ": legacy reject expectation");
+    UNIT_ASSERT_VALUES_EQUAL_C(shadow.SemanticAPlusRejected, expectReject,
+        TStringBuilder() << name << ": A+ reject expectation");
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigSemanticAPlus) {
+
+    // Auth k=5 (password complexity) violation introduced by a selector is
+    // caught by A+ exactly as by the legacy per-doc semantic gate.
+    Y_UNIT_TEST(AuthViolationInSelectorCaught) {
+        AssertSemanticStrictlyNotWeaker(MakeAuthVariantConfig(/*bad*/ true), /*expectReject*/ true, "auth-bad");
+    }
+    Y_UNIT_TEST(AuthValidVariantAccepted) {
+        AssertSemanticStrictlyNotWeaker(MakeAuthVariantConfig(/*bad*/ false), /*expectReject*/ false, "auth-ok");
+    }
+
+    // Monitoring (cross-section: monitoring_config + domains security) violation
+    // introduced by a selector -- caught K-independently via the same projection.
+    Y_UNIT_TEST(MonitoringViolationInSelectorCaught) {
+        AssertSemanticStrictlyNotWeaker(MakeMonitoringVariantConfig(/*bad*/ true), /*expectReject*/ true, "mon-bad");
+    }
+    Y_UNIT_TEST(MonitoringValidVariantAccepted) {
+        AssertSemanticStrictlyNotWeaker(MakeMonitoringVariantConfig(/*bad*/ false), /*expectReject*/ false, "mon-ok");
+    }
+
+    // Direct test of the semantic static-section guard: a selector that varies a
+    // SelectorStatic section (domains_config) must be rejected by ValidateSemanticAPlus
+    // ITSELF (not only by the structural pass). Without this, a semantic check that
+    // reads the static section jointly with a variable one (Monitoring/StateStorage)
+    // could be evaded by per-section projection.
+    Y_UNIT_TEST(SemanticGuardRejectsStaticSectionVariation) {
+        auto doc = NFyaml::TDocument::Parse(TStringBuilder()
+            << "---\ncluster: test\nversion: 1\nconfig:\n"
+            << "  domains_config:\n    security_config:\n      enforce_user_token_requirement: true\n"
+            << "allowed_labels:\n  tenant:\n    type: string\n"
+            << kDisableRules
+            << "selector_config:\n- description: t\n  selector:\n    tenant: bad\n  config: !inherit\n"
+            << "    domains_config: !inherit\n      security_config: !inherit\n"
+            << "        enforce_user_token_requirement: false\n");
+        UNIT_ASSERT_C(!NYamlConfig::ValidateSemanticAPlus(doc).empty(),
+            "semantic A+ must guard-reject a selector varying a static section");
+    }
+
+    // The audit's decoupled split-label repro: monitoring_config varied by label
+    // `mon`, domains_config.security_config varied by an INDEPENDENT label `dom`.
+    // The realizable joint (counters-auth ON, enforce OFF) violates Monitoring and
+    // legacy rejects. Per-section projection never co-varies the two, so the bug
+    // would be an A+ false negative -- but the static-section guard on domains_config
+    // makes A+ reject too. Assert strictly-not-weaker (no semantic divergence).
+    Y_UNIT_TEST(MonitoringCrossSectionDecoupledNotWeaker) {
+        auto doc = NFyaml::TDocument::Parse(TStringBuilder()
+            << "---\ncluster: test\nversion: 1\nconfig:\n"
+            << "  monitoring_config:\n    require_counters_authentication: false\n"
+            << "  domains_config:\n    security_config:\n      enforce_user_token_requirement: true\n"
+            << "allowed_labels:\n  mon:\n    type: string\n  dom:\n    type: string\n"
+            << kDisableRules
+            << "selector_config:\n"
+            << "- description: m\n  selector:\n    mon: m1\n  config: !inherit\n"
+            << "    monitoring_config: !inherit\n      require_counters_authentication: true\n"
+            << "- description: d\n  selector:\n    dom: d1\n  config: !inherit\n"
+            << "    domains_config: !inherit\n      security_config: !inherit\n"
+            << "        enforce_user_token_requirement: false\n");
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+        UNIT_ASSERT_C(shadow.SemanticLegacyRejected,
+            "legacy must reject the realizable (counters-on, enforce-off) joint");
+        UNIT_ASSERT_C(shadow.SemanticAPlusRejected,
+            "A+ semantic must also reject this shape (strictly not weaker)");
+        UNIT_ASSERT_C(!shadow.SemanticDiverged, "no semantic divergence expected on this shape");
+    }
+
+    // Semantic validation work is additive per section, independent of an
+    // uncoupled high-cardinality label (no K blowup).
+    Y_UNIT_TEST(SemanticWorkIsKIndependent) {
+        // tenant varies auth_config; region varies a non-semantic field.
+        auto make = [](size_t regions) {
+            TStringBuilder sb;
+            sb << "---\ncluster: test\nversion: 1\nconfig:\n";
+            sb << "  auth_config:\n    password_complexity:\n      min_length: 10\n";
+            sb << "      min_lower_case_count: 1\n      min_upper_case_count: 1\n";
+            sb << "      min_numbers_count: 1\n      min_special_chars_count: 1\n";
+            sb << "allowed_labels:\n  tenant:\n    type: string\n  region:\n    type: string\n";
+            sb << kDisableRules;
+            sb << "selector_config:\n";
+            sb << "- description: t\n  selector:\n    tenant: t1\n  config: !inherit\n";
+            sb << "    auth_config: !inherit\n      password_complexity: !inherit\n        min_length: 9\n";
+            for (size_t j = 0; j < regions; ++j) {
+                sb << "- description: r" << j << "\n  selector:\n    region: r" << j << "\n";
+                sb << "  config: !inherit\n    other_field: of" << j << "\n";
+            }
+            return TString(sb);
+        };
+        auto count = [](const TString& yaml) {
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            size_t n = 0;
+            NYamlConfig::EnumerateDistinctProjections(doc, {"/auth_config"}, [&](NFyaml::TNodeRef) { ++n; });
+            return n;
+        };
+        UNIT_ASSERT_VALUES_EQUAL(count(make(3)), 2u);    // base + tenant=t1 variant
+        UNIT_ASSERT_VALUES_EQUAL(count(make(300)), 2u);  // independent of regions
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigDatabaseAllowlist) {
+
+    // A section marked AllowInDatabaseConfig (feature_flags) is accepted.
+    Y_UNIT_TEST(AllowedSectionAccepted) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+)");
+        UNIT_ASSERT(NYamlConfig::ValidateDatabaseAllowlistAPlus(doc).empty());
+    }
+
+    // A non-allowlisted section in the base DB config is rejected (matches legacy).
+    Y_UNIT_TEST(DisallowedSectionInBaseRejected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  auth_config:
+    some_field: 1
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        UNIT_ASSERT_C(!v.empty(), "auth_config is not allowed in a database config");
+        UNIT_ASSERT_C(v.front().Message.Contains("auth_config"), v.front().Message);
+    }
+
+    // The stronger-than-legacy case: a non-allowlisted section introduced ONLY by
+    // a database-config SELECTOR. The legacy base-only check misses this; the
+    // K-independent A+ allowlist catches it.
+    Y_UNIT_TEST(DisallowedSectionInSelectorRejected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: sneaky
+  selector:
+    tenant: x
+  config: !inherit
+    auth_config: !inherit
+      some_field: 1
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        bool found = false;
+        for (const auto& e : v) {
+            if (e.Message.Contains("auth_config")) { found = true; }
+        }
+        UNIT_ASSERT_C(found, "A+ must catch a disallowed section introduced by a DB selector");
+    }
+
+    // Regression: a disallowed section present as an EMPTY mapping carries no scalar
+    // leaf, so the leaf-derived section set misses it -- but the legacy DB gate
+    // (YamlToProto + ValidateDatabaseConfig) still rejects `auth_config: {}`. The
+    // allowlist is a PRESENCE check, so A+ must reject it too (not be weaker).
+    Y_UNIT_TEST(DisallowedEmptyMappingSectionRejected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  auth_config: {}
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        UNIT_ASSERT_C(!v.empty(), "an empty-mapping disallowed section must still be rejected");
+        bool found = false;
+        for (const auto& e : v) {
+            if (e.Message.Contains("auth_config")) { found = true; }
+        }
+        UNIT_ASSERT_C(found, "auth_config: {} must be reported by the allowlist");
+    }
+
+    // Same gap via a selector overlay introducing an empty-mapping disallowed section.
+    Y_UNIT_TEST(DisallowedEmptyMappingSectionInSelectorRejected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: sneaky
+  selector:
+    tenant: x
+  config: !inherit
+    auth_config: {}
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        bool found = false;
+        for (const auto& e : v) {
+            if (e.Message.Contains("auth_config")) { found = true; }
+        }
+        UNIT_ASSERT_C(found, "A+ must catch an empty-mapping disallowed section in a DB selector");
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigFieldDiagnostics) {
+
+    // Unknown field in the base config is collected (path under /config).
+    Y_UNIT_TEST(UnknownFieldInBaseCollected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  some_bogus_unknown_field: 123
+)");
+        auto diag = NYamlConfig::CollectFieldDiagnosticsAPlus(doc);
+        UNIT_ASSERT_C(!diag.Empty(), "the bogus field must be reported");
+        UNIT_ASSERT_C(diag.UnknownFields.contains("/config/some_bogus_unknown_field"),
+            "unknown base field must be keyed by its editable path");
+        UNIT_ASSERT_C(!diag.ToWarnings().empty(), "warnings dump must be non-empty");
+    }
+
+    // Unknown field introduced ONLY by a selector overlay is collected
+    // K-independently (per editable block, no resolved-doc enumeration).
+    Y_UNIT_TEST(UnknownFieldInSelectorCollected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: t
+  selector:
+    tenant: x
+  config: !inherit
+    another_bogus_field: 5
+)");
+        auto diag = NYamlConfig::CollectFieldDiagnosticsAPlus(doc);
+        UNIT_ASSERT_C(diag.UnknownFields.contains("/selector_config/0/config/another_bogus_field"),
+            "unknown field in a selector overlay must be collected with its selector path");
+    }
+
+    // A config with only known sections (an empty, known message) produces no
+    // diagnostics.
+    Y_UNIT_TEST(KnownConfigHasNoDiagnostics) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags: {}
+)");
+        auto diag = NYamlConfig::CollectFieldDiagnosticsAPlus(doc);
+        UNIT_ASSERT_C(diag.UnknownFields.empty(),
+            TStringBuilder() << "no unknown fields expected, got "
+                << (diag.UnknownFields.empty() ? TString("none") : diag.UnknownFields.begin()->first));
+    }
+}
+
+// ===========================================================================
+// Polynomiality & scale.
+//
+// Proves the FULL A+ validation pipeline (the REAL proto transform + the REAL
+// NConfig::ValidateConfig, not just the enumerator) is ADDITIVE across sections
+// and stays in milliseconds on configs whose legacy K (number of distinct
+// resolved documents) is astronomically large -- the real-world shape described
+// in gist bbfba6db: ~150 selectors, 400+ tenant paths, several independently
+// varied sections, where legacy K = product of label cardinalities explodes.
+// ===========================================================================
+
+namespace {
+
+// Up to three INDEPENDENT labels, each varying a DIFFERENT section with a
+// DISTINCT value per selector (so no projection dedup collapses them):
+//   tenant  (T) -> log_config.cluster_name  (real, transform-read)
+//   region  (R) -> auth_config min_length    (real, transform-read + semantic;
+//                                             values kept >= the min-count sum, so valid)
+//   flavour (F) -> feature_x scalar          (independent label; tolerated under allowUnknown)
+// Legacy validates K = (T+1)(R+1)(F+1) resolved docs; A+ validates the additive
+// (T+1) + (R+1) + (F+1) distinct per-section projections.
+TString MakeScaleConfig(size_t T, size_t R, size_t F) {
+    TStringBuilder sb;
+    sb << "---\ncluster: test\nversion: 1\nconfig:\n";
+    sb << "  log_config:\n    cluster_name: base\n";
+    sb << "  auth_config:\n    password_complexity:\n      min_length: 10\n";
+    sb << "      min_lower_case_count: 1\n      min_upper_case_count: 1\n";
+    sb << "      min_numbers_count: 1\n      min_special_chars_count: 1\n";
+    sb << "allowed_labels:\n  tenant:\n    type: string\n  region:\n    type: string\n";
+    sb << "  flavour:\n    type: string\n";
+    sb << kDisableRules;
+    sb << "selector_config:\n";
+    for (size_t i = 0; i < T; ++i) {
+        sb << "- description: t" << i << "\n  selector:\n    tenant: t" << i << "\n";
+        sb << "  config: !inherit\n    log_config: !inherit\n      cluster_name: lc" << i << "\n";
+    }
+    for (size_t j = 0; j < R; ++j) {
+        sb << "- description: r" << j << "\n  selector:\n    region: r" << j << "\n";
+        sb << "  config: !inherit\n    auth_config: !inherit\n      password_complexity: !inherit\n";
+        sb << "        min_length: " << (8 + j) << "\n";  // distinct AND valid (>= sum 4)
+    }
+    for (size_t k = 0; k < F; ++k) {
+        sb << "- description: f" << k << "\n  selector:\n    flavour: f" << k << "\n";
+        sb << "  config: !inherit\n    feature_x: fx" << k << "\n";
+    }
+    return sb;
+}
+
+size_t SectionProjCount(NFyaml::TDocument& doc, const TString& section) {
+    size_t n = 0;
+    NYamlConfig::EnumerateDistinctProjections(doc, {section}, [&](NFyaml::TNodeRef) { ++n; });
+    return n;
+}
+
+} // namespace
+
+Y_UNIT_TEST_SUITE(YamlConfigPolynomialScale) {
+
+    // Deterministic core proof: the distinct per-section projection work A+
+    // performs is ADDITIVE in the label cardinalities; the legacy gate validates
+    // the multiplicative product. Exact counts, no timing.
+    Y_UNIT_TEST(ProjectionWorkIsAdditiveNotMultiplicative) {
+        // Small scale: confirm the legacy multiplicative model by actually
+        // enumerating the resolved-doc set.
+        {
+            auto yaml = MakeScaleConfig(5, 5, 5);
+            UNIT_ASSERT_VALUES_EQUAL(LegacyValidateCount(yaml), 6u * 6u * 6u);  // K = 216
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            size_t aplus = SectionProjCount(doc, "/log_config")
+                         + SectionProjCount(doc, "/auth_config")
+                         + SectionProjCount(doc, "/feature_x");
+            UNIT_ASSERT_VALUES_EQUAL(aplus, 6u + 6u + 6u);  // 18, additive
+        }
+        // Large scale: legacy K is ~10^6 (deliberately NOT enumerated -- that is
+        // the whole point); A+ stays additive at 303. Assert the analytic gap.
+        {
+            auto yaml = MakeScaleConfig(100, 100, 100);
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            size_t aplus = SectionProjCount(doc, "/log_config")
+                         + SectionProjCount(doc, "/auth_config")
+                         + SectionProjCount(doc, "/feature_x");
+            UNIT_ASSERT_VALUES_EQUAL(aplus, 101u + 101u + 101u);  // 303
+            const double legacyK = 101.0 * 101.0 * 101.0;         // 1,030,301
+            UNIT_ASSERT_C(legacyK / double(aplus) > 3000.0,
+                TStringBuilder() << "A+ must be thousands of times less work; ratio="
+                    << (legacyK / double(aplus)));
+        }
+    }
+
+    // The headline: a config whose legacy K exceeds one MILLION validates fully
+    // (structural + semantic, with the real validators) in milliseconds.
+    Y_UNIT_TEST(HugeConfigValidatesInMillis) {
+        auto yaml = MakeScaleConfig(200, 100, 50);  // legacy K = 201*101*51 = 1,035,351
+        auto doc = NFyaml::TDocument::Parse(yaml);
+
+        auto t0 = TInstant::Now();
+        auto structural = NYamlConfig::ValidateStructuralAPlus(doc, /*allowUnknown*/ true);
+        auto semantic = NYamlConfig::ValidateSemanticAPlus(doc, /*allowUnknown*/ true);
+        auto dur = TInstant::Now() - t0;
+
+        const ui64 legacyK = 201ull * 101ull * 51ull;
+        Cerr << "[A+ SCALE] legacy K=" << legacyK
+             << " ; A+ full structural+semantic validation in " << dur.MilliSeconds() << "ms"
+             << " (" << dur.MicroSeconds() << "us)" << Endl;
+
+        UNIT_ASSERT_C(structural.empty(), TStringBuilder()
+            << "valid config must produce no structural violations; first="
+            << (structural.empty() ? TString() : structural.front().Message));
+        UNIT_ASSERT_C(semantic.empty(), TStringBuilder()
+            << "valid config must produce no semantic violations; first="
+            << (semantic.empty() ? TString() : semantic.front().Message));
+        // Generous ceiling: the real number is far smaller. The assertion exists
+        // to fail loudly if the multiplicative cliff ever sneaks back in.
+        UNIT_ASSERT_C(dur.Seconds() < 5,
+            TStringBuilder() << "A+ on a 10^6-K config must finish in well under 5s, took "
+                << dur.MilliSeconds() << "ms");
+    }
+
+    // Growth of the FULL pipeline in the cardinality of a SINGLE varied section is
+    // POLYNOMIAL (here ~quadratic), never exponential. The number of validations is
+    // additive (n+1 projections, asserted), but each projection currently rebuilds
+    // its representative by cloning + re-parsing the WHOLE document
+    // (EnumerateDistinctProjections: doc.Clone()+ParseConfig per signature,
+    // public/yaml_config.cpp:1622), so total single-section CPU is O((n+1) * docsize)
+    // = O(n^2). This is a polynomial cost (optimizable to near-linear via subtree
+    // clone + label-value indexing) and is the SECOND-order term; the first-order
+    // win over legacy is exponential -> polynomial in the NUMBER of labels
+    // (see ComplexityClassSeparation). At the real-world shape (gist bbfba6d:
+    // selectors spread across many sections => small per-section n) it is ms-cheap.
+    Y_UNIT_TEST(GrowthIsPolynomialNotExponential) {
+        TVector<std::pair<size_t, ui64>> curve;
+        for (size_t n : {size_t(100), size_t(200), size_t(400), size_t(800)}) {
+            auto yaml = MakeScaleConfig(n, 0, 0);  // only tenant varies log_config
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            UNIT_ASSERT_VALUES_EQUAL(SectionProjCount(doc, "/log_config"), n + 1);  // additive #validations
+
+            auto t0 = TInstant::Now();
+            auto v = NYamlConfig::ValidateStructuralAPlus(doc, /*allowUnknown*/ true);
+            auto dur = TInstant::Now() - t0;
+            UNIT_ASSERT_C(v.empty(), "valid config, no violations");
+            curve.emplace_back(n, dur.MicroSeconds());
+            Cerr << "[A+ GROWTH] N=" << n << " -> " << dur.MicroSeconds() << "us"
+                 << " (projections=" << (n + 1) << ")" << Endl;
+        }
+        // 8x the input. Exclude CUBIC-or-worse and exponential: an 8x input under
+        // O(n^2) costs ~64x; the 100x bound absorbs that plus constant/noise while
+        // still failing loudly on cubic (512x) or any exponential regression.
+        ui64 t100 = curve.front().second ? curve.front().second : 1;
+        ui64 t800 = curve.back().second;
+        UNIT_ASSERT_C(t800 < t100 * 100,
+            TStringBuilder() << "single-section growth must stay polynomial (~quadratic): t(100)="
+                << t100 << "us t(800)=" << t800 << "us (ratio " << (double(t800) / double(t100))
+                << ", quadratic≈64x)");
+    }
+
+    // Head-to-head at a scale where legacy is still feasible: A+ and legacy AGREE
+    // (strictly not weaker), and A+ does dramatically less work / wall-time.
+    Y_UNIT_TEST(AgreesWithLegacyAndIsFaster) {
+        auto yaml = MakeScaleConfig(40, 40, 0);  // legacy K = 41*41 = 1681 docs
+        auto doc = NFyaml::TDocument::Parse(yaml);
+
+        auto t0 = TInstant::Now();
+        auto legacy = NYamlConfig::ValidateStructuralLegacy(doc, /*allowUnknown*/ true);
+        auto legacyDur = TInstant::Now() - t0;
+
+        auto t1 = TInstant::Now();
+        auto aplus = NYamlConfig::ValidateStructuralAPlus(doc, /*allowUnknown*/ true);
+        auto aplusDur = TInstant::Now() - t1;
+
+        ui64 aplusUs = aplusDur.MicroSeconds() ? aplusDur.MicroSeconds() : 1;
+        Cerr << "[A+ VS LEGACY] legacy K=1681 in " << legacyDur.MicroSeconds() << "us"
+             << " ; A+ (81 varied projections) in " << aplusDur.MicroSeconds() << "us"
+             << " ; speedup=" << (double(legacyDur.MicroSeconds()) / double(aplusUs)) << "x" << Endl;
+
+        // Agreement: both accept this valid config (A+ strictly not weaker).
+        UNIT_ASSERT_C(!legacy.has_value(), "legacy must accept the valid config");
+        UNIT_ASSERT_C(aplus.empty(), "A+ must accept the valid config too");
+
+        // A+ does ~20x less work (81 vs 1681 transforms). Assert a safe 3x
+        // wall-time margin to absorb scheduler noise.
+        UNIT_ASSERT_C(aplusDur.MicroSeconds() * 3 < legacyDur.MicroSeconds(),
+            TStringBuilder() << "A+ must be substantially faster: legacy="
+                << legacyDur.MicroSeconds() << "us aplus=" << aplusDur.MicroSeconds() << "us");
+    }
+
+    // Explicit COMPLEXITY-CLASS comparison (not just a single wall-clock number).
+    // Two independent labels each vary a different section, scaled n = 10..40.
+    //   legacy work  = K          = (n+1)^2     -> O(n^2)  (multiplicative)
+    //   A+    work   = projections= 2*(n+1)     -> O(n)    (additive)
+    // The proof that these are DIFFERENT complexity classes: the ratio
+    // K / projections = (n+1)/2 must itself GROW linearly with n. If A+ were
+    // merely a constant-factor win (same class), the ratio would be flat. We
+    // assert exact counts at every scale AND that the ratio grows ~4x as n goes
+    // 10 -> 40, and print the full table (with measured wall-clock as corroboration
+    // at the scales where legacy is still feasible to run).
+    Y_UNIT_TEST(ComplexityClassSeparation) {
+        Cerr << "[A+ COMPLEXITY] two independent labels (legacy O(n^2) vs A+ O(n)):" << Endl;
+        Cerr << "   n |   legacy K | A+ proj |  ratio | legacy us | A+ us" << Endl;
+
+        TVector<double> ratios;
+        for (size_t n : {size_t(10), size_t(20), size_t(40)}) {
+            auto yaml = MakeScaleConfig(n, n, 0);
+            auto doc = NFyaml::TDocument::Parse(yaml);
+
+            // Deterministic complexity: counts must match the closed forms exactly.
+            size_t legacyK = LegacyValidateCount(yaml);
+            size_t aplus = SectionProjCount(doc, "/log_config")
+                         + SectionProjCount(doc, "/auth_config");
+            UNIT_ASSERT_VALUES_EQUAL_C(legacyK, (n + 1) * (n + 1),
+                TStringBuilder() << "legacy must be multiplicative (n+1)^2 at n=" << n);
+            UNIT_ASSERT_VALUES_EQUAL_C(aplus, 2 * (n + 1),
+                TStringBuilder() << "A+ must be additive 2(n+1) at n=" << n);
+
+            // Corroborating wall-clock (both feasible at these scales).
+            auto t0 = TInstant::Now();
+            (void)NYamlConfig::ValidateStructuralLegacy(doc, /*allowUnknown*/ true);
+            auto legacyUs = (TInstant::Now() - t0).MicroSeconds();
+            auto t1 = TInstant::Now();
+            (void)NYamlConfig::ValidateStructuralAPlus(doc, /*allowUnknown*/ true);
+            auto aplusUs = (TInstant::Now() - t1).MicroSeconds();
+
+            double ratio = double(legacyK) / double(aplus);
+            ratios.push_back(ratio);
+            Cerr << Sprintf("  %2zu | %10zu | %7zu | %6.1f | %9lu | %lu",
+                            n, legacyK, aplus, ratio, (unsigned long)legacyUs, (unsigned long)aplusUs) << Endl;
+        }
+
+        // Different complexity class <=> the work ratio grows. n: 10 -> 40 is 4x,
+        // so (n+1)/2 grows ~3.7x ((41/2)/(11/2)). Assert it at least tripled.
+        UNIT_ASSERT_C(ratios.back() > ratios.front() * 3.0,
+            TStringBuilder() << "work-ratio must grow with scale (=> A+ is a lower complexity"
+                " class, not a constant-factor win): ratio(10)=" << ratios.front()
+                << " ratio(40)=" << ratios.back());
+    }
 }

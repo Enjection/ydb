@@ -94,6 +94,42 @@ private:
             Header->Print(vars, "}\n");
         }
 
+        // Track A+ : top-level sections classified by selector scope.
+        //  - SelectorStatic       -> selectors must not vary it (guard + run
+        //                            static checks once).
+        //  - SelectorTransformRead -> the proto transform reads it and selectors
+        //                            may vary it (project distinct values).
+        std::vector<TString> staticPaths;
+        std::vector<TString> transformReadPaths;
+        for (int i = 0; i < Message->field_count(); ++i) {
+            const FieldDescriptor* field = Message->field(i);
+            if (field->options().GetExtension(NKikimrConfig::NMarkers::SelectorStatic)) {
+                staticPaths.push_back(TString("/") + FieldName(field));
+            }
+            if (field->options().GetExtension(NKikimrConfig::NMarkers::SelectorTransformRead)) {
+                transformReadPaths.push_back(TString("/") + FieldName(field));
+            }
+        }
+        auto emitPathSet = [&](const char* method, const std::vector<TString>& paths) {
+            Header->Print(vars, TStringBuilder() << "inline static const std::unordered_set<TString>& " << method << "() {\n");
+            WITH_INDENT(Header) {
+                Header->Print(vars, "static const std::unordered_set<TString> paths = {\n");
+                WITH_INDENT(Header) {
+                    for (const auto& path : paths) {
+                        vars["pathLit"] = path;
+                        Header->Print(vars, "\"$pathLit$\",\n");
+                    }
+                }
+                Header->Print(vars, "};\n");
+                Header->Print(vars, "return paths;\n");
+            }
+            Header->Print(vars, "}\n");
+        };
+        WITH_PLUGIN_MARKUP(Header, PLUGIN_NAME) {
+            emitPathSet("GetStaticSectionPaths", staticPaths);
+            emitPathSet("GetTransformReadSectionPaths", transformReadPaths);
+        }
+
         for (auto i = 0; i < Message->field_count(); ++i) {
             const FieldDescriptor* field = Message->field(i);
             if (field->is_repeated()) {

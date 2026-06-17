@@ -1220,6 +1220,451 @@ void ResolveUniqueDocs(
         });
 }
 
+// ---------------------------------------------------------------------------
+// Track A+ : polynomial, K-independent config validation.
+// ---------------------------------------------------------------------------
+
+// Walks a config subtree collecting scalar leaves into 'leaves' (keyed by a
+// '/'-separated, config-relative path) and recording sequence-valued paths in
+// 'fenced'. Sequences are fenced because under !append they accumulate across
+// selectors and in general cannot be decomposed into an independent per-field
+// value-set.
+//
+// When 'replaceRoots' is non-null (selector-overlay walk), every UNTAGGED child
+// mapping is recorded as a wholesale-replace root: under the merge model
+// (Inherit), an untagged child mapping replaces the entire base subtree at that
+// key, DELETING base sibling leaves it does not restate. Tracking these lets the
+// realizability fold model presence (absence) correctly instead of assuming
+// every base leaf survives. An !inherit child mapping is a deep-merge and is NOT
+// a replace root.
+//
+// Callers pass already alias-resolved documents (see the public entry points),
+// so no NFyaml::ENodeType::Alias nodes reach this walk.
+static void CollectScalarLeaves(
+    NFyaml::TNodeRef node,
+    const TString& path,
+    TMap<TString, TString>& leaves,
+    TSet<TString>& fenced,
+    TSet<TString>* replaceRoots = nullptr)
+{
+    if (!node) {
+        return;
+    }
+    if (node.IsAlias()) {
+        // Expand the alias to its anchored target and walk that (cheap,
+        // per-node -- avoids resolving the whole document). A YAML merge anchor
+        // would otherwise be skipped, omitting its leaves' values.
+        if (auto target = node.ResolveAlias(); target) {
+            CollectScalarLeaves(target, path, leaves, fenced, replaceRoots);
+        }
+        return;
+    }
+    switch (node.Type()) {
+        case NFyaml::ENodeType::Scalar:
+            leaves[path] = node.Scalar();
+            break;
+        case NFyaml::ENodeType::Mapping: {
+            auto map = node.Map();
+            for (auto it = map.begin(); it != map.end(); ++it) {
+                auto childPath = path + "/" + it->Key().Scalar();
+                auto childValue = it->Value();
+                if (replaceRoots && childValue && childValue.Type() == NFyaml::ENodeType::Mapping
+                    && !IsMapInherit(childValue)) {
+                    replaceRoots->insert(childPath);
+                }
+                CollectScalarLeaves(childValue, childPath, leaves, fenced, replaceRoots);
+            }
+            break;
+        }
+        case NFyaml::ENodeType::Sequence:
+            fenced.insert(path);
+            break;
+    }
+}
+
+// True iff 'path' is at or under section prefix 'prefix' (both leading-'/').
+static bool PathUnder(const TString& path, const TString& prefix) {
+    return path == prefix || path.StartsWith(prefix + "/");
+}
+
+TFieldValueSets ResolveFieldValueSets(NFyaml::TDocument& doc)
+{
+    // Aliases are expanded per-node inside CollectScalarLeaves, so no expensive
+    // whole-document Resolve() is needed here.
+    auto model = ParseConfig(doc);
+    TFieldValueSets result;
+
+    auto absorb = [&](NFyaml::TNodeRef root) {
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        CollectScalarLeaves(root, "", leaves, fenced);
+        for (auto& [p, v] : leaves) {
+            result.Values[p].insert(v);
+        }
+        result.FencedPaths.insert(fenced.begin(), fenced.end());
+    };
+
+    absorb(model.Config);
+    for (auto& selector : model.Selectors) {
+        absorb(selector.Config);
+    }
+
+    return result;
+}
+
+bool ValidateField(
+    const TFieldValueSets& sets,
+    const TString& path,
+    const std::function<bool(const TString&)>& predicate,
+    TString& failingValue)
+{
+    if (sets.IsFenced(path)) {
+        return true;
+    }
+    auto it = sets.Values.find(path);
+    if (it == sets.Values.end()) {
+        return true;
+    }
+    for (auto& value : it->second) {
+        if (!predicate(value)) {
+            failingValue = value;
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+// Per-selector precomputed scalar leaves plus the predicate, in selector order.
+struct TSelectorLeaves {
+    TMap<TString, TString> Leaves;
+    TSet<TString> Fenced;
+    TSet<TString> ReplaceRoots;
+    const TSelector* Selector;
+};
+
+// Builds the per-involved-label resolution domains, mirroring BuildLabelDomain:
+// all values named anywhere, plus a fresh "negative" sentinel for Open labels.
+struct TLabelDomain {
+    TString Name;
+    TVector<TString> Values;
+};
+
+static TVector<TLabelDomain> BuildDomains(
+    const TSet<TString>& involvedLabels,
+    const TMap<TString, TLabelType>& namedLabels)
+{
+    TVector<TLabelDomain> domains;
+    domains.reserve(involvedLabels.size());
+    for (auto& name : involvedLabels) {
+        TLabelDomain domain;
+        domain.Name = name;
+        auto it = namedLabels.find(name);
+        if (it != namedLabels.end()) {
+            for (auto& v : it->second.Values) {
+                domain.Values.push_back(v);
+            }
+            if (it->second.Class == EYamlConfigLabelTypeClass::Open) {
+                TString negative = "\x01__negative__";
+                while (it->second.Values.contains(negative)) {
+                    negative += "_";
+                }
+                domain.Values.push_back(negative);
+            }
+        } else {
+            domain.Values.push_back("");
+            domain.Values.push_back("\x01__negative__");
+        }
+        domains.push_back(std::move(domain));
+    }
+    return domains;
+}
+
+} // namespace
+
+// Public: every label referenced by any active incompatibility rule.
+THashSet<TString> TIncompatibilityRules::ReferencedLabels() const {
+    THashSet<TString> result;
+    for (auto& [_, rule] : RulesByName) {
+        for (auto& pattern : rule.Patterns) {
+            result.insert(pattern.Name);
+        }
+    }
+    return result;
+}
+
+TVector<TFieldAssignment> EnumerateRealizableAssignments(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& paths,
+    TSet<TString>& fenced)
+{
+    // Aliases are expanded per-node inside CollectScalarLeaves.
+    auto model = ParseConfig(doc);
+
+    // Base config floor.
+    TMap<TString, TString> baseLeaves;
+    TSet<TString> baseFenced;
+    CollectScalarLeaves(model.Config, "", baseLeaves, baseFenced);
+    for (auto& p : paths) {
+        if (baseFenced.contains(p)) {
+            fenced.insert(p);
+        }
+    }
+
+    // Precompute leaves + wholesale-replace roots of every selector; remember
+    // which selectors actually touch one of the coupled paths (the "involved"
+    // selectors) and which labels those selectors constrain.
+    TVector<TSelectorLeaves> selectorLeaves(model.Selectors.size());
+    TVector<size_t> involvedSelectors;
+    TSet<TString> involvedLabels;
+
+    for (size_t i = 0; i < model.Selectors.size(); ++i) {
+        auto& sl = selectorLeaves[i];
+        sl.Selector = &model.Selectors[i].Selector;
+        CollectScalarLeaves(model.Selectors[i].Config, "", sl.Leaves, sl.Fenced, &sl.ReplaceRoots);
+
+        bool touches = false;
+        for (auto& p : paths) {
+            if (sl.Leaves.contains(p)) {
+                touches = true;
+            }
+            if (sl.Fenced.contains(p)) {
+                fenced.insert(p);
+                touches = true;
+            }
+            // A wholesale replace of an ancestor changes p's presence.
+            for (auto& r : sl.ReplaceRoots) {
+                if (PathUnder(p, r)) {
+                    touches = true;
+                }
+            }
+        }
+        if (touches) {
+            involvedSelectors.push_back(i);
+            for (auto& [name, _] : sl.Selector->In) {
+                involvedLabels.insert(name);
+            }
+            for (auto& [name, _] : sl.Selector->NotIn) {
+                involvedLabels.insert(name);
+            }
+        }
+    }
+
+    // NOTE: incompatibility rules are intentionally NOT applied here. A rule
+    // referencing labels outside the involved set can never make an involved-
+    // label value unrealizable on its own (some assignment of the other labels
+    // satisfies it), so ignoring rules keeps A+ a SOUND over-approximation
+    // (never a false negative). Enumerating rule-referenced labels to prune the
+    // rare false positive is exponential and is left as a follow-up refinement.
+    auto namedLabels = CollectLabels(doc);
+    auto domains = BuildDomains(involvedLabels, namedLabels);
+
+    // Enumerate the Cartesian product of ONLY the involved labels' domains --
+    // independent of any high-cardinality label the coupled fields do not
+    // depend on. This is the source of K-independence.
+    TSet<TFieldAssignment> distinct;
+
+    std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
+        [&](size_t offset, TSet<TNamedLabel>& tuple) {
+            if (offset == domains.size()) {
+                // Ordered fold over the involved selectors that fit, from base.
+                TFieldAssignment assignment;
+                for (auto& p : paths) {
+                    if (fenced.contains(p)) {
+                        continue;
+                    }
+                    if (auto it = baseLeaves.find(p); it != baseLeaves.end()) {
+                        assignment[p] = it->second;
+                    } else {
+                        assignment[p] = std::nullopt;
+                    }
+                }
+                for (size_t idx : involvedSelectors) {
+                    auto& sl = selectorLeaves[idx];
+                    if (!Fit(*sl.Selector, tuple)) {
+                        continue;
+                    }
+                    for (auto& p : paths) {
+                        if (fenced.contains(p)) {
+                            continue;
+                        }
+                        if (auto it = sl.Leaves.find(p); it != sl.Leaves.end()) {
+                            assignment[p] = it->second;
+                            continue;
+                        }
+                        // Not restated by this selector: if it wholesale-replaces
+                        // an ancestor of p, p becomes absent under this tuple.
+                        for (auto& r : sl.ReplaceRoots) {
+                            if (PathUnder(p, r)) {
+                                assignment[p] = std::nullopt;
+                                break;
+                            }
+                        }
+                    }
+                }
+                distinct.insert(std::move(assignment));
+                return;
+            }
+
+            for (auto& value : domains[offset].Values) {
+                auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                recurse(offset + 1, tuple);
+                tuple.erase(inserted.first);
+            }
+        };
+
+    TSet<TNamedLabel> tuple;
+    recurse(0, tuple);
+
+    return TVector<TFieldAssignment>(distinct.begin(), distinct.end());
+}
+
+TVector<TString> SelectorWritesUnder(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& staticPrefixes)
+{
+    auto resolved = doc.Clone();
+    resolved.Resolve();
+    auto model = ParseConfig(resolved);
+
+    TSet<TString> hits;
+    for (auto& selector : model.Selectors) {
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        TSet<TString> replaceRoots;
+        CollectScalarLeaves(selector.Config, "", leaves, fenced, &replaceRoots);
+
+        auto consider = [&](const TString& written) {
+            for (auto& prefix : staticPrefixes) {
+                if (PathUnder(written, prefix)) {
+                    hits.insert(written);
+                }
+            }
+        };
+        for (auto& [p, _] : leaves) {
+            consider(p);
+        }
+        for (auto& p : fenced) {
+            consider(p);
+        }
+        for (auto& p : replaceRoots) {
+            consider(p);
+        }
+    }
+    return TVector<TString>(hits.begin(), hits.end());
+}
+
+void EnumerateDistinctProjections(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& sectionPrefixes,
+    const std::function<void(NFyaml::TNodeRef)>& onProjection)
+{
+    auto model = ParseConfig(doc);
+
+    // Involved selectors (by index) = those whose overlay writes under a
+    // requested section, plus the labels they constrain.
+    TVector<size_t> involvedSelectors;
+    TSet<TString> involvedLabels;
+    for (size_t i = 0; i < model.Selectors.size(); ++i) {
+        auto& selector = model.Selectors[i];
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        TSet<TString> replaceRoots;
+        CollectScalarLeaves(selector.Config, "", leaves, fenced, &replaceRoots);
+
+        bool touches = false;
+        auto consider = [&](const TString& written) {
+            for (auto& prefix : sectionPrefixes) {
+                if (PathUnder(written, prefix) || PathUnder(prefix, written)) {
+                    touches = true;
+                }
+            }
+        };
+        for (auto& [p, _] : leaves) { consider(p); }
+        for (auto& p : fenced) { consider(p); }
+        for (auto& p : replaceRoots) { consider(p); }
+
+        if (touches) {
+            involvedSelectors.push_back(i);
+            for (auto& [name, _] : selector.Selector.In) { involvedLabels.insert(name); }
+            for (auto& [name, _] : selector.Selector.NotIn) { involvedLabels.insert(name); }
+        }
+    }
+
+    // Incompatibility rules are not applied (sound over-approximation; see
+    // EnumerateRealizableAssignments). At worst this yields an extra projection
+    // for an unrealizable label tuple -- never a missed one.
+    auto namedLabels = CollectLabels(doc);
+    auto domains = BuildDomains(involvedLabels, namedLabels);
+
+    // Dedup by the firing signature of the involved (section-writing) selectors:
+    // only those determine the section content, so exactly one representative
+    // per signature is resolved. The (relatively expensive) resolution runs
+    // #distinct-signatures times -- never once per label tuple.
+    THashSet<TString> seenSig;
+
+    std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
+        [&](size_t offset, TSet<TNamedLabel>& tuple) {
+            if (offset == domains.size()) {
+                TStringBuilder sig;
+                for (size_t idx : involvedSelectors) {
+                    if (Fit(model.Selectors[idx].Selector, tuple)) {
+                        sig << idx << ",";
+                    }
+                }
+                if (!seenSig.insert(TString(sig)).second) {
+                    return;
+                }
+                // Build the representative resolved config WITHOUT the expensive
+                // whole-document Resolve(): clone, apply every fitting selector's
+                // overlay in order, strip tags -- mirroring ResolveUniqueDocs.
+                auto clone = doc.Clone();
+                auto cloneModel = ParseConfig(clone);
+                auto config = cloneModel.Config;
+                for (size_t i = 0; i < cloneModel.Selectors.size(); ++i) {
+                    if (Fit(cloneModel.Selectors[i].Selector, tuple)) {
+                        Apply(config, cloneModel.Selectors[i].Config);
+                    }
+                }
+                RemoveTags(clone);
+                onProjection(config);
+                return;
+            }
+            for (auto& value : domains[offset].Values) {
+                auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                recurse(offset + 1, tuple);
+                tuple.erase(inserted.first);
+            }
+        };
+
+    TSet<TNamedLabel> tuple;
+    recurse(0, tuple);
+}
+
+TVector<TFieldRuleViolation> ValidateFieldRule(
+    NFyaml::TDocument& doc,
+    const TFieldRule& rule,
+    TSet<TString>& fenced)
+{
+    TVector<TFieldRuleViolation> violations;
+
+    auto assignments = EnumerateRealizableAssignments(doc, rule.Paths, fenced);
+    if (!fenced.empty()) {
+        // A coupled path is non-decomposable; the caller must validate it via
+        // per-document enumeration instead.
+        return violations;
+    }
+
+    for (auto& assignment : assignments) {
+        if (auto msg = rule.Check(assignment); msg.has_value()) {
+            violations.push_back(TFieldRuleViolation{*msg, assignment});
+        }
+    }
+
+    return violations;
+}
+
 size_t Hash(const TResolvedConfig& config)
 {
     size_t configsHash = 0;
