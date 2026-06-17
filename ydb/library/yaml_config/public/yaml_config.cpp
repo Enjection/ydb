@@ -1604,6 +1604,16 @@ void EnumerateDistinctProjections(
     // #distinct-signatures times -- never once per label tuple.
     THashSet<TString> seenSig;
 
+    // A document holding ONLY the base config. Each projection clones THIS (cost
+    // O(base config)) instead of the whole input document (cost O(base + all K
+    // selectors)) and applies overlays copied straight from the once-parsed
+    // `model` -- so we never re-Clone the selector list nor re-ParseConfig it per
+    // projection. This is the same cross-document Copy trick ResolveUniqueDocs
+    // uses (see its inner loop), and turns the per-section rebuild from
+    // O(#projections * whole-doc) into O(#projections * base-config).
+    auto baseConfigDoc = NFyaml::TDocument::Parse("{}");
+    baseConfigDoc.SetRoot(model.Config.Copy(baseConfigDoc));
+
     std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
         [&](size_t offset, TSet<TNamedLabel>& tuple) {
             if (offset == domains.size()) {
@@ -1617,17 +1627,20 @@ void EnumerateDistinctProjections(
                     return;
                 }
                 // Build the representative resolved config WITHOUT the expensive
-                // whole-document Resolve(): clone, apply every fitting selector's
-                // overlay in order, strip tags -- mirroring ResolveUniqueDocs.
-                auto clone = doc.Clone();
-                auto cloneModel = ParseConfig(clone);
-                auto config = cloneModel.Config;
-                for (size_t i = 0; i < cloneModel.Selectors.size(); ++i) {
-                    if (Fit(cloneModel.Selectors[i].Selector, tuple)) {
-                        Apply(config, cloneModel.Selectors[i].Config);
+                // whole-document Resolve(): clone the base config, apply every
+                // fitting selector's overlay in order, strip tags -- mirroring
+                // ResolveUniqueDocs. Overlays are copied from the original `model`
+                // (parsed once) into the projection doc, so no per-projection
+                // re-parse of the selector list happens.
+                auto projDoc = baseConfigDoc.Clone();
+                auto config = projDoc.Root();
+                for (size_t i = 0; i < model.Selectors.size(); ++i) {
+                    if (Fit(model.Selectors[i].Selector, tuple)) {
+                        auto overlay = model.Selectors[i].Config.Copy(projDoc);
+                        Apply(config, overlay);
                     }
                 }
-                RemoveTags(clone);
+                RemoveTags(projDoc);
                 onProjection(config);
                 return;
             }

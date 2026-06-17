@@ -4063,16 +4063,15 @@ Y_UNIT_TEST_SUITE(YamlConfigPolynomialScale) {
     }
 
     // Growth of the FULL pipeline in the cardinality of a SINGLE varied section is
-    // POLYNOMIAL (here ~quadratic), never exponential. The number of validations is
-    // additive (n+1 projections, asserted), but each projection currently rebuilds
-    // its representative by cloning + re-parsing the WHOLE document
-    // (EnumerateDistinctProjections: doc.Clone()+ParseConfig per signature,
-    // public/yaml_config.cpp:1622), so total single-section CPU is O((n+1) * docsize)
-    // = O(n^2). This is a polynomial cost (optimizable to near-linear via subtree
-    // clone + label-value indexing) and is the SECOND-order term; the first-order
-    // win over legacy is exponential -> polynomial in the NUMBER of labels
-    // (see ComplexityClassSeparation). At the real-world shape (gist bbfba6d:
-    // selectors spread across many sections => small per-section n) it is ms-cheap.
+    // ~LINEAR (and the number of validations is exactly additive: n+1 projections,
+    // asserted). Each projection rebuilds its representative by cloning only the
+    // BASE CONFIG (not the whole document) and copying overlays from the
+    // once-parsed model -- no per-projection re-parse of the K selectors
+    // (EnumerateDistinctProjections, public/yaml_config.cpp). A residual O(n^2)
+    // term remains in the firing-signature dedup (Fit per involved selector per
+    // tuple), but its constant is tiny, so wall-clock is dominated by the linear
+    // rebuild term well past realistic sizes. The first-order win over legacy is
+    // exponential -> polynomial in the NUMBER of labels (ComplexityClassSeparation).
     Y_UNIT_TEST(GrowthIsPolynomialNotExponential) {
         TVector<std::pair<size_t, ui64>> curve;
         for (size_t n : {size_t(100), size_t(200), size_t(400), size_t(800)}) {
@@ -4088,13 +4087,13 @@ Y_UNIT_TEST_SUITE(YamlConfigPolynomialScale) {
             Cerr << "[A+ GROWTH] N=" << n << " -> " << dur.MicroSeconds() << "us"
                  << " (projections=" << (n + 1) << ")" << Endl;
         }
-        // 8x the input. Exclude CUBIC-or-worse and exponential: an 8x input under
-        // O(n^2) costs ~64x; the 100x bound absorbs that plus constant/noise while
-        // still failing loudly on cubic (512x) or any exponential regression.
+        // 8x the input. Near-linear rebuild makes this ~8-12x; the 24x bound gives
+        // ~2x slack for the residual O(n^2) signature term + scheduler noise while
+        // still failing loudly on a regression back to quadratic (64x) or worse.
         ui64 t100 = curve.front().second ? curve.front().second : 1;
         ui64 t800 = curve.back().second;
-        UNIT_ASSERT_C(t800 < t100 * 100,
-            TStringBuilder() << "single-section growth must stay polynomial (~quadratic): t(100)="
+        UNIT_ASSERT_C(t800 < t100 * 24,
+            TStringBuilder() << "single-section growth must stay ~linear: t(100)="
                 << t100 << "us t(800)=" << t800 << "us (ratio " << (double(t800) / double(t100))
                 << ", quadratic≈64x)");
     }
