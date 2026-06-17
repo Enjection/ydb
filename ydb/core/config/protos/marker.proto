@@ -54,6 +54,24 @@ extend google.protobuf.FieldOptions {
     // **Top-level** options marked with that label are allowed to be used in the database configuration.
     optional bool AllowInDatabaseConfig = 82004;
 
+    // Marks a config section as static/structural: it is set once cluster-wide
+    // and selectors must NOT vary it. Track A+ uses this to (a) run the static
+    // proto-transform checks for the section exactly once on the base config and
+    // (b) reject (guard) any config whose selectors override the section. The
+    // config protoc plugin emits the marked top-level paths as
+    // TAppConfig::GetStaticSectionPaths().
+    optional bool SelectorStatic = 82006;
+
+    // Marks a config section that the proto TransformProtoConfig step reads AND
+    // that selectors may vary. Track A+ projects the DISTINCT realized values of
+    // these sections and runs the proto transform once per projection (regime
+    // C). Marking every transform-read section guarantees the A+ transform pass
+    // is a provable superset of what the legacy per-document transform checks --
+    // closing the "is the transform-read list complete?" gap. The config protoc
+    // plugin emits the marked top-level paths as
+    // TAppConfig::GetTransformReadSectionPaths().
+    optional bool SelectorTransformRead = 82007;
+
     // **Top-level** options marked with that label are opaque to the cluster
     // in the dynamic YAML configuration (main and database).
     //  - must be of (empty) message type (TOpaqueConfig type should be used)
