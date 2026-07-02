@@ -229,34 +229,91 @@ const TSet<TString>& EphemeralInputKeys() {
     return keys;
 }
 
-TSet<TString> CollectPresentTopSections(NFyaml::TDocument& doc) {
-    TSet<TString> sections;
-    auto addKeys = [&](NFyaml::TNodeRef node) {
+// A YAML-null value (`key:`, `key: ~`, `key: null`) parses to an UNSET proto
+// field (Yaml2Json -> JSON null -> MergeJson2Proto skips it), so legacy
+// reflection presence (HasField) treats the section as ABSENT.
+// NOTE: Scalar() loses quoting, so a quoted `"null"` (or `""`) is
+// indistinguishable from YAML null here and is treated as null. For a
+// message-typed section both engines still agree on the combined verdict (a
+// string where a mapping is expected fails structurally on both sides); a
+// scalar-typed top-level field would be a real under-report, but TAppConfig
+// top-level fields are messages/repeated.
+bool IsYamlNullLiteral(const TString& s) {
+    return s == "" || s == "~" || s == "null" || s == "Null" || s == "NULL";
+}
+
+bool IsYamlNullValue(const NFyaml::TNodeRef& value) {
+    if (!value) {
+        return true;
+    }
+    return value.Type() == NFyaml::ENodeType::Scalar && IsYamlNullLiteral(value.Scalar());
+}
+
+// Invokes fn(key, value) for every top-level entry of the base `config`
+// mapping and of every `selector_config/<i>/config` overlay mapping. An alias
+// at a block root is expanded so an anchored config block is still walked.
+// Best-effort: tolerates malformed documents.
+template <typename TFn>
+void ForEachTopLevelEntry(NFyaml::TDocument& doc, TFn&& fn) {
+    auto walk = [&](NFyaml::TNodeRef node) {
+        if (node && node.IsAlias()) {
+            node = node.ResolveAlias();
+        }
         if (!node || node.Type() != NFyaml::ENodeType::Mapping) {
             return;
         }
         auto map = node.Map();
         for (auto it = map.begin(); it != map.end(); ++it) {
-            sections.insert(TString("/") + it->Key().Scalar());
+            fn(it->Key().Scalar(), it->Value());
         }
     };
     try {
         auto root = doc.Root().Map();
         if (root.Has("config")) {
-            addKeys(root.at("config"));
+            walk(root.at("config"));
         }
         if (root.Has("selector_config")) {
             auto selectors = root.at("selector_config").Sequence();
             for (size_t i = 0; i < selectors.size(); ++i) {
                 auto item = selectors.at(static_cast<int>(i)).Map();
                 if (item.Has("config")) {
-                    addKeys(item.at("config"));
+                    walk(item.at("config"));
                 }
             }
         }
     } catch (const std::exception&) {
         // Best-effort; a malformed doc is rejected elsewhere by the real parser.
     }
+}
+
+TSet<TString> CollectPresentTopSections(NFyaml::TDocument& doc) {
+    TSet<TString> sections;
+    ForEachTopLevelEntry(doc, [&](const TString& key, NFyaml::TNodeRef) {
+        sections.insert(TString("/") + key);
+    });
+    return sections;
+}
+
+// FIELD-SETTING presence: top-level keys with at least one occurrence that
+// actually sets the corresponding proto field. Mirrors what the legacy
+// reflection allowlist sees on the parsed proto: a YAML-null value leaves the
+// field UNSET (HasField false) and an empty sequence yields FieldSize()==0,
+// which NConfig::ValidateDatabaseConfig explicitly skips -- neither counts.
+// An empty MAPPING does set the field (HasField true) and counts.
+TSet<TString> CollectFieldSettingTopSections(NFyaml::TDocument& doc) {
+    TSet<TString> sections;
+    ForEachTopLevelEntry(doc, [&](const TString& key, NFyaml::TNodeRef value) {
+        if (value && value.IsAlias()) {
+            value = value.ResolveAlias();
+        }
+        if (IsYamlNullValue(value)) {
+            return;
+        }
+        if (value.Type() == NFyaml::ENodeType::Sequence && value.Sequence().size() == 0) {
+            return;
+        }
+        sections.insert(TString("/") + key);
+    });
     return sections;
 }
 
@@ -336,11 +393,19 @@ TVector<TStructuralViolation> ValidateStructuralAPlus(
     // Using the SAME converter as the legacy per-doc path, the per-section
     // decision equals legacy's for every field type and structural check -- so
     // A+ is strictly not weaker (never accepts what legacy rejects).
+    // Union of the leaf/sequence-derived sections (ResolveFieldValueSets) and
+    // the PRESENCE-derived section keys (CollectPresentTopSections). The second
+    // view matters: a section a selector introduces only as an EMPTY mapping
+    // (`some_config: {}`) carries no scalar leaf, so without it that section is
+    // never projected and any presence-keyed structural check the legacy
+    // per-doc path runs (e.g. unknown-section rejection) is silently skipped --
+    // an A+ false negative. Same union the DB allowlist path uses.
     TSet<TString> sections;
     {
         auto sets = ResolveFieldValueSets(doc);
         for (const auto& [p, _] : sets.Values) { sections.insert(TopSection(p)); }
         for (const auto& p : sets.FencedPaths) { sections.insert(TopSection(p)); }
+        for (const auto& s : CollectPresentTopSections(doc)) { sections.insert(s); }
     }
     for (const auto& section : sections) {
         EnumerateDistinctProjections(doc, TVector<TString>{section},
@@ -403,11 +468,15 @@ TVector<TStructuralViolation> ValidateSemanticAPlus(NFyaml::TDocument& doc, bool
     // value is the constant base in every projection (the guard above rejects any
     // selector that varies it). Aggregate checks reading only static sections
     // (StateStorage) run on that constant base.
+    // Leaf-derived sections UNION presence-derived keys -- same reasoning as in
+    // ValidateStructuralAPlus: an empty-mapping section has no leaves but legacy
+    // still resolves and semantically validates docs where it is present.
     TSet<TString> sections;
     {
         auto sets = ResolveFieldValueSets(doc);
         for (const auto& [p, _] : sets.Values) { sections.insert(TopSection(p)); }
         for (const auto& p : sets.FencedPaths) { sections.insert(TopSection(p)); }
+        for (const auto& s : CollectPresentTopSections(doc)) { sections.insert(s); }
     }
     for (const auto& section : sections) {
         EnumerateDistinctProjections(doc, TVector<TString>{section},
@@ -467,6 +536,14 @@ TVector<TStructuralViolation> ValidateDatabaseAllowlistAPlus(NFyaml::TDocument& 
         sections.insert(s);
     }
 
+    // The allowlist only counts occurrences that would actually SET the proto
+    // field: legacy NConfig::ValidateDatabaseConfig checks reflection
+    // HasField/FieldSize on the parsed proto, so a section that is YAML-null
+    // everywhere (`auth_config: ~`) or an empty sequence everywhere
+    // (`some_repeated: []`) is invisible to it -- reporting those would
+    // over-reject configs legacy accepts.
+    const auto fieldSetting = CollectFieldSettingTopSections(doc);
+
     // Allowed top-level sections = TAppConfig fields marked AllowInDatabaseConfig.
     const auto* desc = NKikimrConfig::TAppConfig::descriptor();
     TSet<TString> allowed;
@@ -481,7 +558,18 @@ TVector<TStructuralViolation> ValidateDatabaseAllowlistAPlus(NFyaml::TDocument& 
 
     for (const auto& section : sections) {
         if (!allowed.contains(section)) {
+            if (!fieldSetting.contains(section)) {
+                continue;
+            }
             const TString fieldName = section.StartsWith("/") ? section.substr(1) : section;
+            // Ephemeral top-level input keys (hosts, default_disk_type, tls, ...)
+            // are not TAppConfig fields. The legacy DB gate parses with
+            // transform=false, so they never SET a proto field and its
+            // reflection-based allowlist (HasField) ACCEPTS them -- mirror that,
+            // or A+ over-rejects every config legacy allows through.
+            if (EphemeralInputKeys().contains(fieldName)) {
+                continue;
+            }
             out.push_back(TStructuralViolation{
                 TStringBuilder() << "'" << fieldName << "' is not allowed to be used in the database configuration"});
         }
@@ -597,6 +685,29 @@ TStructuralShadowResult StructuralShadowRun(NFyaml::TDocument& doc, bool allowUn
     result.SemanticDiverged = (result.SemanticLegacyRejected != result.SemanticAPlusRejected);
 
     return result;
+}
+
+TString TAPlusVerdict::FirstViolation() const {
+    if (!StructuralViolations.empty()) {
+        return StructuralViolations.front().Message;
+    }
+    if (!GuardViolations.empty()) {
+        return GuardViolations.front();
+    }
+    if (!SemanticViolations.empty()) {
+        return SemanticViolations.front().Message;
+    }
+    return {};
+}
+
+TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown) {
+    TAPlusVerdict verdict;
+    verdict.StructuralViolations = ValidateStructuralAPlus(doc, allowUnknown, &verdict.GuardViolations);
+    verdict.SemanticViolations = ValidateSemanticAPlus(doc, allowUnknown);
+    verdict.Rejected = !verdict.StructuralViolations.empty()
+        || !verdict.GuardViolations.empty()
+        || !verdict.SemanticViolations.empty();
+    return verdict;
 }
 
 } // namespace NKikimr::NYamlConfig

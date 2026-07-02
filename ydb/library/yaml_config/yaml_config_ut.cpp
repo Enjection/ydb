@@ -3495,6 +3495,72 @@ Y_UNIT_TEST_SUITE(YamlConfigStructuralShadow) {
         UNIT_ASSERT_C(!shadow.APlusRejected, "A+ must also accept (no spurious rejection)");
         UNIT_ASSERT_C(shadow.GuardViolations.empty(), "no selector touches a static section here");
     }
+
+    // Regression (parity): a section a selector introduces ONLY as an EMPTY
+    // mapping carries no scalar leaf, so a purely leaf-derived section set
+    // never projects it -- while the legacy per-doc path resolves docs where it
+    // IS present and (with allowUnknown=false) rejects the unknown section.
+    // The A+ section set unions the presence-based view, so both engines must
+    // REJECT with no divergence.
+    Y_UNIT_TEST(EmptyMappingSectionFromSelectorAgreesWithLegacy) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: sneaky
+  selector:
+    tenant: x
+  config: !inherit
+    nonexistent_config: {}
+)");
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ false);
+        UNIT_ASSERT_C(shadow.LegacyRejected, "legacy rejects the unknown empty-mapping section");
+        UNIT_ASSERT_C(shadow.APlusRejected, "A+ must project presence-only sections and reject too");
+        UNIT_ASSERT_C(!shadow.Diverged, "empty-mapping-only section must not cause divergence");
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigAPlusVerdict) {
+
+    // The live-gate shadow primitive: the full A+ surface (structural + guard +
+    // semantic) in one call, no legacy enumeration. A transform-valid config is
+    // accepted with no violation to attribute.
+    Y_UNIT_TEST(AcceptsValidConfig) {
+        auto doc = NFyaml::TDocument::Parse(MakeProjConfig(2, 2));
+        auto verdict = NYamlConfig::ValidateAPlus(doc, /*allowUnknown*/ true);
+        UNIT_ASSERT_C(!verdict.Rejected, verdict.FirstViolation());
+        UNIT_ASSERT(verdict.FirstViolation().empty());
+    }
+
+    // A structurally invalid config is rejected and FirstViolation() carries a
+    // non-empty message for log attribution.
+    Y_UNIT_TEST(RejectsAndAttributesFirstViolation) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  nonexistent_config:
+    some_field: 1
+)");
+        auto verdict = NYamlConfig::ValidateAPlus(doc, /*allowUnknown*/ false);
+        UNIT_ASSERT_C(verdict.Rejected, "unknown section with allowUnknown=false must be rejected");
+        UNIT_ASSERT(!verdict.FirstViolation().empty());
+    }
 }
 
 Y_UNIT_TEST_SUITE(YamlConfigStructuralSectionMarkers) {
@@ -3881,6 +3947,72 @@ selector_config:
             if (e.Message.Contains("auth_config")) { found = true; }
         }
         UNIT_ASSERT_C(found, "A+ must catch an empty-mapping disallowed section in a DB selector");
+    }
+
+    // Ephemeral top-level input keys (TEphemeralInputFields: default_disk_type,
+    // hosts, ...) are not TAppConfig fields. The legacy DB gate parses with
+    // transform=false, so they never SET a proto field and its HasField-based
+    // allowlist ACCEPTS them -- A+ must mirror that, not over-reject.
+    Y_UNIT_TEST(EphemeralTopLevelKeyAccepted) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+  default_disk_type: SSD
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        UNIT_ASSERT_C(v.empty(), v.empty() ? "" : v.front().Message.c_str());
+    }
+
+    // A NULL-valued key (`auth_config:`) parses to an UNSET proto field (JSON
+    // null is skipped by the merger), so the legacy reflection allowlist sees
+    // it as absent and accepts. Presence must mean non-null: A+ accepts too.
+    // (`auth_config: {}` -- an empty mapping -- DOES set the field and stays
+    // rejected; see DisallowedEmptyMappingSectionRejected.)
+    Y_UNIT_TEST(NullValuedDisallowedSectionAccepted) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+  auth_config:
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        UNIT_ASSERT_C(v.empty(), v.empty() ? "" : v.front().Message.c_str());
+
+        // Explicit null literal form: enters via the leaf-derived view instead
+        // of the presence walk, must be skipped there too.
+        auto docTilde = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+  auth_config: ~
+)");
+        auto vTilde = NYamlConfig::ValidateDatabaseAllowlistAPlus(docTilde);
+        UNIT_ASSERT_C(vTilde.empty(), vTilde.empty() ? "" : vTilde.front().Message.c_str());
+    }
+
+    // An EMPTY-SEQUENCE value yields FieldSize()==0, which legacy
+    // NConfig::ValidateDatabaseConfig explicitly skips for repeated fields --
+    // so it must not count as a field-setting occurrence for the allowlist
+    // either. (A message-typed section written as `[]` fails structurally on
+    // both sides, so the combined verdicts still agree there.)
+    Y_UNIT_TEST(EmptySequenceValuedDisallowedSectionAccepted) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags:
+    enable_some_flag: true
+  auth_config: []
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        UNIT_ASSERT_C(v.empty(), v.empty() ? "" : v.front().Message.c_str());
     }
 }
 

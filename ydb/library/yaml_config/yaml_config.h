@@ -223,15 +223,47 @@ struct TStructuralShadowResult {
 };
 
 /**
- * Shadow-run: runs BOTH the legacy per-doc structural validation and the
- * K-independent A+ structural validation, comparing their accept/reject
- * decisions. Intended to run on every accept during the migration window; the
- * legacy decision still gates acceptance while divergences are logged, until
- * zero divergence is observed fleet-wide and the A+ path can take over.
+ * Offline shadow-run: runs BOTH the legacy per-doc validation (structural and
+ * semantic, each a full O(K) ResolveUniqueDocs enumeration) and the
+ * K-independent A+ validation, comparing their accept/reject decisions.
+ * Because it re-derives the legacy verdict itself, it costs 2x the legacy
+ * enumeration -- use it for tests and offline head-to-head parity audits ONLY.
+ * The live accept gate must use ValidateAPlus and compare against the verdict
+ * it has already computed (see TAPlusVerdict).
  */
 TStructuralShadowResult StructuralShadowRun(
     NFyaml::TDocument& doc,
     bool allowUnknown = true);
+
+/**
+ * Aggregate K-independent A+ verdict: the full A+ validation surface
+ * (per-section structural projections + static-section guard + per-section
+ * semantic projections) in one call. No legacy enumeration runs -- cost is
+ * additive across sections regardless of K.
+ *
+ * This is the live-gate shadow primitive: the caller compares `Rejected`
+ * against the authoritative legacy decision it has ALREADY computed, so the
+ * shadow adds no O(K) work and can run on legacy-REJECTED configs too -- the
+ * legacy-rejects/A+-accepts direction is the one that proves A+ is not weaker
+ * than legacy, and it is invisible to any shadow that only runs after a
+ * successful legacy pass.
+ *
+ * Note: the database allowlist (NConfig::ValidateDatabaseConfig) has no
+ * counterpart in ValidateConfig and therefore no counterpart here; the
+ * database accept path must additionally compare
+ * ValidateDatabaseAllowlistAPlus against its legacy allowlist verdict.
+ */
+struct TAPlusVerdict {
+    TVector<TStructuralViolation> StructuralViolations;
+    TVector<TString> GuardViolations;      // selector-written static paths
+    TVector<TStructuralViolation> SemanticViolations;
+    bool Rejected = false;                 // any of the three is non-empty
+
+    // First violation message across all surfaces, for log attribution.
+    TString FirstViolation() const;
+};
+
+TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown = true);
 
 /**
  * Resolves config for given labels and stores result to appConfig

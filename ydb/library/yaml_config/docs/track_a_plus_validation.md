@@ -134,9 +134,18 @@ implemented and tested in the `yaml_config` library (fast, isolated build):
 - **P-S3 sub-tree projection (regime C)** — `EnumerateDistinctProjections`
   resolves one representative per distinct firing-signature (no per-tuple
   `Resolve()`), so the proto transform runs #distinct-projections times, not K.
-- **P-S4 shadow-run cutover** — `StructuralShadowRun` compares legacy vs A+
-  accept/reject; wired into the console accept gate (`ValidateMainConfig`) as a
-  non-blocking, logged shadow-run.
+- **P-S4 shadow-run cutover** — `ValidateAPlus` (aggregate structural + guard +
+  semantic verdict, K-independent, no legacy re-run) is wired into BOTH console
+  accept gates (`ValidateMainConfig`, `ValidateDatabaseConfig`) as a
+  non-blocking, logged shadow. The gate CAPTURES its own legacy verdict and the
+  shadow compares against it, so (a) no O(K) legacy enumeration is repeated for
+  the shadow, and (b) the shadow observes legacy-REJECTED configs too — the
+  legacy-rejects/A+-accepts direction that decides cutover safety. On the
+  database path `ValidateDatabaseAllowlistAPlus` is folded into the A+ verdict,
+  shadowing the legacy DB allowlist (`NConfig::ValidateDatabaseConfig`), which
+  has no counterpart inside `ValidateConfig`. `StructuralShadowRun` (which
+  re-derives the legacy verdict itself, 2× O(K)) remains for tests and offline
+  head-to-head parity audits only.
 
 ### Tests (all green)
 - `yaml_config/ut`: 18 tests — `YamlConfigFieldValueSets`, `YamlConfigAPlus*`,
@@ -234,11 +243,11 @@ Architect + critic both confirmed: the previously-enforced SEMANTIC rules
 compression, Monitoring auth-coupling, StateStorage NToSelect/ring ranges, Database
 allowlist) are **not weakened** by Track A+.
 
-- `NConfig::ValidateConfig` is unchanged at `console_configs_manager.cpp:170` and
-  remains the SOLE acceptance gate. `ydb/core/config/validation/` is byte-identical
-  to baseline.
-- The only accept-path A+ addition is `StructuralShadowRun` (additive, log-only,
-  exception-swallowed) — it cannot affect acceptance.
+- `NConfig::ValidateConfig` is unchanged and remains the SOLE acceptance gate
+  (its verdict is captured-then-rethrown, not altered).
+  `ydb/core/config/validation/` is byte-identical to baseline.
+- The only accept-path A+ addition is the `ValidateAPlus` shadow (additive,
+  log-only, exception-swallowed) — it cannot affect acceptance.
 - The wired A+ component (`ValidateStructuralAPlus`) is proto-transform/STRUCTURAL
   only; it never calls a semantic validator, so it does not replace the min/max
   layer. The reified semantic rules (`DurationRule`/`PasswordComplexityRule`/
@@ -247,8 +256,85 @@ allowlist) are **not weakened** by Track A+.
 ### ⚠️ Cutover invariant
 "Cutover" in this document refers ONLY to the structural/proto-transform path and,
 separately, to the semantic path AFTER it is complete and shadow-gated. It must
-NEVER be read as removing the semantic gate at `console_configs_manager.cpp:170`.
+NEVER be read as removing the semantic gate in `ValidateMainConfig`.
 The semantic A+ engine may replace that gate only once Monitoring is reified and
 StateStorage aggregates are explicitly delegated/fenced, and only after a
 zero-divergence semantic shadow-run — the same discipline used for the structural
 layer.
+
+---
+
+## Known intentional divergence classes (bucket these in cutover math)
+
+The zero-divergence cutover criterion must classify `DIVERGED` log lines; the
+following classes are *known and intentional*, not parity bugs, and must not be
+allowed to either block cutover indefinitely or drown out a real divergence:
+
+1. **Incompatibility rules** (A+ over-reject): A+ enumerates rule-pruned label
+   combinations legacy skips — see open item 1.
+2. **Static-section guard** (A+ over-reject): a selector varying a
+   `SelectorStatic` section is rejected by A+ by policy; legacy resolves and
+   may accept — see open item 2.
+3. **Selector-aware DB allowlist** (A+ over-reject, safe direction): A+ catches
+   a disallowed section introduced only by a DB selector, which the legacy
+   base-only check misses (a latent legacy bug, not an A+ one).
+4. **csk-only validators on the DB path** (legacy-only reject): the captured DB
+   gate verdict includes `csk->ValidateConfig` (ConfigSwissKnife); the A+
+   semantic side mirrors `NConfig::ValidateConfig`. Identical in the default
+   build; a deployment installing extra csk validators produces
+   `legacyRejected=1 / aplusRejected=0` lines attributable to this class.
+5. **Null-literal corners** (shadow-log only): `Scalar()` loses quoting, so a
+   quoted `"null"`/`""` top-level value is treated as YAML null by the
+   presence/field-setting views. For message-typed sections the combined
+   verdicts still agree (structural failure on both sides).
+
+Additionally note the combined-verdict comparison is ONE bit per path: a config
+where A+ is simultaneously weaker on one axis and stricter on another logs no
+divergence. The per-axis oracle (`StructuralShadowRun`) remains available for
+offline audits where axis-level attribution is needed.
+
+---
+
+## Open items / cutover prerequisites
+
+1. **Incompatibility-rule pruning** in `EnumerateDistinctProjections` /
+   `EnumerateRealizableAssignments` — rules are intentionally ignored (sound
+   over-approximation; rules exist for state-space reduction only, never for
+   deciding what a real node receives). The residue is a benign
+   over-reject-divergence class: a config invalid ONLY under a rule-pruned label
+   combination logs a permanent `DIVERGED` line. Either prune rules whose
+   referenced labels fall entirely inside the involved set (exact, cheap — a
+   prior naive attempt that enumerated ALL rule-referenced labels ballooned the
+   product; avoid that), or bucket this divergence class in the shadow log so it
+   cannot block the zero-divergence criterion.
+2. **Strictness policy:** the static-section guard runs on BOTH the structural
+   and semantic paths (deliberately stricter than legacy). It is the
+   load-bearing reason the per-section semantic decomposition stays not-weaker
+   for cross-section couplings (Monitoring/StateStorage). Do NOT relax it
+   without first grouping marker-coupled section pairs into joint projections.
+3. **Unify console diagnostics:** the DB path still collects unknown fields
+   per-resolved-doc; switch it to `CollectFieldDiagnosticsAPlus` (the main path
+   already behaves equivalently, via an inline `collectBlock` that duplicates
+   the lib function — can adopt the lib API).
+4. **`TFieldRule` semantic engine is TEST-ONLY.** Production semantic validation
+   uses projection + real `ValidateConfig` (`ValidateSemanticAPlus`). Decide
+   whether to keep the `TFieldRule` engine (granular, but hand-mirrored
+   predicates risk divergence) or delete it. Same decision needed for the
+   `SelectorTransformRead` marker chain (`GetTransformReadSectionPaths()` /
+   `TransformReadDynamicSections()`), which currently has no production
+   consumer: either drive the validators' section grouping from it or drop it —
+   dead-but-load-bearing-looking markers are a correctness trap.
+5. **Cutover prerequisites (do NOT skip):** zero-divergence shadow fleet-wide;
+   NEVER remove the legacy gate or the DB allowlist
+   (`NConfig::ValidateDatabaseConfig`) without A+ equivalents wired and shadowed
+   — A+ semantic does not include the DB allowlist
+   (`ValidateDatabaseAllowlistAPlus` is its counterpart and is now folded into
+   the database-path shadow verdict).
+6. **Marker completeness:** if a new `Prepare*` reads a new section, it must be
+   marked Static or TransformRead. `StaticGuardCoversSemanticCoupledSections`
+   pins the known coupled static partners. Still missing: a mechanical check for
+   a NEW validator/`Prepare*` coupling two *dynamic* sections — the per-section
+   projection cannot see that joint state and the guard cannot catch it (today
+   no gate validator does this; the property is audited-not-enforced). Before
+   cutover this needs enforcement (e.g. validators declare their read-sections
+   and CI rejects dynamic×dynamic couplings), not an audit.
