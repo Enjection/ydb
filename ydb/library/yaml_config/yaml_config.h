@@ -112,15 +112,9 @@ struct TStructuralViolation {
 };
 
 /**
- * Config-relative section prefixes the proto transform reads and selectors may
- * vary (regime C). DECLARED list, validated by the shadow-run; intended to be
- * derived from proto field markers by the config protoc plugin.
- */
-const TVector<TString>& TransformReadDynamicSections();
-
-/**
  * Config-relative static/structural section prefixes selectors must not vary
- * (the guard set). DECLARED list, to be marker-derived.
+ * (the guard set). Derived from the (NMarkers.SelectorStatic) proto field
+ * markers plus the TEphemeralInputFields descriptor.
  */
 const TVector<TString>& StaticGuardSections();
 
@@ -157,9 +151,18 @@ std::optional<TString> ValidateStructuralLegacy(
  * (SelectorStatic guard), so they are validated once on the constant base in
  * every projection -- which is sound precisely because those sections cannot be
  * selector-varied.
+ *
+ * `csk`, when non-null, replaces NConfig::ValidateConfig as the per-projection
+ * semantic validator (IConfigSwissKnife::ValidateConfig). The database accept
+ * gate validates resolved configs through the swiss knife, which a build may
+ * extend beyond the stock validators -- the A+ gate must call the SAME
+ * validator set or it would be weaker than the gate it replaces.
  */
+class IConfigSwissKnife;
+
 TVector<TStructuralViolation> ValidateSemanticAPlus(
-    NFyaml::TDocument& doc, bool allowUnknown = true);
+    NFyaml::TDocument& doc, bool allowUnknown = true,
+    const IConfigSwissKnife* csk = nullptr);
 
 /**
  * Legacy oracle: run YamlToProto + NConfig::ValidateConfig on every distinct
@@ -250,8 +253,9 @@ TStructuralShadowResult StructuralShadowRun(
  *
  * Note: the database allowlist (NConfig::ValidateDatabaseConfig) has no
  * counterpart in ValidateConfig and therefore no counterpart here; the
- * database accept path must additionally compare
- * ValidateDatabaseAllowlistAPlus against its legacy allowlist verdict.
+ * database accept path must additionally run ValidateDatabaseAllowlistAPlus.
+ * `csk` is forwarded to ValidateSemanticAPlus (see there); the database gate
+ * passes AppData()->ConfigSwissKnife, the main gate passes nullptr.
  */
 struct TAPlusVerdict {
     TVector<TStructuralViolation> StructuralViolations;
@@ -263,7 +267,8 @@ struct TAPlusVerdict {
     TString FirstViolation() const;
 };
 
-TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown = true);
+TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown = true,
+    const IConfigSwissKnife* csk = nullptr);
 
 /**
  * Resolves config for given labels and stores result to appConfig

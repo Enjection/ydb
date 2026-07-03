@@ -140,6 +140,15 @@ public:
 
     bool IsCompatible(const TMap<TString, TString>& labels) const;
 
+    // Partial-tuple compatibility: evaluates ONLY the rules whose every
+    // referenced label is present in `labels` (by name); a rule referencing
+    // any other label cannot be decided from a partial tuple and is skipped.
+    // A fully-inside rule fires identically for every extension of the tuple,
+    // so pruning on it is EXACT (legacy never materializes the combination);
+    // skipping the rest keeps the caller a sound over-approximation. Used by
+    // the A+ projection enumerators.
+    bool IsCompatiblePartial(const TVector<std::pair<TString, TLabel>>& labels) const;
+
     void MergeWith(const TIncompatibilityRules& userRules);
 
     size_t GetRuleCount() const { return RulesByName.size(); }
@@ -147,9 +156,7 @@ public:
 
     bool HasRules() const { return !RulesByName.empty() || !DisabledRules.empty(); }
 
-    // Every label name referenced by any active rule. Used by the A+
-    // realizability filter to enumerate the labels an incompatibility rule
-    // constrains alongside the rule-coupled labels, so pruning is exact.
+    // Every label name referenced by any active rule.
     THashSet<TString> ReferencedLabels() const;
 
 private:
@@ -254,18 +261,6 @@ struct TFieldValueSets {
 TFieldValueSets ResolveFieldValueSets(NFyaml::TDocument& doc);
 
 /**
- * Runs a per-value predicate over a single field's value-set (the k=1 A+ check
- * shape). Returns false and fills failingValue with the first value for which
- * predicate returns false. A path with no values (absent everywhere) or a fenced
- * path trivially passes. Cost O(|Values[path]|), independent of K.
- */
-bool ValidateField(
-    const TFieldValueSets& sets,
-    const TString& path,
-    const std::function<bool(const TString&)>& predicate,
-    TString& failingValue);
-
-/**
  * A joint assignment of values to a set of coupled field paths, as produced by
  * one realizable label tuple. A path maps to its scalar value, or to nullopt if
  * the leaf is absent under that tuple (presence is tracked so presence-coupled
@@ -289,35 +284,11 @@ TVector<TFieldAssignment> EnumerateRealizableAssignments(
     const TVector<TString>& paths,
     TSet<TString>& fenced);
 
-/**
- * A reified semantic rule: a set of coupled field paths plus a predicate over a
- * realizable assignment. Check returns an error message when the assignment is
- * invalid, or std::nullopt when valid.
- */
-struct TFieldRule {
-    TVector<TString> Paths;
-    std::function<std::optional<TString>(const TFieldAssignment&)> Check;
-};
-
-struct TFieldRuleViolation {
-    TString Message;
-    TFieldAssignment Witness;
-};
-
-/**
- * Evaluates a rule against the whole config space without per-document
- * enumeration: it runs Check over every realizable joint assignment of the
- * rule's coupled fields. Returns every violation found (empty => the rule holds
- * for every resolved config). If a coupled path is fenced, it is reported in
- * 'fenced' and the caller must validate it via enumeration instead.
- *
- * This is faithful to full enumeration: the set of assignments evaluated equals
- * the set of (coupled-field projections of) all resolved configs.
- */
-TVector<TFieldRuleViolation> ValidateFieldRule(
-    NFyaml::TDocument& doc,
-    const TFieldRule& rule,
-    TSet<TString>& fenced);
+// NOTE: the reified-rule engine (TFieldRule/ValidateFieldRule/ValidateField)
+// that used to live here was TEST-ONLY -- production semantic validation runs
+// the real validators per projection (ValidateSemanticAPlus). It now lives in
+// yaml_config_ut.cpp as the equivalence-test harness, built on
+// EnumerateRealizableAssignments/ResolveFieldValueSets above.
 
 // ---------------------------------------------------------------------------
 // Track A+ : structural (proto-transform) validation support.
