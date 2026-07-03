@@ -1228,6 +1228,203 @@ Y_UNIT_TEST_SUITE(TConsoleConfigTests) {
         UNIT_ASSERT_VALUES_EQUAL(response->Record.GetMainConfigUnknownFields().size(), 0);
     }
 
+    // The accept gate (Track A+) must REJECT a semantically invalid base config
+    // with the real validator's error text reaching the client.
+    Y_UNIT_TEST(YamlConfigSemanticInvalidBaseRejected) {
+        TTenantTestRuntime runtime(MultipleNodesConsoleTestConfig());
+
+        CheckReplaceConfig(runtime, Ydb::StatusIds::BAD_REQUEST, R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+config:
+  auth_config:
+    account_lockout:
+      attempt_reset_duration: not-a-duration
+)",
+            "Cannot parse attempt reset duration");
+    }
+
+    // Same, with the invalid content introduced ONLY by a selector: the
+    // K-independent gate must project the selector-varied section and reject
+    // with the same validator text.
+    Y_UNIT_TEST(YamlConfigSemanticInvalidSelectorRejected) {
+        TTenantTestRuntime runtime(MultipleNodesConsoleTestConfig());
+
+        CheckReplaceConfig(runtime, Ydb::StatusIds::BAD_REQUEST, R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: bad tenant
+  selector:
+    tenant: bad
+  config: !inherit
+    auth_config: !inherit
+      account_lockout: !inherit
+        attempt_reset_duration: not-a-duration
+)",
+            "Cannot parse attempt reset duration");
+    }
+
+    // NEW behavior vs the removed per-doc gate: a selector varying a
+    // SelectorStatic section (cluster-wide bootstrap state) is rejected by the
+    // static-section guard -- such variation has no coherent runtime meaning
+    // and is the precondition for the per-section semantic soundness.
+    Y_UNIT_TEST(YamlConfigStaticSectionVariationRejected) {
+        TTenantTestRuntime runtime(MultipleNodesConsoleTestConfig());
+
+        CheckReplaceConfig(runtime, Ydb::StatusIds::BAD_REQUEST, R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: varies a static section
+  selector:
+    tenant: x
+  config: !inherit
+    domains_config: !inherit
+      security_config: !inherit
+        enforce_user_token_requirement: true
+)",
+            "static section");
+    }
+
+    // A valid config exercising the projection machinery end-to-end on the
+    // console actor: two independent labels, a deep-merge selector and an
+    // untagged (wholesale-replace) empty-mapping selector must be ACCEPTED.
+    Y_UNIT_TEST(YamlConfigMultiSelectorAccepted) {
+        TTenantTestRuntime runtime(MultipleNodesConsoleTestConfig());
+
+        const TString yaml = R"(
+---
+metadata:
+  cluster: ""
+  version: 0
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  tenant:
+    type: string
+  region:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: deep-merge
+  selector:
+    tenant: t1
+  config: !inherit
+    log_config: !inherit
+      cluster_name: t1
+- description: wholesale replace
+  selector:
+    region: r1
+  config: !inherit
+    monitoring_config: {}
+)";
+        CheckReplaceConfig(runtime, Ydb::StatusIds::SUCCESS, yaml);
+        CheckMainConfigReplacedWith(runtime, yaml);
+    }
+
+    // The database allowlist is now K-independent, presence-based and
+    // selector-aware: a disallowed section in the BASE database config is
+    // rejected with the legacy allowlist's exact message text...
+    Y_UNIT_TEST(DatabaseYamlConfigDisallowedSectionRejected) {
+        NKikimrConfig::TAppConfig appcfg;
+        appcfg.MutableFeatureFlags()->SetDatabaseYamlConfigAllowed(true);
+        TTenantTestRuntime runtime(TenantConsoleTestConfig(), appcfg);
+
+        CheckReplaceConfig(runtime, Ydb::StatusIds::SUCCESS, R"(
+---
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  log_config:
+    cluster_name: A
+)");
+
+        CheckReplaceDatabaseConfig(runtime, Ydb::StatusIds::BAD_REQUEST, R"(
+---
+metadata:
+  kind: DatabaseConfig
+  database: "/dc-1/users/tenant-1"
+  version: 0
+config:
+  auth_config: {}
+)",
+            "is not allowed to be used in the database configuration");
+    }
+
+    // ...and -- closing the long-standing base-only gap -- a disallowed section
+    // introduced ONLY by a database-config selector is rejected too.
+    Y_UNIT_TEST(DatabaseYamlConfigDisallowedSelectorSectionRejected) {
+        NKikimrConfig::TAppConfig appcfg;
+        appcfg.MutableFeatureFlags()->SetDatabaseYamlConfigAllowed(true);
+        TTenantTestRuntime runtime(TenantConsoleTestConfig(), appcfg);
+
+        CheckReplaceConfig(runtime, Ydb::StatusIds::SUCCESS, R"(
+---
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  log_config:
+    cluster_name: A
+)");
+
+        CheckReplaceDatabaseConfig(runtime, Ydb::StatusIds::BAD_REQUEST, R"(
+---
+metadata:
+  kind: DatabaseConfig
+  database: "/dc-1/users/tenant-1"
+  version: 0
+config:
+  feature_flags:
+    enable_some_flag: true
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: sneaky
+  selector:
+    tenant: x
+  config: !inherit
+    auth_config: !inherit
+      some_field: 1
+)",
+            "is not allowed to be used in the database configuration");
+    }
+
     // An unknown field nested inside a selector_config entry is reported with a path that
     // pinpoints the selector, so the UI can highlight it and its parents in the editable YAML.
     Y_UNIT_TEST(YamlConfigUnknownFieldsInSelectorHaveSelectorPath) {

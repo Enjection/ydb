@@ -62,15 +62,9 @@ extend google.protobuf.FieldOptions {
     // TAppConfig::GetStaticSectionPaths().
     optional bool SelectorStatic = 82006;
 
-    // Marks a config section that the proto TransformProtoConfig step reads AND
-    // that selectors may vary. Track A+ projects the DISTINCT realized values of
-    // these sections and runs the proto transform once per projection (regime
-    // C). Marking every transform-read section guarantees the A+ transform pass
-    // is a provable superset of what the legacy per-document transform checks --
-    // closing the "is the transform-read list complete?" gap. The config protoc
-    // plugin emits the marked top-level paths as
-    // TAppConfig::GetTransformReadSectionPaths().
-    optional bool SelectorTransformRead = 82007;
+    // 82007 was SelectorTransformRead (removed: the A+ validation projects
+    // EVERY present section, so a transform-read classification carries no
+    // information the validators use). Do not reuse the number.
 
     // **Top-level** options marked with that label are opaque to the cluster
     // in the dynamic YAML configuration (main and database).

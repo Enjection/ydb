@@ -319,22 +319,6 @@ TSet<TString> CollectFieldSettingTopSections(NFyaml::TDocument& doc) {
 
 } // namespace
 
-const TVector<TString>& TransformReadDynamicSections() {
-    // Sections TransformProtoConfig reads AND selectors may vary (regime C).
-    // DERIVED from the (NMarkers.SelectorTransformRead) proto markers via the
-    // config protoc plugin -- the list lives next to the fields and is a
-    // provable cover of the marked transform-read sections (closes the
-    // hand-declared-list completeness gap).
-    static const TVector<TString> sections = [] {
-        TVector<TString> v;
-        for (const auto& p : NKikimrConfig::TAppConfig::GetTransformReadSectionPaths()) {
-            v.push_back(p);
-        }
-        return v;
-    }();
-    return sections;
-}
-
 const TVector<TString>& StaticGuardSections() {
     // Structural/static sections selectors must not vary (regime A guard).
     // DERIVED from the (NMarkers.SelectorStatic) proto markers, plus the
@@ -436,7 +420,9 @@ std::optional<TString> ValidateStructuralLegacy(NFyaml::TDocument& doc, bool all
     return err;
 }
 
-TVector<TStructuralViolation> ValidateSemanticAPlus(NFyaml::TDocument& doc, bool allowUnknown) {
+TVector<TStructuralViolation> ValidateSemanticAPlus(NFyaml::TDocument& doc, bool allowUnknown,
+    const IConfigSwissKnife* csk)
+{
     TVector<TStructuralViolation> out;
 
     // Static-section guard -- MUST run on the semantic path too, not only the
@@ -484,7 +470,13 @@ TVector<TStructuralViolation> ValidateSemanticAPlus(NFyaml::TDocument& doc, bool
                 try {
                     auto cfg = YamlToProto(configNode, allowUnknown, /*preTransform*/ true);
                     std::vector<TString> errors;
-                    if (NKikimr::NConfig::ValidateConfig(cfg, errors) == NKikimr::NConfig::EValidationResult::Error) {
+                    // The swiss knife, when provided, IS the gate's validator
+                    // set (a build may register validators beyond the stock
+                    // NConfig ones); otherwise run the stock set directly.
+                    const bool error = csk
+                        ? (csk->ValidateConfig(cfg, errors) == EValidationResult::Error)
+                        : (NKikimr::NConfig::ValidateConfig(cfg, errors) == NKikimr::NConfig::EValidationResult::Error);
+                    if (error) {
                         out.push_back(TStructuralViolation{
                             errors.empty() ? TString("semantic validation error") : errors.front()});
                     }
@@ -692,7 +684,10 @@ TString TAPlusVerdict::FirstViolation() const {
         return StructuralViolations.front().Message;
     }
     if (!GuardViolations.empty()) {
-        return GuardViolations.front();
+        // Guard entries are raw selector-written paths; wrap them so the
+        // user-facing rejection explains itself.
+        return TStringBuilder() << "selector overrides static section path '"
+            << GuardViolations.front() << "' which selectors must not vary";
     }
     if (!SemanticViolations.empty()) {
         return SemanticViolations.front().Message;
@@ -700,10 +695,10 @@ TString TAPlusVerdict::FirstViolation() const {
     return {};
 }
 
-TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown) {
+TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown, const IConfigSwissKnife* csk) {
     TAPlusVerdict verdict;
     verdict.StructuralViolations = ValidateStructuralAPlus(doc, allowUnknown, &verdict.GuardViolations);
-    verdict.SemanticViolations = ValidateSemanticAPlus(doc, allowUnknown);
+    verdict.SemanticViolations = ValidateSemanticAPlus(doc, allowUnknown, csk);
     verdict.Rejected = !verdict.StructuralViolations.empty()
         || !verdict.GuardViolations.empty()
         || !verdict.SemanticViolations.empty();

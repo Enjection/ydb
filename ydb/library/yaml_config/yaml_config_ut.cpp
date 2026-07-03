@@ -2646,6 +2646,68 @@ selector_config:
       - yql
 )";
 
+// ---- TEST-ONLY reified-rule engine ----
+// Moved here from the production library: production semantic validation runs
+// the REAL validators per projection (ValidateSemanticAPlus); this harness
+// exists solely to equivalence-test the enumeration machinery
+// (EnumerateRealizableAssignments / ResolveFieldValueSets) against the
+// full-enumeration oracle with hand-reified rules.
+
+struct TFieldRule {
+    TVector<TString> Paths;
+    std::function<std::optional<TString>(const TFieldAssignment&)> Check;
+};
+
+struct TFieldRuleViolation {
+    TString Message;
+    TFieldAssignment Witness;
+};
+
+TVector<TFieldRuleViolation> ValidateFieldRule(
+    NFyaml::TDocument& doc,
+    const TFieldRule& rule,
+    TSet<TString>& fenced)
+{
+    TVector<TFieldRuleViolation> violations;
+
+    auto assignments = NYamlConfig::EnumerateRealizableAssignments(doc, rule.Paths, fenced);
+    if (!fenced.empty()) {
+        // A coupled path is non-decomposable; the caller must validate it via
+        // per-document enumeration instead.
+        return violations;
+    }
+
+    for (auto& assignment : assignments) {
+        if (auto msg = rule.Check(assignment); msg.has_value()) {
+            violations.push_back(TFieldRuleViolation{*msg, assignment});
+        }
+    }
+
+    return violations;
+}
+
+bool ValidateField(
+    const NYamlConfig::TFieldValueSets& sets,
+    const TString& path,
+    const std::function<bool(const TString&)>& predicate,
+    TString& failingValue)
+{
+    if (sets.IsFenced(path)) {
+        return true;
+    }
+    auto it = sets.Values.find(path);
+    if (it == sets.Values.end()) {
+        return true;
+    }
+    for (auto& value : it->second) {
+        if (!predicate(value)) {
+            failingValue = value;
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<TString> Get(const TFieldAssignment& a, const TString& path) {
     auto it = a.find(path);
     return (it == a.end()) ? std::nullopt : it->second;
@@ -3011,6 +3073,44 @@ Y_UNIT_TEST_SUITE(YamlConfigAPlusValidation) {
         UNIT_ASSERT_C(fenced.contains("/grpc_config/services_enabled"), "append path must be fenced");
         UNIT_ASSERT_C(violations.empty(), "fenced rule must defer (no violations emitted)");
     }
+
+    // Wholesale replace (UNTAGGED selector mapping, the default merge): the
+    // selector REPLACES the whole section, so base siblings become ABSENT under
+    // that tenant. Presence modeling (ReplaceRoots -> nullopt) must make the A+
+    // decision equal the full-enumeration oracle: base has compression+level
+    // (valid), tenant=A replaces the section with level ONLY -> the "level
+    // without type" shape exists exactly under tenant=A, and both engines must
+    // flag it.
+    Y_UNIT_TEST(WholesaleReplaceDropsSiblingAndMatchesOracle) {
+        const char* yaml = R"(---
+cluster: test
+version: 1
+config:
+  column_shard_config:
+    default_compression: zstd
+    default_compression_level: 3
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: replaces the whole section
+  selector:
+    tenant: A
+  config: !inherit
+    column_shard_config:
+      default_compression_level: 5
+)";
+        bool fenced = false;
+        bool aplus = APlusRuleFails(yaml, CompressionRule(), fenced);
+        bool oracle = OracleRuleFails(yaml, CompressionRule());
+        UNIT_ASSERT_C(!fenced, "no sequence path involved");
+        UNIT_ASSERT_VALUES_EQUAL_C(aplus, oracle,
+            "wholesale-replace presence must not diverge from the oracle");
+        UNIT_ASSERT_C(oracle, "level-without-type exists under tenant=A; the oracle must flag it");
+    }
 }
 
 // ===========================================================================
@@ -3251,7 +3351,7 @@ Y_UNIT_TEST_SUITE(YamlConfigStructuralProjection) {
     // ResolveUniqueDocs (full enumeration) produces. Running the proto transform
     // on the former is therefore equivalent to running it on every resolved doc.
     Y_UNIT_TEST(ProjectionSetEqualsFullEnumeration) {
-        auto sections = TransformReadDynamicSections();
+        TVector<TString> sections{"/log_config"};
         auto yaml = MakeProjConfig(8, 8);
 
         TSet<TString> legacy;
@@ -3273,7 +3373,7 @@ Y_UNIT_TEST_SUITE(YamlConfigStructuralProjection) {
     // K-independence: distinct transform-read projections do not grow with a
     // second high-cardinality label that varies only NON-transform sections.
     Y_UNIT_TEST(ProjectionWorkIndependentOfUncoupledLabel) {
-        auto sections = TransformReadDynamicSections();
+        TVector<TString> sections{"/log_config"};
 
         auto count = [&](const TString& yaml) {
             size_t n = 0;
@@ -3328,6 +3428,41 @@ selector_config:
         auto doc = NFyaml::TDocument::Parse(MakeProjConfig(4, 4));
         auto hits = SelectorWritesUnder(doc, StaticGuardSections());
         UNIT_ASSERT_C(hits.empty(), "no selector touches a static section here");
+    }
+
+    // The guard must also trip on a WHOLESALE REPLACE of a static section: an
+    // UNTAGGED selector mapping produces no scalar leaf for the section root
+    // itself when empty -- the hit comes from the ReplaceRoots view.
+    Y_UNIT_TEST(DetectsWholesaleReplaceOfStaticSection) {
+        TString yaml = R"(---
+cluster: test
+version: 1
+config:
+  domains_config:
+    domain:
+    - name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: replaces the whole static section
+  selector:
+    tenant: x
+  config: !inherit
+    domains_config: {}
+)";
+        auto doc = NFyaml::TDocument::Parse(yaml);
+        auto hits = SelectorWritesUnder(doc, StaticGuardSections());
+        bool under = false;
+        for (const auto& h : hits) {
+            if (h.StartsWith("/domains_config")) {
+                under = true;
+            }
+        }
+        UNIT_ASSERT_C(under, "an untagged (replace) empty mapping over a static section must trip the guard");
     }
 }
 
@@ -3418,7 +3553,12 @@ TVector<TString> SplitLeafPath(const TString& path) {
 // when legacy does, i.e. A+ is strictly not weaker (no false negatives).
 void AssertCoercionStrictlyNotWeaker(int kind, const char* kindName, bool expectReject) {
     TSet<TString> avoid;
-    for (const auto& s : TransformReadDynamicSections()) { avoid.insert(s); }
+    // Sections the proto transform reads (fixture steering only: pick a leaf
+    // whose coercion is not entangled with the transform or the static guard).
+    for (const char* s : {"/actor_system_config", "/log_config", "/interconnect_config",
+                          "/grpc_config", "/auth_config"}) {
+        avoid.insert(s);
+    }
     for (const auto& s : StaticGuardSections()) { avoid.insert(s); }
 
     TScalarLeaf leaf;
@@ -3533,6 +3673,55 @@ selector_config:
         UNIT_ASSERT_C(shadow.APlusRejected, "A+ must project presence-only sections and reject too");
         UNIT_ASSERT_C(!shadow.Diverged, "empty-mapping-only section must not cause divergence");
     }
+
+    // Anchors/aliases are legal YAML and the legacy resolver follows them; the
+    // A+ walkers expand aliases per-node (CollectScalarLeaves::ResolveAlias).
+    // A section whose CONTENT arrives via an alias must reach the same verdict
+    // on both engines -- here the aliased content lands under an unknown
+    // section, so with allowUnknown=false both must reject.
+    Y_UNIT_TEST(AliasedSectionAgreesWithLegacy) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  log_config: &lc
+    cluster_name: base
+  nonexistent_config: *lc
+)");
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ false);
+        UNIT_ASSERT_C(shadow.LegacyRejected, "legacy follows the alias and rejects the unknown section");
+        UNIT_ASSERT_C(shadow.APlusRejected, "A+ must expand the alias and reject too");
+        UNIT_ASSERT_C(!shadow.Diverged, "aliased section must not cause divergence");
+    }
+
+    // Semantic-path presence-union: the semantic pass derives its section set
+    // with the same presence view as the structural one. A section present
+    // only as an empty mapping via a selector must not make the SEMANTIC
+    // decisions diverge either (whatever direction they take).
+    Y_UNIT_TEST(EmptyMappingSectionSemanticAgreesWithLegacy) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: presence-only section
+  selector:
+    tenant: x
+  config: !inherit
+    column_shard_config: {}
+)");
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+        UNIT_ASSERT_C(!shadow.Diverged, "structural decisions must agree");
+        UNIT_ASSERT_C(!shadow.SemanticDiverged, "semantic decisions must agree on a presence-only section");
+    }
 }
 
 Y_UNIT_TEST_SUITE(YamlConfigAPlusVerdict) {
@@ -3561,24 +3750,167 @@ config:
         UNIT_ASSERT_C(verdict.Rejected, "unknown section with allowUnknown=false must be rejected");
         UNIT_ASSERT(!verdict.FirstViolation().empty());
     }
+
+    // The database gate validates resolved configs through the ConfigSwissKnife,
+    // which a build may extend with validators beyond the stock NConfig set.
+    // ValidateAPlus must run the SAME validator set per projection when a swiss
+    // knife is passed -- otherwise the A+ gate would be weaker than the gate it
+    // replaced.
+    Y_UNIT_TEST(SwissKnifeValidatorsAreApplied) {
+        class TRejectingValidator : public NYamlConfig::IConfigValidator {
+        public:
+            NYamlConfig::EValidationResult ValidateConfig(
+                const NKikimrConfig::TAppConfig& config,
+                std::vector<TString>& msg) const override
+            {
+                if (config.GetLogConfig().GetClusterName() == "forbidden") {
+                    msg.push_back("cluster_name 'forbidden' is not allowed");
+                    return NYamlConfig::EValidationResult::Error;
+                }
+                return NYamlConfig::EValidationResult::Ok;
+            }
+        };
+        class TTestSwissKnife : public NYamlConfig::IConfigSwissKnife {
+        public:
+            TTestSwissKnife() {
+                Validators["reject_forbidden_cluster_name"] = MakeSimpleShared<TRejectingValidator>();
+            }
+            bool VerifyReplaceRequest(const Ydb::Config::ReplaceConfigRequest&, Ydb::StatusIds::StatusCode&, NYql::TIssues&) const override {
+                return true;
+            }
+            bool VerifyMainConfig(const TString&) const override {
+                return true;
+            }
+            bool VerifyStorageConfig(const TString&) const override {
+                return true;
+            }
+        };
+
+        const char* yaml = R"(---
+cluster: test
+version: 1
+config:
+  log_config:
+    cluster_name: forbidden
+)";
+        {
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            auto verdict = NYamlConfig::ValidateAPlus(doc, /*allowUnknown*/ true);
+            UNIT_ASSERT_C(!verdict.Rejected, "the stock validator set accepts this config");
+        }
+        {
+            TTestSwissKnife sk;
+            auto doc = NFyaml::TDocument::Parse(yaml);
+            auto verdict = NYamlConfig::ValidateAPlus(doc, /*allowUnknown*/ true, &sk);
+            UNIT_ASSERT_C(verdict.Rejected, "a swiss-knife-registered validator must reject");
+            UNIT_ASSERT_C(verdict.FirstViolation().Contains("forbidden"), verdict.FirstViolation());
+        }
+    }
+}
+
+Y_UNIT_TEST_SUITE(YamlConfigRulePruning) {
+
+    // Incompatibility rules are state-space reduction: the resolver never
+    // materializes a rule-forbidden label combination, so its content is never
+    // validated by the per-doc oracle. A rule whose referenced labels are ALL
+    // inside the involved set (here builtin_static_with_nonempty_tenant over
+    // {dynamic, tenant}, both constrained by the selector) must prune the A+
+    // projection identically -- otherwise A+ would reject a config the oracle
+    // accepts.
+    static const char* PrunedComboYaml(bool disableRule) {
+        return disableRule
+            ? R"(---
+cluster: test
+version: 1
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  dynamic:
+    type: string
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+    - builtin_static_with_nonempty_tenant
+selector_config:
+- description: only reachable when the rule is disabled
+  selector:
+    dynamic: "false"
+    tenant: x
+  config: !inherit
+    log_config: !inherit
+      default_level: NOT_A_LEVEL
+)"
+            : R"(---
+cluster: test
+version: 1
+config:
+  log_config:
+    cluster_name: base
+allowed_labels:
+  dynamic:
+    type: string
+  tenant:
+    type: string
+incompatibility_overrides:
+  disable_rules:
+    - builtin_branch_must_have_value
+    - builtin_dynamic_must_have_value
+    - builtin_node_host_must_have_value
+    - builtin_node_id_must_have_value
+    - builtin_rev_must_have_value
+    - builtin_node_type_must_be_defined
+    - builtin_tenant_must_be_defined
+selector_config:
+- description: unreachable, pruned by builtin_static_with_nonempty_tenant
+  selector:
+    dynamic: "false"
+    tenant: x
+  config: !inherit
+    log_config: !inherit
+      default_level: NOT_A_LEVEL
+)";
+    }
+
+    Y_UNIT_TEST(FullyInsideRulePrunesLikeLegacy) {
+        // The bad enum lives ONLY under (dynamic=false, tenant=x), which the
+        // active builtin rule forbids: the oracle skips it -> accepts; A+ must
+        // prune the same tuple and accept too.
+        auto doc = NFyaml::TDocument::Parse(PrunedComboYaml(/*disableRule*/ false));
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+        UNIT_ASSERT_C(!shadow.LegacyRejected, "the oracle never materializes the forbidden combo");
+        UNIT_ASSERT_C(!shadow.APlusRejected, "A+ must prune the rule-forbidden tuple");
+        UNIT_ASSERT_C(!shadow.Diverged, "rule pruning must not diverge from the oracle");
+    }
+
+    Y_UNIT_TEST(DisabledRuleStopsPruningLikeLegacy) {
+        // With the rule disabled the combo is realizable: both engines see the
+        // bad enum and both must reject.
+        auto doc = NFyaml::TDocument::Parse(PrunedComboYaml(/*disableRule*/ true));
+        auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+        UNIT_ASSERT_C(shadow.LegacyRejected, "the oracle reaches the bad enum once the rule is off");
+        UNIT_ASSERT_C(shadow.APlusRejected, "A+ must stop pruning when the rule is disabled");
+        UNIT_ASSERT_C(!shadow.Diverged, "rule disable must not diverge from the oracle");
+    }
 }
 
 Y_UNIT_TEST_SUITE(YamlConfigStructuralSectionMarkers) {
 
-    // The transform-read and static-guard section lists are DERIVED from proto
-    // field markers (NMarkers.SelectorTransformRead / SelectorStatic) via the
-    // config protoc plugin, not hand-declared -- this closes the "is the
-    // transform-read list complete?" gap by keeping the classification next to
-    // the fields. This test pins the wiring.
+    // The static-guard section list is DERIVED from proto field markers
+    // (NMarkers.SelectorStatic) via the config protoc plugin plus the
+    // TEphemeralInputFields descriptor, not hand-declared -- the
+    // classification lives next to the fields. This test pins the wiring.
+    // (The A+ validators project EVERY present section, so no transform-read
+    // classification is needed; only the static guard set is load-bearing.)
     Y_UNIT_TEST(DerivedFromMarkers) {
-        TSet<TString> tr;
-        for (const auto& s : NYamlConfig::TransformReadDynamicSections()) { tr.insert(s); }
-        UNIT_ASSERT_C(tr.contains("/actor_system_config"), "actor_system_config must be transform-read");
-        UNIT_ASSERT_C(tr.contains("/log_config"), "log_config must be transform-read");
-        UNIT_ASSERT_C(tr.contains("/auth_config"), "auth_config must be transform-read");
-        UNIT_ASSERT_C(tr.contains("/grpc_config"), "grpc_config must be transform-read");
-        UNIT_ASSERT_C(tr.contains("/interconnect_config"), "interconnect_config must be transform-read");
-
         TSet<TString> sg;
         for (const auto& s : NYamlConfig::StaticGuardSections()) { sg.insert(s); }
         UNIT_ASSERT_C(sg.contains("/domains_config"), "domains_config must be static-guarded");
@@ -3586,9 +3918,11 @@ Y_UNIT_TEST_SUITE(YamlConfigStructuralSectionMarkers) {
         UNIT_ASSERT_C(sg.contains("/nameservice_config"), "nameservice_config must be static-guarded");
         UNIT_ASSERT_C(sg.contains("/hosts"), "hosts (ephemeral input) must be static-guarded");
 
-        // A section must not be classified as BOTH.
-        for (const auto& s : tr) {
-            UNIT_ASSERT_C(!sg.contains(s), TStringBuilder() << s << " is both transform-read and static");
+        // Sections the transform reads AND selectors may vary must NOT be
+        // static-guarded (the guard would reject every config varying them).
+        for (const char* s : {"/actor_system_config", "/log_config", "/interconnect_config",
+                              "/grpc_config", "/auth_config"}) {
+            UNIT_ASSERT_C(!sg.contains(s), TStringBuilder() << s << " must stay selector-variable");
         }
     }
 
@@ -3608,8 +3942,87 @@ Y_UNIT_TEST_SUITE(YamlConfigStructuralSectionMarkers) {
             "self_management_config is read by the StateStorage aggregate -- must stay static-guarded");
 
         UNIT_ASSERT_C(!NYamlConfig::StaticGuardSections().empty(), "static guard set must be non-empty");
-        UNIT_ASSERT_C(!NYamlConfig::TransformReadDynamicSections().empty(),
-            "transform-read set must be non-empty");
+    }
+
+    // Per-section projection is sound only while NO gate validator reads TWO
+    // selector-VARIABLE (non-static) sections jointly: a joint state of two
+    // dynamic sections is never realized by any single-section projection, and
+    // the static guard cannot catch it. This table declares the read-set of
+    // every validator on the accept gate (NConfig::ValidateConfig /
+    // ConfigSwissKnife stock set) and pins the invariant mechanically. ADDING A
+    // VALIDATOR (or widening one's reads) REQUIRES UPDATING THIS TABLE; if the
+    // new entry reads two dynamic sections, the projection engine must first
+    // learn to group them into a joint projection.
+    Y_UNIT_TEST(GateValidatorsReadAtMostOneDynamicSection) {
+        struct TValidatorReads {
+            const char* Name;
+            TVector<TString> Sections;
+        };
+        const TVector<TValidatorReads> gateValidators = {
+            {"ValidateAuthConfig",         {"/auth_config"}},
+            {"ValidateColumnShardConfig",  {"/column_shard_config"}},
+            {"ValidateMonitoringConfig",   {"/monitoring_config", "/domains_config"}},
+            {"ValidateStateStorageConfig", {"/domains_config", "/self_management_config"}},
+        };
+
+        TSet<TString> sg;
+        for (const auto& s : NYamlConfig::StaticGuardSections()) { sg.insert(s); }
+
+        for (const auto& v : gateValidators) {
+            size_t dynamicReads = 0;
+            for (const auto& s : v.Sections) {
+                if (!sg.contains(s)) {
+                    ++dynamicReads;
+                }
+            }
+            UNIT_ASSERT_C(dynamicReads <= 1,
+                TStringBuilder() << v.Name << " reads " << dynamicReads
+                    << " selector-variable sections jointly; per-section projection"
+                       " cannot cover that -- group them into a joint projection first");
+        }
+    }
+
+    // Completeness oracle: for EVERY selector-variable top-level section of
+    // TAppConfig, a selector introducing it must not make the A+ decision
+    // diverge from the per-doc oracle (in either direction, on either the
+    // structural or the semantic axis). This is the mechanical backstop for
+    // the read-set table above: a validator/transform acquiring a new
+    // cross-section coupling surfaces here as a divergence.
+    Y_UNIT_TEST(EverySectionShadowAgreesWithOracle) {
+        TSet<TString> skip;
+        for (const auto& s : NYamlConfig::StaticGuardSections()) { skip.insert(s); }
+
+        const auto* desc = NKikimrConfig::TAppConfig::descriptor();
+        size_t checked = 0;
+        for (int i = 0; i < desc->field_count(); ++i) {
+            const auto* f = desc->field(i);
+            if (f->is_repeated() || f->cpp_type() != google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE) {
+                continue;
+            }
+            TString name = f->name();
+            NProtobufJson::ToSnakeCaseDense(&name);
+            const TString section = TString("/") + name;
+            if (skip.contains(section)) {
+                continue; // static sections are covered by the guard, not projection
+            }
+
+            TStringBuilder sb;
+            sb << "---\ncluster: test\nversion: 1\n";
+            sb << "config:\n  log_config:\n    cluster_name: base\n";
+            sb << "allowed_labels:\n  tenant:\n    type: string\n";
+            sb << "incompatibility_overrides:\n  disable_rules:\n    - builtin_tenant_must_be_defined\n";
+            sb << "selector_config:\n- description: probe\n  selector:\n    tenant: x\n";
+            sb << "  config: !inherit\n    " << name << ": {}\n";
+
+            auto doc = NFyaml::TDocument::Parse(sb);
+            auto shadow = NYamlConfig::StructuralShadowRun(doc, /*allowUnknown*/ true);
+            UNIT_ASSERT_C(!shadow.Diverged,
+                TStringBuilder() << section << ": structural decisions diverged");
+            UNIT_ASSERT_C(!shadow.SemanticDiverged,
+                TStringBuilder() << section << ": semantic decisions diverged");
+            ++checked;
+        }
+        UNIT_ASSERT_C(checked > 50, "the oracle must sweep the real TAppConfig surface");
     }
 }
 
@@ -4014,6 +4427,26 @@ config:
         auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
         UNIT_ASSERT_C(v.empty(), v.empty() ? "" : v.front().Message.c_str());
     }
+
+    // A disallowed section whose content arrives via a YAML alias must still be
+    // counted as field-setting (the walkers resolve aliases); otherwise an
+    // anchored copy would smuggle a disallowed section past the allowlist.
+    Y_UNIT_TEST(AliasedDisallowedSectionRejected) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  feature_flags: &ff
+    enable_some_flag: true
+  auth_config: *ff
+)");
+        auto v = NYamlConfig::ValidateDatabaseAllowlistAPlus(doc);
+        bool found = false;
+        for (const auto& e : v) {
+            if (e.Message.Contains("auth_config")) { found = true; }
+        }
+        UNIT_ASSERT_C(found, "an alias-valued disallowed section must be rejected");
+    }
 }
 
 Y_UNIT_TEST_SUITE(YamlConfigFieldDiagnostics) {
@@ -4073,6 +4506,34 @@ config:
         UNIT_ASSERT_C(diag.UnknownFields.empty(),
             TStringBuilder() << "no unknown fields expected, got "
                 << (diag.UnknownFields.empty() ? TString("none") : diag.UnknownFields.begin()->first));
+    }
+
+    // A block carrying an ephemeral structural fragment (hosts referencing a
+    // host_config_id with no host_configs) can throw in the preTransform
+    // Preprocess; the collector then falls back to a transform=false pass. The
+    // genuine unknown field must STILL be reported, and the ephemeral key must
+    // NOT surface as a false "unknown". (If the transform happens to tolerate
+    // the fragment, both assertions hold on the happy path too, so the test is
+    // valid for either implementation of the transform.)
+    Y_UNIT_TEST(FallbackCollectsUnknownWhenTransformThrows) {
+        auto doc = NFyaml::TDocument::Parse(R"(---
+cluster: test
+version: 1
+config:
+  hosts:
+  - host: h1
+    host_config_id: 7
+  really_unknown_field_for_test: 1
+)");
+        auto diag = NYamlConfig::CollectFieldDiagnosticsAPlus(doc);
+        bool foundUnknown = false;
+        bool foundEphemeral = false;
+        for (const auto& [path, _] : diag.UnknownFields) {
+            if (path.Contains("really_unknown_field_for_test")) { foundUnknown = true; }
+            if (path.Contains("/hosts")) { foundEphemeral = true; }
+        }
+        UNIT_ASSERT_C(foundUnknown, "the unknown field must be reported even on the fallback path");
+        UNIT_ASSERT_C(!foundEphemeral, "the ephemeral 'hosts' key must not be reported as unknown");
     }
 }
 

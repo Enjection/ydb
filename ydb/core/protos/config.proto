@@ -3254,10 +3254,10 @@ message TOpaqueConfig {
 
 message TAppConfig {
     option (NMarkers.Root) = true;
-    optional TActorSystemConfig ActorSystemConfig = 1 [(NMarkers.SelectorTransformRead) = true];
-    optional TLogConfig LogConfig = 2 [(NMarkers.SelectorTransformRead) = true];
+    optional TActorSystemConfig ActorSystemConfig = 1;
+    optional TLogConfig LogConfig = 2;
     optional TStaticNameserviceConfig NameserviceConfig = 3 [(NMarkers.SelectorStatic) = true];
-    optional TInterconnectConfig InterconnectConfig = 4 [(NMarkers.SelectorTransformRead) = true];
+    optional TInterconnectConfig InterconnectConfig = 4;
     optional TDomainsConfig DomainsConfig = 5 [(NMarkers.SelectorStatic) = true];
     optional TBlobStorageConfig BlobStorageConfig = 6 [(NMarkers.SelectorStatic) = true];
     optional TChannelProfileConfig ChannelProfileConfig = 7 [(NMarkers.SelectorStatic) = true];
@@ -3273,7 +3273,7 @@ message TAppConfig {
     repeated string UDFsPaths = 16;
     optional TKQPConfig KQPConfig = 17;
     optional TMemoryLogConfig MemoryLogConfig = 19;
-    optional TGRpcConfig GRpcConfig = 20 [(NMarkers.SelectorTransformRead) = true];
+    optional TGRpcConfig GRpcConfig = 20;
     optional TDynamicNameserviceConfig DynamicNameserviceConfig = 22;
     //optional TLocalConfig LocalConfig = 23; DEPRECATED
     optional TDynamicNodeConfig DynamicNodeConfig = 24;
@@ -3282,7 +3282,7 @@ message TAppConfig {
     optional TSqsConfig SqsConfig = 27;
     optional NKikimrPQ.TPQConfig PQConfig = 28;
     optional NKikimrTenantPool.TTenantPoolConfig TenantPoolConfig = 29;
-    optional NKikimrProto.TAuthConfig AuthConfig = 30 [(NMarkers.SelectorTransformRead) = true];
+    optional NKikimrProto.TAuthConfig AuthConfig = 30;
     optional NKikimrTenantSlotBroker.TConfig TenantSlotBrokerConfig = 32;
     optional TConfigsDispatcherConfig ConfigsDispatcherConfig = 33;
     optional TTableProfilesConfig TableProfilesConfig = 34;

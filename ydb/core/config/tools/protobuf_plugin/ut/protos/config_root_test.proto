@@ -20,6 +20,5 @@ message ActualConfigMessage {
     optional string Field201 = 201;
     optional AdditionalMessage StaticSection = 30 [(NMarkers.SelectorStatic) = true];
     optional string DynamicField = 31;
-    optional AdditionalMessage TransformReadSection = 32 [(NMarkers.SelectorTransformRead) = true];
     reserved "RootReservedField";
 }

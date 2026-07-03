@@ -342,19 +342,6 @@ Y_UNIT_TEST_SUITE(ValidationTests) {
             "an unmarked field must NOT be listed");
         UNIT_ASSERT_C(!paths.contains("/field1"),
             "an unmarked message field must NOT be listed");
-        UNIT_ASSERT_C(!paths.contains("/transform_read_section"),
-            "a transform-read field must NOT be in the static set");
-    }
-
-    Y_UNIT_TEST(HasTransformReadSectionPaths) {
-        const auto& paths = NKikimrConfig::ActualConfigMessage::GetTransformReadSectionPaths();
-
-        UNIT_ASSERT_C(paths.contains("/transform_read_section"),
-            "a field marked (NMarkers.SelectorTransformRead) must be listed");
-        UNIT_ASSERT_C(!paths.contains("/static_section"),
-            "a static field must NOT be in the transform-read set");
-        UNIT_ASSERT_C(!paths.contains("/dynamic_field"),
-            "an unmarked field must NOT be listed");
     }
 }
 

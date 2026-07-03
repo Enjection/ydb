@@ -134,33 +134,31 @@ implemented and tested in the `yaml_config` library (fast, isolated build):
 - **P-S3 sub-tree projection (regime C)** — `EnumerateDistinctProjections`
   resolves one representative per distinct firing-signature (no per-tuple
   `Resolve()`), so the proto transform runs #distinct-projections times, not K.
-- **P-S4 shadow-run cutover** — `ValidateAPlus` (aggregate structural + guard +
-  semantic verdict, K-independent, no legacy re-run) is wired into BOTH console
-  accept gates (`ValidateMainConfig`, `ValidateDatabaseConfig`) as a
-  non-blocking, logged shadow. The gate CAPTURES its own legacy verdict and the
-  shadow compares against it, so (a) no O(K) legacy enumeration is repeated for
-  the shadow, and (b) the shadow observes legacy-REJECTED configs too — the
-  legacy-rejects/A+-accepts direction that decides cutover safety. On the
-  database path `ValidateDatabaseAllowlistAPlus` is folded into the A+ verdict,
-  shadowing the legacy DB allowlist (`NConfig::ValidateDatabaseConfig`), which
-  has no counterpart inside `ValidateConfig`. `StructuralShadowRun` (which
-  re-derives the legacy verdict itself, 2× O(K)) remains for tests and offline
-  head-to-head parity audits only.
+- **P-S4 cutover — DONE.** `ValidateAPlus` (aggregate structural + guard +
+  semantic verdict, K-independent) is the SOLE blocking gate in both
+  `ValidateMainConfig` and `ValidateDatabaseConfig`; the O(K) per-resolved-doc
+  legacy loops were removed. The database path runs
+  `ValidateDatabaseAllowlistAPlus` first (presence-based, selector-aware —
+  also closing the old base-only allowlist gap) and passes
+  `AppData()->ConfigSwissKnife` into the semantic pass so a build's extra
+  validators keep gating. Unknown/deprecated field diagnostics come from
+  `CollectFieldDiagnosticsAPlus` on both paths. `StructuralShadowRun` and the
+  `ValidateStructuralLegacy`/`ValidateSemanticLegacy` per-doc oracles remain
+  TEST-ONLY: they are the executable legacy behavior spec the equivalence
+  suites pin A+ against — never wire them back into a gate.
 
-### Tests (all green)
-- `yaml_config/ut`: 18 tests — `YamlConfigFieldValueSets`, `YamlConfigAPlus*`,
-  `YamlConfigStructuralProjection` (projection set == full enumeration; work
-  independent of an uncoupled high-cardinality label), `YamlConfigStructuralGuard`,
-  `YamlConfigStructuralEnumCoercion`, `YamlConfigStructuralShadow`.
+### Tests
+- `yaml_config/ut`: the `YamlConfigFieldValueSets`, `YamlConfigAPlus*`,
+  `YamlConfigStructuralProjection/Guard/Coercion/Shadow/SectionMarkers`,
+  `YamlConfigSemanticAPlus`, `YamlConfigDatabaseAllowlist`,
+  `YamlConfigFieldDiagnostics`, `YamlConfigRulePruning` and
+  `YamlConfigPolynomialScale` suites — the equivalence suites pin A+ against
+  the per-doc oracles (see Post-cutover invariants).
 - `protobuf_plugin/ut`: `HasStaticSectionPaths` verifies the generated accessor.
-
-### Known follow-ups
-- Wire `StaticGuardSections()`/`TransformReadDynamicSections()` to the generated
-  marker tables (mark the real static sections in `config.proto`; needs a global
-  rebuild).
-- Re-introduce bounded incompatibility-rule pruning to trim A+ false positives.
-- Exact per-field coercion via the real converter (currently enum/type via
-  reflection; representative-run + shadow-run backstop the rest).
+- `cms/console/ut`: rejection-parity and accept-path tests exercise the gate
+  end-to-end through the console actor (semantic reject in base and via
+  selector, static-guard reject, multi-selector accept, DB allowlist reject in
+  base and via selector).
 
 ---
 
@@ -243,98 +241,83 @@ Architect + critic both confirmed: the previously-enforced SEMANTIC rules
 compression, Monitoring auth-coupling, StateStorage NToSelect/ring ranges, Database
 allowlist) are **not weakened** by Track A+.
 
-- `NConfig::ValidateConfig` is unchanged and remains the SOLE acceptance gate
-  (its verdict is captured-then-rethrown, not altered).
-  `ydb/core/config/validation/` is byte-identical to baseline.
-- The only accept-path A+ addition is the `ValidateAPlus` shadow (additive,
-  log-only, exception-swallowed) — it cannot affect acceptance.
-- The wired A+ component (`ValidateStructuralAPlus`) is proto-transform/STRUCTURAL
-  only; it never calls a semantic validator, so it does not replace the min/max
-  layer. The reified semantic rules (`DurationRule`/`PasswordComplexityRule`/
-  `CompressionRule`) are TEST-ONLY.
+- The validators themselves are unchanged: `ydb/core/config/validation/` is
+  byte-identical to baseline, and `ValidateSemanticAPlus` invokes the REAL
+  `NConfig::ValidateConfig` (or the build's `ConfigSwissKnife` on the database
+  path) per distinct projection — the semantic decision logic is reused, only
+  the enumeration strategy changed (per-section projections instead of every
+  resolved doc).
+- The reified semantic rules (`DurationRule`/`PasswordComplexityRule`/
+  `CompressionRule`) are TEST-ONLY and live in `yaml_config_ut.cpp`.
 
-### ⚠️ Cutover invariant
-"Cutover" in this document refers ONLY to the structural/proto-transform path and,
-separately, to the semantic path AFTER it is complete and shadow-gated. It must
-NEVER be read as removing the semantic gate in `ValidateMainConfig`.
-The semantic A+ engine may replace that gate only once Monitoring is reified and
-StateStorage aggregates are explicitly delegated/fenced, and only after a
-zero-divergence semantic shadow-run — the same discipline used for the structural
-layer.
-
----
-
-## Known intentional divergence classes (bucket these in cutover math)
-
-The zero-divergence cutover criterion must classify `DIVERGED` log lines; the
-following classes are *known and intentional*, not parity bugs, and must not be
-allowed to either block cutover indefinitely or drown out a real divergence:
-
-1. **Incompatibility rules** (A+ over-reject): A+ enumerates rule-pruned label
-   combinations legacy skips — see open item 1.
-2. **Static-section guard** (A+ over-reject): a selector varying a
-   `SelectorStatic` section is rejected by A+ by policy; legacy resolves and
-   may accept — see open item 2.
-3. **Selector-aware DB allowlist** (A+ over-reject, safe direction): A+ catches
-   a disallowed section introduced only by a DB selector, which the legacy
-   base-only check misses (a latent legacy bug, not an A+ one).
-4. **csk-only validators on the DB path** (legacy-only reject): the captured DB
-   gate verdict includes `csk->ValidateConfig` (ConfigSwissKnife); the A+
-   semantic side mirrors `NConfig::ValidateConfig`. Identical in the default
-   build; a deployment installing extra csk validators produces
-   `legacyRejected=1 / aplusRejected=0` lines attributable to this class.
-5. **Null-literal corners** (shadow-log only): `Scalar()` loses quoting, so a
-   quoted `"null"`/`""` top-level value is treated as YAML null by the
-   presence/field-setting views. For message-typed sections the combined
-   verdicts still agree (structural failure on both sides).
-
-Additionally note the combined-verdict comparison is ONE bit per path: a config
-where A+ is simultaneously weaker on one axis and stricter on another logs no
-divergence. The per-axis oracle (`StructuralShadowRun`) remains available for
-offline audits where axis-level attribution is needed.
+### ⚠️ Post-cutover invariants
+- The per-doc oracles (`StructuralShadowRun`, `ValidateStructuralLegacy`,
+  `ValidateSemanticLegacy`) are the LEGACY BEHAVIOR SPEC. The equivalence
+  suites (`YamlConfigStructuralShadow`/`Coercion`/`SemanticAPlus`/
+  `YamlConfigRulePruning`, the per-section completeness oracle) pin A+ against
+  them; deleting the oracles deletes the spec.
+- The static-section guard is load-bearing for semantic soundness (Monitoring
+  reads `monitoring_config` jointly with static `domains_config`). Do NOT
+  relax it without first grouping the coupled pair into a joint projection.
+- No gate validator may read TWO selector-variable sections jointly:
+  `GateValidatorsReadAtMostOneDynamicSection` (declared read-set table) and
+  `EverySectionShadowAgreesWithOracle` (per-section sweep against the oracle)
+  enforce this mechanically; update the table when adding a validator.
 
 ---
 
-## Open items / cutover prerequisites
+## Behavior deltas vs the removed per-doc gate
 
-1. **Incompatibility-rule pruning** in `EnumerateDistinctProjections` /
-   `EnumerateRealizableAssignments` — rules are intentionally ignored (sound
-   over-approximation; rules exist for state-space reduction only, never for
-   deciding what a real node receives). The residue is a benign
-   over-reject-divergence class: a config invalid ONLY under a rule-pruned label
-   combination logs a permanent `DIVERGED` line. Either prune rules whose
-   referenced labels fall entirely inside the involved set (exact, cheap — a
-   prior naive attempt that enumerated ALL rule-referenced labels ballooned the
-   product; avoid that), or bucket this divergence class in the shadow log so it
-   cannot block the zero-divergence criterion.
-2. **Strictness policy:** the static-section guard runs on BOTH the structural
-   and semantic paths (deliberately stricter than legacy). It is the
-   load-bearing reason the per-section semantic decomposition stays not-weaker
-   for cross-section couplings (Monitoring/StateStorage). Do NOT relax it
-   without first grouping marker-coupled section pairs into joint projections.
-3. **Unify console diagnostics:** the DB path still collects unknown fields
-   per-resolved-doc; switch it to `CollectFieldDiagnosticsAPlus` (the main path
-   already behaves equivalently, via an inline `collectBlock` that duplicates
-   the lib function — can adopt the lib API).
-4. **`TFieldRule` semantic engine is TEST-ONLY.** Production semantic validation
-   uses projection + real `ValidateConfig` (`ValidateSemanticAPlus`). Decide
-   whether to keep the `TFieldRule` engine (granular, but hand-mirrored
-   predicates risk divergence) or delete it. Same decision needed for the
-   `SelectorTransformRead` marker chain (`GetTransformReadSectionPaths()` /
-   `TransformReadDynamicSections()`), which currently has no production
-   consumer: either drive the validators' section grouping from it or drop it —
-   dead-but-load-bearing-looking markers are a correctness trap.
-5. **Cutover prerequisites (do NOT skip):** zero-divergence shadow fleet-wide;
-   NEVER remove the legacy gate or the DB allowlist
-   (`NConfig::ValidateDatabaseConfig`) without A+ equivalents wired and shadowed
-   — A+ semantic does not include the DB allowlist
-   (`ValidateDatabaseAllowlistAPlus` is its counterpart and is now folded into
-   the database-path shadow verdict).
-6. **Marker completeness:** if a new `Prepare*` reads a new section, it must be
-   marked Static or TransformRead. `StaticGuardCoversSemanticCoupledSections`
-   pins the known coupled static partners. Still missing: a mechanical check for
-   a NEW validator/`Prepare*` coupling two *dynamic* sections — the per-section
-   projection cannot see that joint state and the guard cannot catch it (today
-   no gate validator does this; the property is audited-not-enforced). Before
-   cutover this needs enforcement (e.g. validators declare their read-sections
-   and CI rejects dynamic×dynamic couplings), not an audit.
+The cutover was direct (no feature flag; rollback = revert the commit). These
+are the deliberate, user-visible differences from the legacy gate:
+
+1. **Static-section variation is now a hard REJECT.** A selector writing under
+   a `SelectorStatic` section (or an ephemeral input key) is rejected by the
+   guard with `selector overrides static section path '...'`. Legacy resolved
+   and sometimes accepted such configs; the variation has no coherent runtime
+   meaning (cluster-wide bootstrap state) and the guard is the precondition
+   for per-section semantic soundness.
+2. **The DB allowlist is selector-aware and presence-based.** A disallowed
+   section introduced ONLY by a database selector is now rejected (the legacy
+   base-only reflection check missed it — the long-standing TODO). Presence
+   mirrors legacy `HasField`/`FieldSize` semantics: YAML-null values and empty
+   sequences do not count, empty mappings do, ephemeral input keys are
+   ignored; error text is byte-identical to the legacy allowlist's.
+3. **Incompatibility rules prune projections exactly like the resolver.**
+   Rules whose referenced labels are all inside the involved set are applied
+   during tuple enumeration (`IsCompatiblePartial`); rules referencing outside
+   labels are skipped (sound over-approximation). Rules remain pure
+   state-space reduction — they never decide what a real node receives.
+4. **First-error text.** Rejections carry the first A+ violation
+   (structural, then guard, then semantic). The message body comes from the
+   REAL validators/converter, so per-validator text is unchanged; the ORDER of
+   first error may differ from the legacy first-resolved-doc order when a
+   config is invalid in several ways at once.
+5. **Known accepted corner:** quoted `"null"`/`""` as a whole-section value is
+   indistinguishable from YAML null in the presence views (`Scalar()` loses
+   quoting). For message-typed sections both engines agree anyway (a string
+   where a mapping is expected fails structurally); TAppConfig has no
+   scalar-typed top-level fields, so no decision changes.
+
+---
+
+## Resolved during cutover (was "Open items")
+
+1. Incompatibility-rule pruning — DONE (`IsCompatiblePartial`, exact for
+   fully-inside rules; tested by `YamlConfigRulePruning`).
+2. Guard strictness — decided: hard error (delta 1 above); relaxing requires
+   grouped joint projections first (see Post-cutover invariants).
+3. Console diagnostics unification — DONE (`CollectFieldDiagnosticsAPlus` on
+   both paths; the inline `collectBlock` duplicate and the per-resolved-doc DB
+   collector are gone).
+4. `TFieldRule` engine — moved into `yaml_config_ut.cpp` (test harness for the
+   enumeration machinery); the `SelectorTransformRead` marker chain — DELETED
+   (the validators project every present section, so the classification
+   carried no information; extension number 82007 is comment-reserved).
+5. DB allowlist coverage — DONE (`ValidateDatabaseAllowlistAPlus` is the
+   blocking allowlist; `csk` is threaded into the semantic pass so extra
+   swiss-knife validators keep gating).
+6. dynamic×dynamic coupling enforcement — DONE mechanically:
+   `GateValidatorsReadAtMostOneDynamicSection` (read-set table) +
+   `EverySectionShadowAgreesWithOracle` (full per-section sweep vs the
+   per-doc oracle).

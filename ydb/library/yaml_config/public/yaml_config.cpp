@@ -804,6 +804,57 @@ bool TIncompatibilityRules::IsCompatible(const TMap<TString, TString>& labels) c
     return true;
 }
 
+bool TIncompatibilityRules::IsCompatiblePartial(
+    const TVector<std::pair<TString, TLabel>>& labels) const
+{
+    for (const auto& [ruleName, rule] : RulesByName) {
+        if (DisabledRules.contains(ruleName)) {
+            continue;
+        }
+
+        // A rule is decidable from this partial tuple only if every pattern's
+        // label is present in it; otherwise skip (sound over-approximation).
+        bool decidable = true;
+        for (const auto& pattern : rule.Patterns) {
+            bool known = false;
+            for (const auto& [name, _] : labels) {
+                if (name == pattern.Name) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                decidable = false;
+                break;
+            }
+        }
+        if (!decidable) {
+            continue;
+        }
+
+        bool allPatternsMatch = true;
+        for (const auto& pattern : rule.Patterns) {
+            bool found = false;
+            for (const auto& [name, label] : labels) {
+                if (pattern.Matches(label, name)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                allPatternsMatch = false;
+                break;
+            }
+        }
+
+        if (allPatternsMatch) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void TIncompatibilityRules::MergeWith(const TIncompatibilityRules& userRules) {
     for (const auto& ruleName : userRules.DisabledRules) {
         DisabledRules.insert(ruleName);
@@ -1312,28 +1363,6 @@ TFieldValueSets ResolveFieldValueSets(NFyaml::TDocument& doc)
     return result;
 }
 
-bool ValidateField(
-    const TFieldValueSets& sets,
-    const TString& path,
-    const std::function<bool(const TString&)>& predicate,
-    TString& failingValue)
-{
-    if (sets.IsFenced(path)) {
-        return true;
-    }
-    auto it = sets.Values.find(path);
-    if (it == sets.Values.end()) {
-        return true;
-    }
-    for (auto& value : it->second) {
-        if (!predicate(value)) {
-            failingValue = value;
-            return false;
-        }
-    }
-    return true;
-}
-
 namespace {
 
 // Per-selector precomputed scalar leaves plus the predicate, in selector order.
@@ -1349,6 +1378,11 @@ struct TSelectorLeaves {
 struct TLabelDomain {
     TString Name;
     TVector<TString> Values;
+    // The domain value standing for "any other value" of an Open label;
+    // empty when the domain has no negative branch. Needed to map a domain
+    // value back to the TLabel type legacy enumeration uses (Negative/Empty/
+    // Common) when evaluating incompatibility rules on a tuple.
+    TString NegativeSentinel;
 };
 
 static TVector<TLabelDomain> BuildDomains(
@@ -1371,14 +1405,28 @@ static TVector<TLabelDomain> BuildDomains(
                     negative += "_";
                 }
                 domain.Values.push_back(negative);
+                domain.NegativeSentinel = negative;
             }
         } else {
             domain.Values.push_back("");
             domain.Values.push_back("\x01__negative__");
+            domain.NegativeSentinel = "\x01__negative__";
         }
         domains.push_back(std::move(domain));
     }
     return domains;
+}
+
+// Maps a domain value back to the TLabel the legacy enumeration would use for
+// it, so incompatibility rules evaluate identically on both paths.
+static TLabel DomainValueToLabel(const TLabelDomain& domain, const TString& value) {
+    if (!domain.NegativeSentinel.empty() && value == domain.NegativeSentinel) {
+        return TLabel{TLabel::EType::Negative, {}};
+    }
+    if (value.empty()) {
+        return TLabel{TLabel::EType::Empty, {}};
+    }
+    return TLabel{TLabel::EType::Common, value};
 }
 
 } // namespace
@@ -1451,14 +1499,20 @@ TVector<TFieldAssignment> EnumerateRealizableAssignments(
         }
     }
 
-    // NOTE: incompatibility rules are intentionally NOT applied here. A rule
-    // referencing labels outside the involved set can never make an involved-
-    // label value unrealizable on its own (some assignment of the other labels
-    // satisfies it), so ignoring rules keeps A+ a SOUND over-approximation
-    // (never a false negative). Enumerating rule-referenced labels to prune the
-    // rare false positive is exponential and is left as a follow-up refinement.
+    // Incompatibility rules whose referenced labels all fall INSIDE the
+    // involved set are applied exactly (IsCompatiblePartial): such a rule
+    // fires identically for every extension of the tuple, so legacy never
+    // materializes the pruned combination -- pruning is exact, not a
+    // heuristic. Rules referencing any outside label are skipped: they cannot
+    // make an involved-label value unrealizable on their own (some assignment
+    // of the other labels satisfies them), so skipping keeps A+ a SOUND
+    // over-approximation (never a false negative) without enumerating the
+    // rule-referenced labels (which is exponential).
     auto namedLabels = CollectLabels(doc);
     auto domains = BuildDomains(involvedLabels, namedLabels);
+    const bool pruneRules = model.IncompatibilityRules.HasRules();
+    TVector<std::pair<TString, TLabel>> currentLabels;
+    currentLabels.reserve(domains.size());
 
     // Enumerate the Cartesian product of ONLY the involved labels' domains --
     // independent of any high-cardinality label the coupled fields do not
@@ -1468,6 +1522,9 @@ TVector<TFieldAssignment> EnumerateRealizableAssignments(
     std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
         [&](size_t offset, TSet<TNamedLabel>& tuple) {
             if (offset == domains.size()) {
+                if (pruneRules && !model.IncompatibilityRules.IsCompatiblePartial(currentLabels)) {
+                    return;
+                }
                 // Ordered fold over the involved selectors that fit, from base.
                 TFieldAssignment assignment;
                 for (auto& p : paths) {
@@ -1509,7 +1566,9 @@ TVector<TFieldAssignment> EnumerateRealizableAssignments(
 
             for (auto& value : domains[offset].Values) {
                 auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                currentLabels.push_back({domains[offset].Name, DomainValueToLabel(domains[offset], value)});
                 recurse(offset + 1, tuple);
+                currentLabels.pop_back();
                 tuple.erase(inserted.first);
             }
         };
@@ -1592,11 +1651,16 @@ void EnumerateDistinctProjections(
         }
     }
 
-    // Incompatibility rules are not applied (sound over-approximation; see
-    // EnumerateRealizableAssignments). At worst this yields an extra projection
-    // for an unrealizable label tuple -- never a missed one.
+    // Incompatibility rules fully inside the involved set are applied exactly;
+    // rules referencing outside labels are skipped (sound over-approximation;
+    // see EnumerateRealizableAssignments). At worst this yields an extra
+    // projection for an unrealizable tuple of OUTSIDE-constrained labels --
+    // never a missed one.
     auto namedLabels = CollectLabels(doc);
     auto domains = BuildDomains(involvedLabels, namedLabels);
+    const bool pruneRules = model.IncompatibilityRules.HasRules();
+    TVector<std::pair<TString, TLabel>> currentLabels;
+    currentLabels.reserve(domains.size());
 
     // Dedup by the firing signature of the involved (section-writing) selectors:
     // only those determine the section content, so exactly one representative
@@ -1617,6 +1681,11 @@ void EnumerateDistinctProjections(
     std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
         [&](size_t offset, TSet<TNamedLabel>& tuple) {
             if (offset == domains.size()) {
+                if (pruneRules && !model.IncompatibilityRules.IsCompatiblePartial(currentLabels)) {
+                    // Legacy never materializes this combination (a rule fully
+                    // inside the involved set forbids it for every extension).
+                    return;
+                }
                 TStringBuilder sig;
                 for (size_t idx : involvedSelectors) {
                     if (Fit(model.Selectors[idx].Selector, tuple)) {
@@ -1646,36 +1715,15 @@ void EnumerateDistinctProjections(
             }
             for (auto& value : domains[offset].Values) {
                 auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                currentLabels.push_back({domains[offset].Name, DomainValueToLabel(domains[offset], value)});
                 recurse(offset + 1, tuple);
+                currentLabels.pop_back();
                 tuple.erase(inserted.first);
             }
         };
 
     TSet<TNamedLabel> tuple;
     recurse(0, tuple);
-}
-
-TVector<TFieldRuleViolation> ValidateFieldRule(
-    NFyaml::TDocument& doc,
-    const TFieldRule& rule,
-    TSet<TString>& fenced)
-{
-    TVector<TFieldRuleViolation> violations;
-
-    auto assignments = EnumerateRealizableAssignments(doc, rule.Paths, fenced);
-    if (!fenced.empty()) {
-        // A coupled path is non-decomposable; the caller must validate it via
-        // per-document enumeration instead.
-        return violations;
-    }
-
-    for (auto& assignment : assignments) {
-        if (auto msg = rule.Check(assignment); msg.has_value()) {
-            violations.push_back(TFieldRuleViolation{*msg, assignment});
-        }
-    }
-
-    return violations;
 }
 
 size_t Hash(const TResolvedConfig& config)
