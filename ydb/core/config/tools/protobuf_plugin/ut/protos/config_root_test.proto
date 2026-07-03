@@ -18,5 +18,7 @@ message ActualConfigMessage {
     optional AdditionalMessage Field1 = 1;
     optional AdditionalMessage Field21 = 21;
     optional string Field201 = 201;
+    optional AdditionalMessage StaticSection = 30 [(NMarkers.SelectorStatic) = true];
+    optional string DynamicField = 31;
     reserved "RootReservedField";
 }

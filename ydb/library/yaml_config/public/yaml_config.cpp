@@ -804,6 +804,57 @@ bool TIncompatibilityRules::IsCompatible(const TMap<TString, TString>& labels) c
     return true;
 }
 
+bool TIncompatibilityRules::IsCompatiblePartial(
+    const TVector<std::pair<TString, TLabel>>& labels) const
+{
+    for (const auto& [ruleName, rule] : RulesByName) {
+        if (DisabledRules.contains(ruleName)) {
+            continue;
+        }
+
+        // A rule is decidable from this partial tuple only if every pattern's
+        // label is present in it; otherwise skip (sound over-approximation).
+        bool decidable = true;
+        for (const auto& pattern : rule.Patterns) {
+            bool known = false;
+            for (const auto& [name, _] : labels) {
+                if (name == pattern.Name) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                decidable = false;
+                break;
+            }
+        }
+        if (!decidable) {
+            continue;
+        }
+
+        bool allPatternsMatch = true;
+        for (const auto& pattern : rule.Patterns) {
+            bool found = false;
+            for (const auto& [name, label] : labels) {
+                if (pattern.Matches(label, name)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                allPatternsMatch = false;
+                break;
+            }
+        }
+
+        if (allPatternsMatch) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void TIncompatibilityRules::MergeWith(const TIncompatibilityRules& userRules) {
     for (const auto& ruleName : userRules.DisabledRules) {
         DisabledRules.insert(ruleName);
@@ -1218,6 +1269,461 @@ void ResolveUniqueDocs(
 
             seenPaths.insert(currentPath);
         });
+}
+
+// ---------------------------------------------------------------------------
+// Track A+ : polynomial, K-independent config validation.
+// ---------------------------------------------------------------------------
+
+// Walks a config subtree collecting scalar leaves into 'leaves' (keyed by a
+// '/'-separated, config-relative path) and recording sequence-valued paths in
+// 'fenced'. Sequences are fenced because under !append they accumulate across
+// selectors and in general cannot be decomposed into an independent per-field
+// value-set.
+//
+// When 'replaceRoots' is non-null (selector-overlay walk), every UNTAGGED child
+// mapping is recorded as a wholesale-replace root: under the merge model
+// (Inherit), an untagged child mapping replaces the entire base subtree at that
+// key, DELETING base sibling leaves it does not restate. Tracking these lets the
+// realizability fold model presence (absence) correctly instead of assuming
+// every base leaf survives. An !inherit child mapping is a deep-merge and is NOT
+// a replace root.
+//
+// Callers pass already alias-resolved documents (see the public entry points),
+// so no NFyaml::ENodeType::Alias nodes reach this walk.
+static void CollectScalarLeaves(
+    NFyaml::TNodeRef node,
+    const TString& path,
+    TMap<TString, TString>& leaves,
+    TSet<TString>& fenced,
+    TSet<TString>* replaceRoots = nullptr)
+{
+    if (!node) {
+        return;
+    }
+    if (node.IsAlias()) {
+        // Expand the alias to its anchored target and walk that (cheap,
+        // per-node -- avoids resolving the whole document). A YAML merge anchor
+        // would otherwise be skipped, omitting its leaves' values.
+        if (auto target = node.ResolveAlias(); target) {
+            CollectScalarLeaves(target, path, leaves, fenced, replaceRoots);
+        }
+        return;
+    }
+    switch (node.Type()) {
+        case NFyaml::ENodeType::Scalar:
+            leaves[path] = node.Scalar();
+            break;
+        case NFyaml::ENodeType::Mapping: {
+            auto map = node.Map();
+            for (auto it = map.begin(); it != map.end(); ++it) {
+                auto childPath = path + "/" + it->Key().Scalar();
+                auto childValue = it->Value();
+                if (replaceRoots && childValue && childValue.Type() == NFyaml::ENodeType::Mapping
+                    && !IsMapInherit(childValue)) {
+                    replaceRoots->insert(childPath);
+                }
+                CollectScalarLeaves(childValue, childPath, leaves, fenced, replaceRoots);
+            }
+            break;
+        }
+        case NFyaml::ENodeType::Sequence:
+            fenced.insert(path);
+            break;
+    }
+}
+
+// True iff 'path' is at or under section prefix 'prefix' (both leading-'/').
+static bool PathUnder(const TString& path, const TString& prefix) {
+    return path == prefix || path.StartsWith(prefix + "/");
+}
+
+TFieldValueSets ResolveFieldValueSets(NFyaml::TDocument& doc)
+{
+    // Aliases are expanded per-node inside CollectScalarLeaves, so no expensive
+    // whole-document Resolve() is needed here.
+    auto model = ParseConfig(doc);
+    TFieldValueSets result;
+
+    auto absorb = [&](NFyaml::TNodeRef root) {
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        CollectScalarLeaves(root, "", leaves, fenced);
+        for (auto& [p, v] : leaves) {
+            result.Values[p].insert(v);
+        }
+        result.FencedPaths.insert(fenced.begin(), fenced.end());
+    };
+
+    absorb(model.Config);
+    for (auto& selector : model.Selectors) {
+        absorb(selector.Config);
+    }
+
+    return result;
+}
+
+namespace {
+
+// Per-selector precomputed scalar leaves plus the predicate, in selector order.
+struct TSelectorLeaves {
+    TMap<TString, TString> Leaves;
+    TSet<TString> Fenced;
+    TSet<TString> ReplaceRoots;
+    const TSelector* Selector;
+};
+
+// Builds the per-involved-label resolution domains, mirroring BuildLabelDomain:
+// all values named anywhere, plus a fresh "negative" sentinel for Open labels.
+struct TLabelDomain {
+    TString Name;
+    TVector<TString> Values;
+    // The domain value standing for "any other value" of an Open label;
+    // empty when the domain has no negative branch. Needed to map a domain
+    // value back to the TLabel type legacy enumeration uses (Negative/Empty/
+    // Common) when evaluating incompatibility rules on a tuple.
+    TString NegativeSentinel;
+};
+
+static TVector<TLabelDomain> BuildDomains(
+    const TSet<TString>& involvedLabels,
+    const TMap<TString, TLabelType>& namedLabels)
+{
+    TVector<TLabelDomain> domains;
+    domains.reserve(involvedLabels.size());
+    for (auto& name : involvedLabels) {
+        TLabelDomain domain;
+        domain.Name = name;
+        auto it = namedLabels.find(name);
+        if (it != namedLabels.end()) {
+            for (auto& v : it->second.Values) {
+                domain.Values.push_back(v);
+            }
+            if (it->second.Class == EYamlConfigLabelTypeClass::Open) {
+                TString negative = "\x01__negative__";
+                while (it->second.Values.contains(negative)) {
+                    negative += "_";
+                }
+                domain.Values.push_back(negative);
+                domain.NegativeSentinel = negative;
+            }
+        } else {
+            domain.Values.push_back("");
+            domain.Values.push_back("\x01__negative__");
+            domain.NegativeSentinel = "\x01__negative__";
+        }
+        domains.push_back(std::move(domain));
+    }
+    return domains;
+}
+
+// Maps a domain value back to the TLabel the legacy enumeration would use for
+// it, so incompatibility rules evaluate identically on both paths.
+static TLabel DomainValueToLabel(const TLabelDomain& domain, const TString& value) {
+    if (!domain.NegativeSentinel.empty() && value == domain.NegativeSentinel) {
+        return TLabel{TLabel::EType::Negative, {}};
+    }
+    if (value.empty()) {
+        return TLabel{TLabel::EType::Empty, {}};
+    }
+    return TLabel{TLabel::EType::Common, value};
+}
+
+} // namespace
+
+// Public: every label referenced by any active incompatibility rule.
+THashSet<TString> TIncompatibilityRules::ReferencedLabels() const {
+    THashSet<TString> result;
+    for (auto& [_, rule] : RulesByName) {
+        for (auto& pattern : rule.Patterns) {
+            result.insert(pattern.Name);
+        }
+    }
+    return result;
+}
+
+TVector<TFieldAssignment> EnumerateRealizableAssignments(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& paths,
+    TSet<TString>& fenced)
+{
+    // Aliases are expanded per-node inside CollectScalarLeaves.
+    auto model = ParseConfig(doc);
+
+    // Base config floor.
+    TMap<TString, TString> baseLeaves;
+    TSet<TString> baseFenced;
+    CollectScalarLeaves(model.Config, "", baseLeaves, baseFenced);
+    for (auto& p : paths) {
+        if (baseFenced.contains(p)) {
+            fenced.insert(p);
+        }
+    }
+
+    // Precompute leaves + wholesale-replace roots of every selector; remember
+    // which selectors actually touch one of the coupled paths (the "involved"
+    // selectors) and which labels those selectors constrain.
+    TVector<TSelectorLeaves> selectorLeaves(model.Selectors.size());
+    TVector<size_t> involvedSelectors;
+    TSet<TString> involvedLabels;
+
+    for (size_t i = 0; i < model.Selectors.size(); ++i) {
+        auto& sl = selectorLeaves[i];
+        sl.Selector = &model.Selectors[i].Selector;
+        CollectScalarLeaves(model.Selectors[i].Config, "", sl.Leaves, sl.Fenced, &sl.ReplaceRoots);
+
+        bool touches = false;
+        for (auto& p : paths) {
+            if (sl.Leaves.contains(p)) {
+                touches = true;
+            }
+            if (sl.Fenced.contains(p)) {
+                fenced.insert(p);
+                touches = true;
+            }
+            // A wholesale replace of an ancestor changes p's presence.
+            for (auto& r : sl.ReplaceRoots) {
+                if (PathUnder(p, r)) {
+                    touches = true;
+                }
+            }
+        }
+        if (touches) {
+            involvedSelectors.push_back(i);
+            for (auto& [name, _] : sl.Selector->In) {
+                involvedLabels.insert(name);
+            }
+            for (auto& [name, _] : sl.Selector->NotIn) {
+                involvedLabels.insert(name);
+            }
+        }
+    }
+
+    // Incompatibility rules whose referenced labels all fall INSIDE the
+    // involved set are applied exactly (IsCompatiblePartial): such a rule
+    // fires identically for every extension of the tuple, so legacy never
+    // materializes the pruned combination -- pruning is exact, not a
+    // heuristic. Rules referencing any outside label are skipped: they cannot
+    // make an involved-label value unrealizable on their own (some assignment
+    // of the other labels satisfies them), so skipping keeps A+ a SOUND
+    // over-approximation (never a false negative) without enumerating the
+    // rule-referenced labels (which is exponential).
+    auto namedLabels = CollectLabels(doc);
+    auto domains = BuildDomains(involvedLabels, namedLabels);
+    const bool pruneRules = model.IncompatibilityRules.HasRules();
+    TVector<std::pair<TString, TLabel>> currentLabels;
+    currentLabels.reserve(domains.size());
+
+    // Enumerate the Cartesian product of ONLY the involved labels' domains --
+    // independent of any high-cardinality label the coupled fields do not
+    // depend on. This is the source of K-independence.
+    TSet<TFieldAssignment> distinct;
+
+    std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
+        [&](size_t offset, TSet<TNamedLabel>& tuple) {
+            if (offset == domains.size()) {
+                if (pruneRules && !model.IncompatibilityRules.IsCompatiblePartial(currentLabels)) {
+                    return;
+                }
+                // Ordered fold over the involved selectors that fit, from base.
+                TFieldAssignment assignment;
+                for (auto& p : paths) {
+                    if (fenced.contains(p)) {
+                        continue;
+                    }
+                    if (auto it = baseLeaves.find(p); it != baseLeaves.end()) {
+                        assignment[p] = it->second;
+                    } else {
+                        assignment[p] = std::nullopt;
+                    }
+                }
+                for (size_t idx : involvedSelectors) {
+                    auto& sl = selectorLeaves[idx];
+                    if (!Fit(*sl.Selector, tuple)) {
+                        continue;
+                    }
+                    for (auto& p : paths) {
+                        if (fenced.contains(p)) {
+                            continue;
+                        }
+                        if (auto it = sl.Leaves.find(p); it != sl.Leaves.end()) {
+                            assignment[p] = it->second;
+                            continue;
+                        }
+                        // Not restated by this selector: if it wholesale-replaces
+                        // an ancestor of p, p becomes absent under this tuple.
+                        for (auto& r : sl.ReplaceRoots) {
+                            if (PathUnder(p, r)) {
+                                assignment[p] = std::nullopt;
+                                break;
+                            }
+                        }
+                    }
+                }
+                distinct.insert(std::move(assignment));
+                return;
+            }
+
+            for (auto& value : domains[offset].Values) {
+                auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                currentLabels.push_back({domains[offset].Name, DomainValueToLabel(domains[offset], value)});
+                recurse(offset + 1, tuple);
+                currentLabels.pop_back();
+                tuple.erase(inserted.first);
+            }
+        };
+
+    TSet<TNamedLabel> tuple;
+    recurse(0, tuple);
+
+    return TVector<TFieldAssignment>(distinct.begin(), distinct.end());
+}
+
+TVector<TString> SelectorWritesUnder(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& staticPrefixes)
+{
+    auto resolved = doc.Clone();
+    resolved.Resolve();
+    auto model = ParseConfig(resolved);
+
+    TSet<TString> hits;
+    for (auto& selector : model.Selectors) {
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        TSet<TString> replaceRoots;
+        CollectScalarLeaves(selector.Config, "", leaves, fenced, &replaceRoots);
+
+        auto consider = [&](const TString& written) {
+            for (auto& prefix : staticPrefixes) {
+                if (PathUnder(written, prefix)) {
+                    hits.insert(written);
+                }
+            }
+        };
+        for (auto& [p, _] : leaves) {
+            consider(p);
+        }
+        for (auto& p : fenced) {
+            consider(p);
+        }
+        for (auto& p : replaceRoots) {
+            consider(p);
+        }
+    }
+    return TVector<TString>(hits.begin(), hits.end());
+}
+
+void EnumerateDistinctProjections(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& sectionPrefixes,
+    const std::function<void(NFyaml::TNodeRef)>& onProjection)
+{
+    auto model = ParseConfig(doc);
+
+    // Involved selectors (by index) = those whose overlay writes under a
+    // requested section, plus the labels they constrain.
+    TVector<size_t> involvedSelectors;
+    TSet<TString> involvedLabels;
+    for (size_t i = 0; i < model.Selectors.size(); ++i) {
+        auto& selector = model.Selectors[i];
+        TMap<TString, TString> leaves;
+        TSet<TString> fenced;
+        TSet<TString> replaceRoots;
+        CollectScalarLeaves(selector.Config, "", leaves, fenced, &replaceRoots);
+
+        bool touches = false;
+        auto consider = [&](const TString& written) {
+            for (auto& prefix : sectionPrefixes) {
+                if (PathUnder(written, prefix) || PathUnder(prefix, written)) {
+                    touches = true;
+                }
+            }
+        };
+        for (auto& [p, _] : leaves) { consider(p); }
+        for (auto& p : fenced) { consider(p); }
+        for (auto& p : replaceRoots) { consider(p); }
+
+        if (touches) {
+            involvedSelectors.push_back(i);
+            for (auto& [name, _] : selector.Selector.In) { involvedLabels.insert(name); }
+            for (auto& [name, _] : selector.Selector.NotIn) { involvedLabels.insert(name); }
+        }
+    }
+
+    // Incompatibility rules fully inside the involved set are applied exactly;
+    // rules referencing outside labels are skipped (sound over-approximation;
+    // see EnumerateRealizableAssignments). At worst this yields an extra
+    // projection for an unrealizable tuple of OUTSIDE-constrained labels --
+    // never a missed one.
+    auto namedLabels = CollectLabels(doc);
+    auto domains = BuildDomains(involvedLabels, namedLabels);
+    const bool pruneRules = model.IncompatibilityRules.HasRules();
+    TVector<std::pair<TString, TLabel>> currentLabels;
+    currentLabels.reserve(domains.size());
+
+    // Dedup by the firing signature of the involved (section-writing) selectors:
+    // only those determine the section content, so exactly one representative
+    // per signature is resolved. The (relatively expensive) resolution runs
+    // #distinct-signatures times -- never once per label tuple.
+    THashSet<TString> seenSig;
+
+    // A document holding ONLY the base config. Each projection clones THIS (cost
+    // O(base config)) instead of the whole input document (cost O(base + all K
+    // selectors)) and applies overlays copied straight from the once-parsed
+    // `model` -- so we never re-Clone the selector list nor re-ParseConfig it per
+    // projection. This is the same cross-document Copy trick ResolveUniqueDocs
+    // uses (see its inner loop), and turns the per-section rebuild from
+    // O(#projections * whole-doc) into O(#projections * base-config).
+    auto baseConfigDoc = NFyaml::TDocument::Parse("{}");
+    baseConfigDoc.SetRoot(model.Config.Copy(baseConfigDoc));
+
+    std::function<void(size_t, TSet<TNamedLabel>&)> recurse =
+        [&](size_t offset, TSet<TNamedLabel>& tuple) {
+            if (offset == domains.size()) {
+                if (pruneRules && !model.IncompatibilityRules.IsCompatiblePartial(currentLabels)) {
+                    // Legacy never materializes this combination (a rule fully
+                    // inside the involved set forbids it for every extension).
+                    return;
+                }
+                TStringBuilder sig;
+                for (size_t idx : involvedSelectors) {
+                    if (Fit(model.Selectors[idx].Selector, tuple)) {
+                        sig << idx << ",";
+                    }
+                }
+                if (!seenSig.insert(TString(sig)).second) {
+                    return;
+                }
+                // Build the representative resolved config WITHOUT the expensive
+                // whole-document Resolve(): clone the base config, apply every
+                // fitting selector's overlay in order, strip tags -- mirroring
+                // ResolveUniqueDocs. Overlays are copied from the original `model`
+                // (parsed once) into the projection doc, so no per-projection
+                // re-parse of the selector list happens.
+                auto projDoc = baseConfigDoc.Clone();
+                auto config = projDoc.Root();
+                for (size_t i = 0; i < model.Selectors.size(); ++i) {
+                    if (Fit(model.Selectors[i].Selector, tuple)) {
+                        auto overlay = model.Selectors[i].Config.Copy(projDoc);
+                        Apply(config, overlay);
+                    }
+                }
+                RemoveTags(projDoc);
+                onProjection(config);
+                return;
+            }
+            for (auto& value : domains[offset].Values) {
+                auto inserted = tuple.insert(TNamedLabel{domains[offset].Name, value, false});
+                currentLabels.push_back({domains[offset].Name, DomainValueToLabel(domains[offset], value)});
+                recurse(offset + 1, tuple);
+                currentLabels.pop_back();
+                tuple.erase(inserted.first);
+            }
+        };
+
+    TSet<TNamedLabel> tuple;
+    recurse(0, tuple);
 }
 
 size_t Hash(const TResolvedConfig& config)

@@ -7,7 +7,6 @@
 #include "http.h"
 
 #include <ydb/core/cms/console/validators/registry.h>
-#include <ydb/core/config/validation/validators.h>
 #include <ydb/core/base/feature_flags.h>
 
 #include <ydb/library/yaml_config/yaml_config.h>
@@ -116,62 +115,30 @@ void TConfigsManager::ValidateMainConfig(TUpdateConfigOpContext& opCtx) {
 
             auto tree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
 
-            // Collect unknown/deprecated fields per editable location so the UI can point at
-            // (and tint the parents of) the exact place a field lives in the document, including
-            // fields nested inside selector_config entries. Paths mirror the editable YAML:
-            // "/config/..." for the base config and "/selector_config/<i>/config/..." for the
-            // i-th selector. This is best-effort and must never reject a config -- acceptance is
-            // decided solely by the resolved-doc validation below.
-            const auto& deprecatedPaths = NKikimrConfig::TAppConfig::GetReservedChildrenPaths();
-            auto collectBlock = [&](const NFyaml::TNodeRef& configNode, const TString& prefix) {
-                auto collector = MakeSimpleShared<NYamlConfig::TBasicUnknownFieldsCollector>(prefix);
-                try {
-                    NYamlConfig::YamlToProto(configNode, true, true, collector);
-                } catch (const std::exception&) {
-                    // A partial selector fragment may not transform standalone; ignore.
-                }
-                for (const auto& [path, info] : collector->GetUnknownKeys()) {
-                    // Reserved (deprecated) paths are config-content-relative; strip the
-                    // location prefix ("/<prefix>") before matching.
-                    const TString leafPath = path.substr(prefix.size() + 1);
-                    if (deprecatedPaths.contains(leafPath)) {
-                        opCtx.DeprecatedFields[path] = info;
-                    } else {
-                        opCtx.UnknownFields[path] = info;
-                    }
-                }
-            };
-
-            try {
-                auto root = tree.Root().Map();
-                if (root.Has("config")) {
-                    collectBlock(root.at("config"), "config");
-                }
-                if (root.Has("selector_config")) {
-                    auto selectors = root.at("selector_config").Sequence();
-                    for (size_t i = 0; i < selectors.size(); ++i) {
-                        auto item = selectors.at(static_cast<int>(i)).Map();
-                        if (item.Has("config")) {
-                            collectBlock(item.at("config"),
-                                TStringBuilder() << "selector_config/" << i << "/config");
-                        }
-                    }
-                }
-            } catch (const std::exception&) {
-                // Best-effort field collection; never blocks config acceptance.
+            // Collect unknown/deprecated fields per editable location so the UI
+            // can point at the exact place a field lives in the document,
+            // including fields nested inside selector_config entries. Paths
+            // mirror the editable YAML: "config/..." for the base config and
+            // "selector_config/<i>/config/..." for the i-th selector.
+            // Best-effort and K-independent; never rejects a config.
+            {
+                auto diagnostics = NYamlConfig::CollectFieldDiagnosticsAPlus(tree, /*allowUnknown*/ true);
+                opCtx.UnknownFields = std::move(diagnostics.UnknownFields);
+                opCtx.DeprecatedFields = std::move(diagnostics.DeprecatedFields);
             }
 
-            // Validate the fully resolved configuration. This decides accept/reject.
-            std::vector<TString> errors;
-            NYamlConfig::ResolveUniqueDocs(
-                tree,
-                [&](NYamlConfig::TDocumentConfig&& config) {
-                    auto cfg = NYamlConfig::YamlToProto(config.second, true, true);
-                    NKikimr::NConfig::EValidationResult result = NKikimr::NConfig::ValidateConfig(cfg, errors);
-                    if (result == NKikimr::NConfig::EValidationResult::Error) {
-                        ythrow yexception() << errors.front();
-                    }
-                });
+            // Track A+ accept gate: K-independent (additive per section)
+            // validation of the whole label space -- structural proto
+            // transform, static-section guard and semantic validators over
+            // every distinct per-section projection. This decides
+            // accept/reject; there is no per-resolved-doc validation anymore
+            // (the O(K) legacy path was removed after the shadow-run
+            // migration window; StructuralShadowRun remains available as a
+            // test-only oracle).
+            auto verdict = NYamlConfig::ValidateAPlus(tree, /*allowUnknown*/ true);
+            if (verdict.Rejected) {
+                ythrow yexception() << verdict.FirstViolation();
+            }
         }
     } catch (const yexception &e) {
         opCtx.Error = e.what();
@@ -230,57 +197,45 @@ void TConfigsManager::ValidateDatabaseConfig(TUpdateDatabaseConfigOpContext& opC
             }
 
             auto databaseTree = NFyaml::TDocument::Parse(opCtx.UpdatedConfig);
-            auto databaseConfig = NYamlConfig::ParseConfig(databaseTree);
 
-            TSimpleSharedPtr<NYamlConfig::TBasicUnknownFieldsCollector> unknownFieldsCollector = new NYamlConfig::TBasicUnknownFieldsCollector;
-
-            auto databaseCfg = NYamlConfig::YamlToProto(
-                databaseConfig.Config,
-                true,
-                false,
-                unknownFieldsCollector);
-
-            std::vector<TString> errors;
-            NKikimr::NConfig::EValidationResult result = NKikimr::NConfig::ValidateDatabaseConfig(databaseCfg, errors);
-            if (result == NKikimr::NConfig::EValidationResult::Error) {
-                ythrow yexception() << errors.front();
+            // Track A+ database allowlist: K-independent, presence-based and
+            // selector-aware -- unlike the old base-only reflection check it
+            // also rejects a disallowed section introduced by a database
+            // selector overlay (the long-standing TODO on this path). Runs
+            // first, mirroring the old gate's allowlist-before-merge order.
+            {
+                auto allowlistViolations = NYamlConfig::ValidateDatabaseAllowlistAPlus(databaseTree);
+                if (!allowlistViolations.empty()) {
+                    ythrow yexception() << allowlistViolations.front().Message;
+                }
             }
 
-            // TODO: validate databaseConfig.AllowedLabels & databaseConfig.Selectors too
-
+            // Track A+ accept gate over the merged (main + database) config:
+            // same K-independent structural + guard + semantic surface as the
+            // main path. The database gate validates resolved configs through
+            // the ConfigSwissKnife, so the A+ semantic pass must run the SAME
+            // validator set.
             auto tree = NFyaml::TDocument::Parse(MainYamlConfig);
             NYamlConfig::AppendDatabaseConfig(tree, databaseTree);
-            errors.clear();
 
-            auto* csk = AppData()->ConfigSwissKnife;
+            auto verdict = NYamlConfig::ValidateAPlus(tree, /*allowUnknown*/ true, AppData()->ConfigSwissKnife);
+            if (verdict.Rejected) {
+                ythrow yexception() << verdict.FirstViolation();
+            }
 
-            NYamlConfig::ResolveUniqueDocs(
-                tree,
-                [&](NYamlConfig::TDocumentConfig&& config) {
-                    auto cfg = NYamlConfig::YamlToProto(
-                        config.second,
-                        true,
-                        true,
-                        unknownFieldsCollector);
-                    if (csk) {
-                        auto result = csk->ValidateConfig(cfg, errors);
-                        if (result == NYamlConfig::EValidationResult::Error) {
-                            ythrow yexception() << errors.front();
-                        }
-                    }
-                });
-
-            const auto& deprecatedPaths = NKikimrConfig::TAppConfig::GetReservedChildrenPaths();
-
-            for (const auto& [path, info] : unknownFieldsCollector->GetUnknownKeys()) {
-                if (deprecatedPaths.contains(path)) {
-                    opCtx.DeprecatedFields[path] = info;
-                } else {
-                    opCtx.UnknownFields[path] = info;
-                }
+            // Unknown/deprecated field diagnostics over the merged document,
+            // K-independent (per editable block), best-effort.
+            {
+                auto diagnostics = NYamlConfig::CollectFieldDiagnosticsAPlus(tree, /*allowUnknown*/ true);
+                opCtx.UnknownFields = std::move(diagnostics.UnknownFields);
+                opCtx.DeprecatedFields = std::move(diagnostics.DeprecatedFields);
             }
         }
     } catch (const yexception &e) {
+        opCtx.Error = e.what();
+    } catch (const std::exception& e) {
+        // The caller runs outside any exception guard; a non-yexception
+        // failure must become an error response, not escape the tablet.
         opCtx.Error = e.what();
     }
 }
