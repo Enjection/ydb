@@ -135,7 +135,7 @@ public:
         Y_ABORT_UNLESS(txState->Shards.size());
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             auto idx = txState->Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             auto event = context.SS->MakeDataShardProposal(txState->TargetPathId, OperationId, txBody, context.Ctx);
             context.OnComplete.BindMsgToPipe(OperationId, datashardId, idx, event.Release());
@@ -590,9 +590,9 @@ public:
             context.DbChanges.PersistShard(shardIdx);
 
             Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::DropParts);
+            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::DropParts);
 
-            context.SS->ShardInfos[shardIdx].CurrentTxId = OperationId.GetTxId();
+            context.SS->ShardInfos.at(shardIdx).CurrentTxId = OperationId.GetTxId();
         }
 
         path.Base()->PathState = TPathElement::EPathState::EPathStateDrop;

@@ -28,9 +28,9 @@ void PrepareScheme(NKikimrSchemeOp::TTableDescription* schema, const TString& na
 }
 
 void FillSrcSnapshot(const TTxState* const txState, ui64 dstDatashardId, NKikimrTxDataShard::TSendSnapshot& snapshot) {
-    snapshot.SetTableId_Deprecated(txState->SourcePathId.LocalPathId);
-    snapshot.MutableTableId()->SetOwnerId(txState->SourcePathId.OwnerId);
-    snapshot.MutableTableId()->SetTableId(txState->SourcePathId.LocalPathId);
+    snapshot.SetTableId_Deprecated(txState->SourcePathId.Get().LocalPathId);
+    snapshot.MutableTableId()->SetOwnerId(txState->SourcePathId.Get().OwnerId);
+    snapshot.MutableTableId()->SetTableId(txState->SourcePathId.Get().LocalPathId);
     snapshot.AddSendTo()->SetShard(dstDatashardId);
 }
 
@@ -85,10 +85,10 @@ public:
 
         for (ui32 i = 0; i < dstTableInfo->GetPartitions().size(); ++i) {
             TShardIdx srcShardIdx = srcTableInfo->GetPartitions()[i]->ShardIdx;
-            TTabletId srcDatashardId = context.SS->ShardInfos[srcShardIdx].TabletID;
+            TTabletId srcDatashardId = context.SS->ShardInfos.at(srcShardIdx).TabletID;
 
             TShardIdx dstShardIdx = dstTableInfo->GetPartitions()[i]->ShardIdx;
-            TTabletId dstDatashardId = context.SS->ShardInfos[dstShardIdx].TabletID;
+            TTabletId dstDatashardId = context.SS->ShardInfos.at(dstShardIdx).TabletID;
 
             auto seqNo = context.SS->StartRound(*txState);
 
@@ -105,9 +105,9 @@ public:
             NKikimrTxDataShard::TFlatSchemeTransaction newShardTx;
             context.SS->FillSeqNo(newShardTx, seqNo);
             context.SS->FillTableDescription(txState->TargetPathId, i, dstSchemaVersion, newShardTx.MutableCreateTable());
-            newShardTx.MutableReceiveSnapshot()->SetTableId_Deprecated(txState->TargetPathId.LocalPathId);
-            newShardTx.MutableReceiveSnapshot()->MutableTableId()->SetOwnerId(txState->TargetPathId.OwnerId);
-            newShardTx.MutableReceiveSnapshot()->MutableTableId()->SetTableId(txState->TargetPathId.LocalPathId);
+            newShardTx.MutableReceiveSnapshot()->SetTableId_Deprecated(txState->TargetPathId.Get().LocalPathId);
+            newShardTx.MutableReceiveSnapshot()->MutableTableId()->SetOwnerId(txState->TargetPathId.Get().OwnerId);
+            newShardTx.MutableReceiveSnapshot()->MutableTableId()->SetTableId(txState->TargetPathId.Get().LocalPathId);
             newShardTx.MutableReceiveSnapshot()->AddReceiveFrom()->SetShard(ui64(srcDatashardId));
 
             auto dstEvent = context.SS->MakeDataShardProposal(txState->TargetPathId, OperationId, newShardTx.SerializeAsString(), context.Ctx);
@@ -151,7 +151,7 @@ public:
 
                 if (hasDrop) {
                     auto& dropNotice = *combined.MutableDropCdcStreamNotice();
-                    txState->SourcePathId.ToProto(dropNotice.MutablePathId());
+                    txState->SourcePathId.Get().ToProto(dropNotice.MutablePathId());
                     dropNotice.SetTableSchemaVersion(coordVersion);
 
                     for (const auto& id : streamsToDrop) {

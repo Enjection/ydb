@@ -438,7 +438,7 @@ public:
         ui64 checkShardsToCreate = 0;
         for (auto shard : txState.Shards) {
             if (shard.Operation == TTxState::CreateParts) {
-                TShardInfo& shardInfo = context.SS->ShardInfos[shard.Idx];
+                TShardInfo& shardInfo = context.SS->ShardInfos.at(shard.Idx);
                 context.SS->PersistShardMapping(db, shard.Idx, shardInfo.TabletID, item->PathId, operationId.GetTxId(), shard.TabletType);
                 switch (shard.TabletType) {
                     case ETabletType::PersQueueReadBalancer:
@@ -523,7 +523,7 @@ public:
         // reconfig old shards
         for (auto& shard : pqGroup->Shards) {
             auto shardIdx = shard.first;
-            auto& shardInfo = context.SS->ShardInfos[shardIdx];
+            auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
 
             if (IsShardRequiresRecreation(shardInfo, defaultShardInfo)) {
                 txState.Shards.emplace_back(shardIdx, ETabletType::PersQueue, TTxState::CreateParts);

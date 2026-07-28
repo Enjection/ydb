@@ -188,7 +188,7 @@ public:
 
             txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, txState.State);
 
-            context.SS->ShardInfos[shardIdx].CurrentTxId = OperationId.GetTxId();
+            context.SS->ShardInfos.at(shardIdx).CurrentTxId = OperationId.GetTxId();
             context.SS->PersistShardTx(db, shardIdx, OperationId.GetTxId());
         }
 

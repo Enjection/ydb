@@ -105,7 +105,7 @@ public:
         for (ui32 i = 0; i < splitDescr.DestinationRangesSize(); ++i) {
             auto* rangeDescr = splitDescr.MutableDestinationRanges()->Mutable(i);
             auto shardIdx = context.SS->MakeLocalId(TLocalShardIdx(rangeDescr->GetShardIdx()));
-            auto datashardId = context.SS->ShardInfos[shardIdx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(shardIdx).TabletID;
             rangeDescr->SetTabletID(ui64(datashardId));
             dstTabletToRangeIdx[datashardId] = i;
         }
@@ -131,7 +131,7 @@ public:
                 continue;
             }
 
-            TTabletId datashardId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId datashardId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "Initializing scheme "
@@ -373,7 +373,7 @@ public:
             if (shard.Operation != TTxState::TransferData)
                 continue;
 
-            auto datashardId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         DebugHint() << " Starting split on src datashard " << datashardId
@@ -488,7 +488,7 @@ public:
                 continue;
             }
 
-            auto datashardId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             needToNotifySrc = true;
             LOG_DEBUG(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
@@ -583,8 +583,8 @@ public:
                 auto shardIdxPrev = tableInfo->GetPartitions()[piPrev]->ShardIdx;
 
                 errStr = TStringBuilder()
-                    << "Partitions are not consecutive at index " << i << " : #" << piPrev << "(" << context.SS->ShardInfos[shardIdxPrev].TabletID << ")"
-                    << " then #" << pi << "(" << context.SS->ShardInfos[shardIdx].TabletID << ")";
+                    << "Partitions are not consecutive at index " << i << " : #" << piPrev << "(" << context.SS->ShardInfos.at(shardIdxPrev).TabletID << ")"
+                    << " then #" << pi << "(" << context.SS->ShardInfos.at(shardIdx).TabletID << ")";
                 return false;
             }
         }
@@ -613,7 +613,7 @@ public:
             auto* srcRange = op.SplitDescription->AddSourceRanges();
             auto shardIdx = tableInfo->GetPartitions()[pi]->ShardIdx;
             srcRange->SetShardIdx(ui64(shardIdx.GetLocalId()));
-            srcRange->SetTabletID(ui64(context.SS->ShardInfos[shardIdx].TabletID));
+            srcRange->SetTabletID(ui64(context.SS->ShardInfos.at(shardIdx).TabletID));
             srcRange->SetKeyRangeBegin(prevRangeEnd);
             TString rangeEnd = tableInfo->GetPartitions()[pi]->EndOfRange;
             srcRange->SetKeyRangeEnd(rangeEnd);
@@ -693,7 +693,7 @@ public:
         op.SplitDescription = std::make_shared<NKikimrTxDataShard::TSplitMergeDescription>();
         auto* srcRange = op.SplitDescription->AddSourceRanges();
         srcRange->SetShardIdx(ui64(srcShardIdx.GetLocalId()));
-        srcRange->SetTabletID(ui64(context.SS->ShardInfos[srcShardIdx].TabletID));
+        srcRange->SetTabletID(ui64(context.SS->ShardInfos.at(srcShardIdx).TabletID));
         srcRange->SetKeyRangeEnd(tableInfo->GetPartitions()[srcPartitionIdx]->EndOfRange);
 
         // Check that ranges are sorted in ascending order
@@ -780,7 +780,7 @@ public:
             auto* srcRange = op.SplitDescription->AddSourceRanges();
             auto shardIdx = tableInfo->GetPartitions()[pi]->ShardIdx;
             srcRange->SetShardIdx(ui64(shardIdx.GetLocalId()));
-            srcRange->SetTabletID(ui64(context.SS->ShardInfos[shardIdx].TabletID));
+            srcRange->SetTabletID(ui64(context.SS->ShardInfos.at(shardIdx).TabletID));
             srcRange->SetKeyRangeBegin(prevRangeEnd);
             TString rangeEnd = tableInfo->GetPartitions()[pi]->EndOfRange;
             srcRange->SetKeyRangeEnd(rangeEnd);
@@ -1034,10 +1034,9 @@ public:
             }
         }
 
-        TTxState op;
-
-        op.TxType = TTxState::TxSplitTablePartition;
-        op.TargetPathId = path.Base()->PathId;
+        // This is a scratch state and owns no path references until CreateTx moves the
+        // complete value into TxInFlight below.
+        TTxState op(TTxState::TxSplitTablePartition, path->PathId);
         op.State = TTxState::CreateParts;
 
         // Fill Src shards for tx
@@ -1087,16 +1086,16 @@ public:
 
         mutableTableInfo->RegisterSplitMergeOp(OperationId, op);
 
-        auto& txState = context.SS->CreateTx(OperationId, TTxState::TxSplitTablePartition, path->PathId);
-        txState = std::move(op);
-        txState.AcquirePathRefs(context.SS);
+        // Move the whole scratch state so newly added TTxState fields cannot be silently
+        // omitted here. TxInFlight acquires its path references after insertion.
+        auto& txState = context.SS->CreateTx(OperationId, std::move(op));
         context.OnComplete.ActivateTx(OperationId);
 
         for (const auto& shard : txState.Shards) {
             Y_ABORT_UNLESS(shard.Operation == TTxState::TransferData || shard.Operation == TTxState::CreateParts);
             // Add new (DST) shards to the list of all shards and update LastTxId for the old (SRC) shards
             Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shard.Idx));
-            TShardInfo& shardInfo = context.SS->ShardInfos[shard.Idx];
+            TShardInfo& shardInfo = context.SS->ShardInfos.at(shard.Idx);
             shardInfo.CurrentTxId = OperationId.GetTxId();
 
             if (shard.Operation == TTxState::CreateParts) {
@@ -1155,7 +1154,7 @@ public:
                 // Src shard: restore CurrentTxId to InvalidTxId so the shard is
                 // no longer considered "under operation".
                 Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shard.Idx));
-                context.SS->ShardInfos[shard.Idx].CurrentTxId = InvalidTxId;
+                context.SS->ShardInfos.at(shard.Idx).CurrentTxId = InvalidTxId;
             }
             // Dst shards (CreateParts): leave everything as-is; TTxDeleteTabletReply
             // will clean up InternalShards, ShardsInside, and ShardInfos entries.

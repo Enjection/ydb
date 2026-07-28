@@ -30,7 +30,7 @@ void PrepareChanges(TOperationId operationId,
         TTabletId tabletId = kesus->KesusTabletId;
 
         Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shardIdx));
-        auto& shardInfo = context.SS->ShardInfos[shardIdx];
+        auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
         Y_ABORT_UNLESS(shardInfo.TabletID == tabletId);
         txState.Shards.emplace_back(shardIdx, ETabletType::Kesus, TTxState::ConfigureParts);
         shardInfo.CurrentTxId = operationId.GetTxId();
@@ -127,7 +127,7 @@ public:
         Y_ABORT_UNLESS(txState->Shards.size() == 1);
         for (auto shard : txState->Shards) {
             auto shardIdx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::Kesus);
 
             auto event = MakeHolder<NKesus::TEvKesus::TEvSetConfig>(ui64(OperationId.GetTxId()), *kesus->AlterConfig, kesus->AlterVersion);

@@ -38,7 +38,7 @@ public:
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxMkDir);
 
-        auto pathId = txState->TargetPathId;
+        TPathId pathId = txState->TargetPathId;
         auto path = TPath::Init(pathId, context.SS);
 
         context.SS->TabletCounters->Simple()[COUNTER_DIR_COUNT].Add(1);

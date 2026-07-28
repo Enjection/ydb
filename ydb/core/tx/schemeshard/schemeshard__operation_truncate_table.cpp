@@ -67,7 +67,7 @@ public:
         Y_ABORT_UNLESS(txState->Shards.size());
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             auto idx = txState->Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             TPathId targetPathId = txState->TargetPathId;
 
@@ -296,7 +296,7 @@ public:
                 context.MemChanges.GrabShard(context.SS, shardIdx);
                 context.DbChanges.PersistShard(shardIdx);
 
-                TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
+                TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
                 txState.Shards.emplace_back(shardIdx, ETabletType::DataShard, TTxState::ConfigureParts);
                 shardInfo.CurrentTxId = OperationId.GetTxId();
             }

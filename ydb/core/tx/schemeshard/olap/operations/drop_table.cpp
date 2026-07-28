@@ -61,7 +61,7 @@ public:
         for (auto& shard : txState->Shards) {
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::ColumnShard);
 
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             {
                 auto event = std::make_unique<TEvColumnShard::TEvProposeTransaction>(
@@ -236,7 +236,7 @@ public:
         for (auto& shard : txState->Shards) {
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::ColumnShard);
 
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));
 
             context.OnComplete.BindMsgToPipe(OperationId, tabletId, shard.Idx, event.release());
@@ -264,7 +264,7 @@ private:
     }
 
     std::optional<TPathId> FindNewShardOwner(TOperationContext& context, const TTxState& txState) const {
-        const auto targetPathId = txState.TargetPathId;
+        const TPathId targetPathId = txState.TargetPathId;
         for (const auto& shard : txState.Shards) {
             const auto shardIdx = shard.Idx;
             const auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
@@ -282,17 +282,14 @@ private:
     void TransferShardOwnership(TOperationContext& context, NIceDb::TNiceDb& db,
                                 const TShardIdx& shardIdx, const TPathId& targetPathId,
                                 const TPathId& newOwner) {
-        auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
         auto sharedIt = context.SS->SharedShards.find(shardIdx);
         AFL_VERIFY(sharedIt != context.SS->SharedShards.end());
         AFL_VERIFY(sharedIt->second.contains(newOwner));
 
-        shardInfo.PathId = newOwner;
+        context.SS->ShardInfos.ReassignPath(shardIdx, newOwner);
         context.SS->PersistShardPathId(db, shardIdx, newOwner);
         context.SS->PathsById.at(newOwner)->IncShardsInside();
         context.SS->PathsById.at(targetPathId)->DecShardsInside();
-        context.SS->IncrementPathDbRefCount(newOwner);
-        context.SS->DecrementPathDbRefCount(targetPathId);
         RemoveSharedShard(context, shardIdx, newOwner);
     }
 
@@ -330,7 +327,7 @@ private:
         }
 
         context.SS->PersistColumnTableRemove(db, txState->TargetPathId, context.Ctx);
-        const auto targetPathId = txState->TargetPathId;
+        const TPathId targetPathId = txState->TargetPathId;
         if (isStandalone) {
             const auto newOwner = FindNewShardOwner(context, *txState);
             for (auto& shard : txState->Shards) {
@@ -462,9 +459,9 @@ public:
             NIceDb::TNiceDb db(context.GetDB());
             for (auto shardIdx : tableInfo->BuildOwnedColumnShardsVerified()) {
                 Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::DropParts);
+                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::DropParts);
 
-                auto& shardInfo = context.SS->ShardInfos[shardIdx];
+                auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
                 if (shardInfo.PathId == path.Base()->PathId) {
                     // We are the owner of this shard - set LastTxId on the shard itself
                     shardInfo.CurrentTxId = opTxId;
@@ -519,9 +516,9 @@ public:
                 auto shardIdx = context.SS->TabletIdToShardIdx.at(tabletId);
 
                 Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::DropParts);
+                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::DropParts);
 
-                context.SS->ShardInfos[shardIdx].CurrentTxId = opTxId;
+                context.SS->ShardInfos.at(shardIdx).CurrentTxId = opTxId;
                 context.SS->PersistShardTx(db, shardIdx, opTxId);
             }
         }

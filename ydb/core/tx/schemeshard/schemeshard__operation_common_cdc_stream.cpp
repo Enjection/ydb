@@ -91,7 +91,7 @@ bool TConfigurePartsAtTable::ProgressState(TOperationContext& context) {
 
     for (ui32 i = 0; i < txState->Shards.size(); ++i) {
         const auto& idx = txState->Shards[i].Idx;
-        const auto datashardId = context.SS->ShardInfos[idx].TabletID;
+        const auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
         auto ev = context.SS->MakeDataShardProposal(pathId, OperationId, tx.SerializeAsString(), context.Ctx);
         context.OnComplete.BindMsgToPipe(OperationId, datashardId, idx, ev.Release());
     }

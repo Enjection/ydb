@@ -51,7 +51,7 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
 
         // "Forget" the deleted shard
         if (Self->ShardInfos.contains(ShardIdx)) {
-            auto tabletType = Self->ShardInfos[ShardIdx].TabletType;
+            auto tabletType = Self->ShardInfos.at(ShardIdx).TabletType;
             switch (tabletType) {
             case ETabletType::DataShard:
                 Self->TabletCounters->Simple()[COUNTER_TABLE_SHARD_INACTIVE_COUNT].Sub(1);
@@ -133,7 +133,7 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
 
             auto& shardInfo = Self->ShardInfos.at(ShardIdx);
 
-            auto pathId = shardInfo.PathId;
+            const TPathId pathId = shardInfo.PathId;
             auto it = Self->Tables.find(pathId);
             if (it != Self->Tables.end()) {
                 it->second->PerShardPartitionConfig.erase(ShardIdx);
@@ -160,8 +160,6 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
             Self->TabletIdToShardIdx[TabletId] = ShardIdx;
 
             Self->ShardInfos.erase(ShardIdx);
-
-            Self->DecrementPathDbRefCount(pathId, "shard deleted");
 
             // This is for tests, so it's kinda ok to reply from execute
             auto itSubscribers = Self->ShardDeletionSubscribers.find(ShardIdx);

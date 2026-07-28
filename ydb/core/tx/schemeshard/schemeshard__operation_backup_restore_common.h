@@ -431,7 +431,7 @@ public:
 
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             auto idx = txState->Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         TKind::Name() << " Abort"
@@ -439,7 +439,7 @@ public:
                             << ", opId: " << OperationId
                             << ", at schemeshard: " << context.SS->TabletID());
 
-            auto event = MakeHolder<TEvCancel>(ui64(OperationId.GetTxId()), txState->TargetPathId.LocalPathId);
+            auto event = MakeHolder<TEvCancel>(ui64(OperationId.GetTxId()), txState->TargetPathId.Get().LocalPathId);
             context.OnComplete.BindMsgToPipe(OperationId, datashardId, idx, event.Release());
         }
 

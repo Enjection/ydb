@@ -4,6 +4,7 @@
 #include "olap/schema/update.h"
 #include "schemeshard_identificators.h"
 #include "schemeshard_info_types_helpers.h"
+#include "schemeshard_path_db_ref.h"
 #include "schemeshard_path_element.h"
 #include "schemeshard_schema.h"
 #include "schemeshard_tx_infly.h"
@@ -1576,7 +1577,7 @@ struct TAdoptedShard {
 struct TShardInfo {
     TTabletId TabletID = InvalidTabletId;
     TTxId CurrentTxId = InvalidTxId; ///< @note we support only one modifying transaction on shard at time
-    TPathId PathId = InvalidPathId;
+    TOwnedPathId PathId;
     TTabletTypes::EType TabletType = ETabletType::TypeInvalid;
     TChannelsBindings BindedChannels;
 
@@ -1588,7 +1589,6 @@ struct TShardInfo {
 
     TShardInfo() = default;
     TShardInfo(const TShardInfo& other) = default;
-    TShardInfo &operator=(const TShardInfo& other) = default;
 
     TShardInfo&& WithTabletID(TTabletId tabletId) && {
         TabletID = tabletId;
@@ -1690,6 +1690,110 @@ struct TShardInfo {
     static TShardInfo TestShardSetInfo(TTxId txId, TPathId pathId) {
         return TShardInfo(txId, pathId, ETabletType::TestShard);
     }
+
+private:
+    friend class TShardInfoMap;
+
+    // Whole-value assignment could also reseat PathId through at(), FindPtr(), or a
+    // mutable iterator. It is needed only by rollback restore inside TShardInfoMap.
+    TShardInfo& operator=(const TShardInfo& other) = default;
+
+    void ReassignPath(const TPathId& pathId) {
+        PathId.Set(pathId);
+    }
+};
+
+// The registered shards, holding a DbRefCount reference on each entry's path.
+// Membership is the reference: Emplace acquires, erase releases, ReassignPath moves one.
+// TShardInfo stays copy constructible, so scratch values and rollback snapshots carry
+// no reference of their own. Assignment is private because replacing a live value could
+// otherwise reseat PathId without moving its reference.
+//
+// No operator[]: a default-inserted entry would hold no reference, and a subscript that
+// silently created one is exactly how that would happen unnoticed. Read with at().
+class TShardInfoMap {
+    using TInner = THashMap<TShardIdx, TShardInfo>;
+
+public:
+    using iterator = typename TInner::iterator;
+    using const_iterator = typename TInner::const_iterator;
+
+    explicit TShardInfoMap(TSchemeShard* ss)
+        : SS(ss)
+    {}
+
+    // Owns references; a copy would double-acquire.
+    TShardInfoMap(const TShardInfoMap&) = delete;
+    TShardInfoMap& operator=(const TShardInfoMap&) = delete;
+    TShardInfoMap(TShardInfoMap&&) = delete;
+    TShardInfoMap& operator=(TShardInfoMap&&) = delete;
+
+    template <typename T>
+    TShardInfo& Emplace(const TShardIdx& shardIdx, T&& shardInfo) {
+        auto [it, inserted] = Map.emplace(shardIdx, std::forward<T>(shardInfo));
+        Y_VERIFY_S(inserted, "shardIdx: " << shardIdx << " already registered");
+        AcquirePathDbRef(SS, it->second.PathId, "shard");
+        return it->second;
+    }
+
+    size_t erase(const TShardIdx& shardIdx) {
+        auto it = Map.find(shardIdx);
+        if (it == Map.end()) {
+            return 0;
+        }
+        const TPathId pathId = it->second.PathId;
+        Map.erase(it);
+        ReleasePathDbRef(SS, pathId, "shard");
+        return 1;
+    }
+
+    // Propose rollback: a Paths snapshot owns restoring the counter, so the entry must
+    // go without releasing, or the rollback lands twice.
+    size_t EraseWithoutRelease(const TShardIdx& shardIdx) {
+        return Map.erase(shardIdx);
+    }
+
+    // Propose rollback: restore a snapshotted value, counters owned by Paths as above.
+    void RestoreWithoutAcquire(const TShardIdx& shardIdx, const TShardInfo& shardInfo) {
+        Map[shardIdx] = shardInfo;
+    }
+
+    // Move the entry's reference from its current path to another.
+    void ReassignPath(const TShardIdx& shardIdx, const TPathId& pathId) {
+        TShardInfo& shardInfo = Map.at(shardIdx);
+        if (shardInfo.PathId == pathId) {
+            return;
+        }
+        const TPathId oldPathId = shardInfo.PathId;
+        shardInfo.ReassignPath(pathId);
+        AcquirePathDbRef(SS, pathId, "shard");
+        ReleasePathDbRef(SS, oldPathId, "shard");
+    }
+
+    // Teardown: PathsById is cleared alongside, so release would target missing paths.
+    void clear() {
+        Map.clear();
+    }
+
+    TShardInfo& at(const TShardIdx& shardIdx) { return Map.at(shardIdx); }
+    const TShardInfo& at(const TShardIdx& shardIdx) const { return Map.at(shardIdx); }
+    TShardInfo* FindPtr(const TShardIdx& shardIdx) { return Map.FindPtr(shardIdx); }
+    const TShardInfo* FindPtr(const TShardIdx& shardIdx) const { return Map.FindPtr(shardIdx); }
+    iterator find(const TShardIdx& shardIdx) { return Map.find(shardIdx); }
+    const_iterator find(const TShardIdx& shardIdx) const { return Map.find(shardIdx); }
+    bool contains(const TShardIdx& shardIdx) const { return Map.contains(shardIdx); }
+    size_t count(const TShardIdx& shardIdx) const { return Map.count(shardIdx); }
+    size_t size() const { return Map.size(); }
+    bool empty() const { return Map.empty(); }
+
+    iterator begin() { return Map.begin(); }
+    iterator end() { return Map.end(); }
+    const_iterator begin() const { return Map.begin(); }
+    const_iterator end() const { return Map.end(); }
+
+private:
+    TSchemeShard* SS = nullptr;
+    TInner Map;
 };
 
 /**
@@ -2326,7 +2430,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
 
     void UpdateCounters(IQuotaCounters* counters);
 
-    void ActualizeAlterData(const THashMap<TShardIdx, TShardInfo>& allShards, TInstant now, bool isExternal, IQuotaCounters* counters) {
+    void ActualizeAlterData(const TShardInfoMap& allShards, TInstant now, bool isExternal, IQuotaCounters* counters) {
         Y_ENSURE(AlterData);
 
         AlterData->SetPathsInside(GetPathsInside());
@@ -2529,7 +2633,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         return !PrivateShards.empty() || (CoordinatorSelector && !CoordinatorSelector->List().empty());
     }
 
-    void Initialize(const THashMap<TShardIdx, TShardInfo>& allShards) {
+    void Initialize(const TShardInfoMap& allShards) {
         if (InitiatedAsGlobal) {
             return;
         }
@@ -2817,7 +2921,7 @@ private:
 
     TMaybeAuditSettings AuditSettings;
 
-    TVector<TTabletId> FilterPrivateTablets(TTabletTypes::EType type, const THashMap<TShardIdx, TShardInfo>& allShards) const {
+    TVector<TTabletId> FilterPrivateTablets(TTabletTypes::EType type, const TShardInfoMap& allShards) const {
         TVector<TTabletId> tablets;
         for (auto shardId: PrivateShards) {
 
@@ -2912,7 +3016,7 @@ struct TBlockStoreVolumeInfo : public TSimpleRefCount<TBlockStoreVolumeInfo> {
         AlterData.Reset();
     }
 
-    const TVector<TTabletId>& GetTablets(const THashMap<TShardIdx, TShardInfo>& allShards) {
+    const TVector<TTabletId>& GetTablets(const TShardInfoMap& allShards) {
         if (TabletCache.AlterVersion == AlterVersion) {
             return TabletCache.Tablets;
         }

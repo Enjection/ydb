@@ -85,14 +85,14 @@ public:
             // TODO: we may need to specify a more complex data channel mapping
             auto* init = tx.MutableInitShard();
             init->SetDataChannelCount(storeInfo->GetStorageConfig().GetDataChannelCount());
-            init->SetOwnerPathId(txState->TargetPathId.LocalPathId);
+            init->SetOwnerPathId(txState->TargetPathId.Get().LocalPathId);
             init->SetOwnerPath(path.PathString());
 
             Y_PROTOBUF_SUPPRESS_NODISCARD tx.SerializeToString(&columnShardTxBody);
         }
 
         for (auto& shard : txState->Shards) {
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             if (shard.TabletType == ETabletType::ColumnShard) {
                 const ui64 subDomainPathId = context.SS->ResolvePathIdForDomain(txState->TargetPathId).LocalPathId;
@@ -249,7 +249,7 @@ public:
         txState->ClearShardsInProgress();
 
         for (auto& shard : txState->Shards) {
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             switch (shard.TabletType) {
                 case ETabletType::ColumnShard: {
                     auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));

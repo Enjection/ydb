@@ -285,7 +285,7 @@ void PrepareChanges(TOperationId opId, TPathElement::TPtr path, TTableInfo::TPtr
 
     txState.Shards.reserve(table->GetPartitionStore().size());
     for (const auto& shardIdx : table->GetPartitionStore() | std::views::keys) {
-        TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
+        TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
 
         auto shardOp = commonShardOp;
 
@@ -407,7 +407,7 @@ public:
 
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             auto idx = txState->Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "Propose modify scheme on datashard " << datashardId << " txid: " << OperationId << " at schemeshard" << ssId);

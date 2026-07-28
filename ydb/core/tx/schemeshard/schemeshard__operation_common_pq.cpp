@@ -147,7 +147,7 @@ void MakePQTabletConfig(const TOperationContext& context,
         }
 
         auto* partitionInfo = it->second;
-        const auto& tabletId = context.SS->ShardInfos[partitionInfo->ShardIdx].TabletID;
+        const auto& tabletId = context.SS->ShardInfos.at(partitionInfo->ShardIdx).TabletID;
 
         auto& partition = *config.AddAllPartitions();
         FillPartition(partition, partitionInfo, ui64(tabletId));
@@ -547,7 +547,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
             Y_ABORT_UNLESS(pqGroup->AlterData);
 
             event->Record.SetTopicName(topicName);
-            event->Record.SetPathId(txState->TargetPathId.LocalPathId);
+            event->Record.SetPathId(txState->TargetPathId.Get().LocalPathId);
             event->Record.SetPath(TPath::Init(txState->TargetPathId, context.SS).PathString());
             event->Record.SetPartitionPerTablet(pqGroup->AlterData ? pqGroup->AlterData->MaxPartsPerTablet : pqGroup->MaxPartsPerTablet);
             event->Record.SetSchemeShardId(ui64(context.SS->SelfTabletId()));
@@ -559,7 +559,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
 
             for (const auto& p : pqGroup->Shards) {
                 const auto& pqShard = p.second;
-                const auto& tabletId = context.SS->ShardInfos[p.first].TabletID;
+                const auto& tabletId = context.SS->ShardInfos.at(p.first).TabletID;
                 auto tablet = event->Record.AddTablets();
                 tablet->SetTabletId(ui64(tabletId));
                 tablet->SetOwner(ui64(context.SS->SelfTabletId()));

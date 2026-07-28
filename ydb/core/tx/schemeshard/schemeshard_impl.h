@@ -348,7 +348,7 @@ public:
 
     THashMap<TTxId, TOperation::TPtr> Operations;
     THashMap<TTxId, TPublicationInfo> Publications;
-    THashMap<TOperationId, TTxState> TxInFlight;
+    TTxInFlightMap TxInFlight{this};
     THashMap<TPathId, TPathDbRef> OwnDbRefs; // path's own type info record ref
     // Non-null only inside an armed propose; undo-less mutators assert against it.
     const TMemoryChanges* ArmedChanges = nullptr;
@@ -363,7 +363,7 @@ public:
     THashSet<TOperationId> FailedIncrementalRestoreOperations;
 
     ui64 NextLocalShardIdx = 0;
-    THashMap<TShardIdx, TShardInfo> ShardInfos;
+    TShardInfoMap ShardInfos{this};
     THashMap<TShardIdx, THashMap<TPathId, TTxId>> SharedShards; // Maps shard to all paths that share it, with per-entry LastTxId
     THashMap<TShardIdx, TAdoptedShard> AdoptedShards;
     THashMap<TTabletId, TShardIdx> TabletIdToShardIdx;
@@ -762,12 +762,11 @@ public:
         Y_ABORT_UNLESS(shardIdx.GetOwnerId() == TabletID());
         const auto localId = ui64(shardIdx.GetLocalId());
         Y_VERIFY_S(localId < NextLocalShardIdx, "shardIdx: " << shardIdx << " NextLocalShardIdx: " << NextLocalShardIdx);
-        Y_VERIFY_S(!ShardInfos.contains(shardIdx), "shardIdx: " << shardIdx << " already registered");
-        IncrementPathDbRefCount(shardInfo.PathId, "new shard created");
-        ShardInfos.emplace(shardIdx, std::forward<T>(shardInfo));
+        ShardInfos.Emplace(shardIdx, std::forward<T>(shardInfo));
         return shardIdx;
     }
 
+    TTxState& CreateTx(TOperationId opId, TTxState&& txState);
     TTxState& CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath = InvalidPathId);
     TTxState* FindTx(TOperationId opId);
     TTxState* FindTxSafe(TOperationId opId, const TTxState::ETxType& txType);

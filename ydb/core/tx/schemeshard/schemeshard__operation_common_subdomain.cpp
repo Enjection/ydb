@@ -157,7 +157,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
         return true;
     }
 
-    auto pathId = txState->TargetPathId;
+    TPathId pathId = txState->TargetPathId;
     Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
     TPath path = TPath::Init(pathId, context.SS);
 
@@ -176,8 +176,8 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
         }
         TShardIdx idx = shard.Idx;
         Y_ABORT_UNLESS(context.SS->ShardInfos.contains(idx));
-        TTabletId tabletID = context.SS->ShardInfos[idx].TabletID;
-        auto type = context.SS->ShardInfos[idx].TabletType;
+        TTabletId tabletID = context.SS->ShardInfos.at(idx).TabletID;
+        auto type = context.SS->ShardInfos.at(idx).TabletType;
 
         switch (type) {
         case ETabletType::Coordinator:

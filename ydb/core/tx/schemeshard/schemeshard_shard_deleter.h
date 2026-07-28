@@ -40,13 +40,13 @@ public:
 
     void Shutdown(const TActorContext& ctx);
     void SendDeleteRequests(TTabletId hiveTabletId, const THashSet<TShardIdx>& shardsToDelete,
-                            const THashMap<TShardIdx, TShardInfo>& shardsInfos, const TActorContext& ctx);
+                            const TShardInfoMap& shardsInfos, const TActorContext& ctx);
     void ResendDeleteRequests(TTabletId hiveTabletId,
-                              const THashMap<TShardIdx, TShardInfo>& shardsInfos, const TActorContext& ctx);
+                              const TShardInfoMap& shardsInfos, const TActorContext& ctx);
     void ResendDeleteRequest(TTabletId hiveTabletId,
-                             const THashMap<TShardIdx, TShardInfo>& shardsInfos, TShardIdx shardIdx, const TActorContext& ctx);
+                             const TShardInfoMap& shardsInfos, TShardIdx shardIdx, const TActorContext& ctx);
     void RedirectDeleteRequest(TTabletId hiveFromTabletId, TTabletId hiveToTabletId, TShardIdx shardIdx,
-                               const THashMap<TShardIdx, TShardInfo>& shardsInfos, const TActorContext& ctx);
+                               const TShardInfoMap& shardsInfos, const TActorContext& ctx);
     void ShardDeleted(TShardIdx shardIdx, const TActorContext& ctx);
     bool Has(TTabletId hiveTabletId, TActorId pipeClientActorId) const;
     bool Has(TShardIdx shardIdx) const;

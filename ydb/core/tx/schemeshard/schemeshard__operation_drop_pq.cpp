@@ -99,7 +99,7 @@ public:
             haveWork = true;
 
             auto idx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(idx).TabletID;
 
             TAutoPtr<TEvPersQueue::TEvDropTablet> event(new TEvPersQueue::TEvDropTablet());
             event->Record.SetTxId(ui64(OperationId.GetTxId()));
@@ -295,7 +295,7 @@ public:
         }
 
         if (shardId && tabletId != InvalidTabletId) {
-            Y_VERIFY_S(context.SS->ShardInfos[shardId].TabletID == tabletId,
+            Y_VERIFY_S(context.SS->ShardInfos.at(shardId).TabletID == tabletId,
                      "shardId: " << shardId << " tabletId: " << tabletId << " has alter pointer: " << ui64(!!pqGroup->AlterData));
             txState.Shards.emplace_back(shardId, ETabletType::PersQueueReadBalancer, TTxState::DeleteParts);
         }
@@ -306,7 +306,7 @@ public:
             auto shardIdx = shard.first;
             TTopicTabletInfo::TPtr info = shard.second;
 
-            auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
             TTxState::ETxState operation = TTxState::DeleteParts;
             if (tabletId != InvalidTabletId) {

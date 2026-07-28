@@ -42,7 +42,7 @@ struct TBackup {
         const auto seqNo = context.SS->StartRound(txState);
         for (ui32 i = 0; i < txState.Shards.size(); ++i) {
             auto idx = txState.Shards[i].Idx;
-            auto columnShardId = context.SS->ShardInfos[idx].TabletID;
+            auto columnShardId = context.SS->ShardInfos.at(idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "Propose backup"
@@ -52,7 +52,7 @@ struct TBackup {
 
             NKikimrTxColumnShard::TBackupTxBody txBodyBackup;
             *txBodyBackup.MutableBackupTask() = backup;
-            txBodyBackup.MutableBackupTask()->SetTableId(pathId.LocalPathId);
+            txBodyBackup.MutableBackupTask()->SetTableId(pathId.Get().LocalPathId);
             txBodyBackup.MutableBackupTask()->SetShardNum(i);
             auto event = context.SS->MakeColumnShardProposal(pathId, opId, seqNo, txBodyBackup.SerializeAsString(), context.Ctx, NKikimrTxColumnShard::TX_KIND_BACKUP);
             context.OnComplete.BindMsgToPipe(opId, columnShardId, idx, event.Release());
@@ -73,7 +73,7 @@ struct TBackup {
         const auto seqNo = context.SS->StartRound(txState);
         for (ui32 i = 0; i < txState.Shards.size(); ++i) {
             auto idx = txState.Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "Propose backup"

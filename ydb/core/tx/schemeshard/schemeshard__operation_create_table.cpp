@@ -228,7 +228,7 @@ public:
 
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             TShardIdx shardIdx = txState->Shards[i].Idx;
-            TTabletId datashardId = context.SS->ShardInfos[shardIdx].TabletID;
+            TTabletId datashardId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
             auto seqNo = context.SS->StartRound(*txState);
 
@@ -768,8 +768,8 @@ public:
         // Persist new shards info
         for (const auto& shardIdx : tableInfo->GetPartitionStore() | std::views::keys) {
             Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shardIdx), "shard info is set before");
-            auto tabletType = context.SS->ShardInfos[shardIdx].TabletType;
-            const auto& bindedChannels = context.SS->ShardInfos[shardIdx].BindedChannels;
+            auto tabletType = context.SS->ShardInfos.at(shardIdx).TabletType;
+            const auto& bindedChannels = context.SS->ShardInfos.at(shardIdx).BindedChannels;
             context.SS->PersistShardMapping(db, shardIdx, InvalidTabletId, newTable->PathId, OperationId.GetTxId(), tabletType);
             context.SS->PersistChannelsBinding(db, shardIdx, bindedChannels);
 

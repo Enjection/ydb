@@ -97,7 +97,7 @@ public:
             }
             const auto tabletType = srcPath->IsTable() ? ETabletType::DataShard : ETabletType::ColumnShard;
             for (const auto& shardIdx : shardIdxs) {
-                TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
+                TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
 
                 txState->Shards.emplace_back(shardIdx, tabletType, TTxState::ConfigureParts);
 
@@ -159,7 +159,7 @@ public:
         txState->ClearShardsInProgress();
         for (const auto& shard: txState->Shards) {
             auto idx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(idx).TabletID;
             auto event = context.SS->MakeShardProposal(dstPath, OperationId, seqNo, txBody, context.Ctx);
             context.OnComplete.BindMsgToPipe(OperationId, tabletId, idx, event.Release());
         }
@@ -259,11 +259,8 @@ public:
         // move shards
         for (const auto& shard : txState->Shards) {
             auto shardIdx = shard.Idx;
-            TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
 
-            shardInfo.PathId = dstPath->PathId;
-            context.SS->DecrementPathDbRefCount(srcPath.Base()->PathId, "move shard");
-            context.SS->IncrementPathDbRefCount(dstPath.Base()->PathId, "move shard");
+            context.SS->ShardInfos.ReassignPath(shardIdx, dstPath->PathId);
             context.SS->PersistShardPathId(db, shardIdx, dstPath.Base()->PathId);
 
             srcPath.Base()->DecShardsInside();

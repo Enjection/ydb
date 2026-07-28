@@ -62,8 +62,8 @@ public:
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxCreateExternalTable);
 
-        const auto pathId                = txState->TargetPathId;
-        const auto dataSourcePathId      = txState->SourcePathId;
+        const TPathId pathId                = txState->TargetPathId;
+        const TPathId dataSourcePathId      = txState->SourcePathId;
         const auto path                  = TPath::Init(pathId, context.SS);
         const TPathElement::TPtr pathPtr = context.SS->PathsById.at(pathId);
         const TPathElement::TPtr dataSourcePathPtr =

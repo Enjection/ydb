@@ -202,9 +202,10 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
     while (Shards) {
         const auto& [id, elem] = Shards.top();
         if (elem) {
-            ss->ShardInfos[id] = *elem;
+            // counter rollback is owned by the Paths snapshots - restore, do not re-acquire
+            ss->ShardInfos.RestoreWithoutAcquire(id, *elem);
         } else {
-            ss->ShardInfos.erase(id);
+            ss->ShardInfos.EraseWithoutRelease(id);
             ss->OnShardRemoved(id);
         }
         Shards.pop();
@@ -224,10 +225,7 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
         const auto& [id, elem] = TxStates.top();
         if (!elem) {
             // counter rollback is owned by the Paths snapshots - disarm, do not release
-            if (auto* txState = ss->TxInFlight.FindPtr(id)) {
-                txState->DisarmPathRefs();
-            }
-            ss->TxInFlight.erase(id);
+            ss->TxInFlight.EraseWithoutRelease(id);
         } else {
             Y_ABORT("No such cases are exist");
         }

@@ -709,9 +709,7 @@ void TSchemeShard::Clear() {
     HasOrphanPlaceholders = false;
 
     // disarm ref handles: the whole state resets, PathsById clears first
-    for (auto& [opId, txState] : TxInFlight) {
-        txState.DisarmPathRefs();
-    }
+    // (TxInFlight disarms itself in clear(), below)
     // ParentRefHeld bits die with their path elements below; nothing to disarm.
     for (auto& [pathId, ref] : OwnDbRefs) {
         ref.DetachWithoutRelease();
@@ -873,8 +871,8 @@ void TSchemeShard::DebugCheckDbRefIntegrity() const {
         bump(ref);
     }
     for (const auto& [opId, txState] : TxInFlight) {
-        bump(txState.TargetPathRef);
-        bump(txState.SourcePathRef);
+        bump(txState.GetTargetPathRef());
+        bump(txState.GetSourcePathRef());
     }
     for (const auto& [txId, pub] : Publications) {
         for (const auto& [key, ref] : pub.Paths) {
@@ -2970,15 +2968,15 @@ void TSchemeShard::PersistTxState(NIceDb::TNiceDb& db, const TOperationId opId) 
 
     db.Table<Schema::TxInFlightV2>().Key(opId.GetTxId(), opId.GetSubTxId()).Update(
                 NIceDb::TUpdate<Schema::TxInFlightV2::TxType>((ui8)txState.TxType),
-                NIceDb::TUpdate<Schema::TxInFlightV2::TargetPathId>(txState.TargetPathId.LocalPathId),
+                NIceDb::TUpdate<Schema::TxInFlightV2::TargetPathId>(txState.TargetPathId.Get().LocalPathId),
                 NIceDb::TUpdate<Schema::TxInFlightV2::State>(txState.State),
                 NIceDb::TUpdate<Schema::TxInFlightV2::MinStep>(txState.MinStep),
                 NIceDb::TUpdate<Schema::TxInFlightV2::ExtraBytes>(extraData),
                 NIceDb::TUpdate<Schema::TxInFlightV2::StartTime>(txState.StartTime.GetValue()),
-                NIceDb::TUpdate<Schema::TxInFlightV2::TargetOwnerPathId>(txState.TargetPathId.OwnerId),
+                NIceDb::TUpdate<Schema::TxInFlightV2::TargetOwnerPathId>(txState.TargetPathId.Get().OwnerId),
                 NIceDb::TUpdate<Schema::TxInFlightV2::BuildIndexId>(txState.BuildIndexId),
-                NIceDb::TUpdate<Schema::TxInFlightV2::SourceLocalPathId>(txState.SourcePathId.LocalPathId),
-                NIceDb::TUpdate<Schema::TxInFlightV2::SourceOwnerId>(txState.SourcePathId.OwnerId),
+                NIceDb::TUpdate<Schema::TxInFlightV2::SourceLocalPathId>(txState.SourcePathId.Get().LocalPathId),
+                NIceDb::TUpdate<Schema::TxInFlightV2::SourceOwnerId>(txState.SourcePathId.Get().OwnerId),
                 NIceDb::TUpdate<Schema::TxInFlightV2::NeedUpdateObject>(txState.NeedUpdateObject),
                 NIceDb::TUpdate<Schema::TxInFlightV2::NeedSyncHive>(txState.NeedSyncHive)
                 );
@@ -3003,7 +3001,7 @@ void TSchemeShard::ChangeTxState(NIceDb::TNiceDb& db, const TOperationId opId, T
     const auto& ctx = TActivationContext::AsActorContext();
 
     LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "Change state for txid " << opId << " "
-                 << NKikimr::NSchemeShard::TxStateName(TxInFlight[opId].State) << " -> " << NKikimr::NSchemeShard::TxStateName(newState));
+                 << NKikimr::NSchemeShard::TxStateName(FindTx(opId)->State) << " -> " << NKikimr::NSchemeShard::TxStateName(newState));
 
     FindTx(opId)->State = newState;
     db.Table<Schema::TxInFlightV2>().Key(opId.GetTxId(), opId.GetSubTxId()).Update(
@@ -6238,19 +6236,21 @@ bool TSchemeShard::ShardIsUnderSplitMergeOp(const TShardIdx& idx) const {
     return true;
 }
 
-TTxState &TSchemeShard::CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath) {
+TTxState& TSchemeShard::CreateTx(TOperationId opId, TTxState&& state) {
     Y_VERIFY_S(!TxInFlight.contains(opId),
                "Trying to create duplicate Tx " << opId);
-    TTxState& txState = TxInFlight[opId];
-    txState = TTxState(txType, targetPath, sourcePath);
-    TabletCounters->Simple()[TxTypeInFlightCounter(txType)].Add(1);
-    txState.AcquirePathRefs(this);
+    TTxState& txState = TxInFlight.Emplace(opId, std::move(state));
+    TabletCounters->Simple()[TxTypeInFlightCounter(txState.TxType)].Add(1);
     LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
                     "CreateTx for txid " << opId
-                    << " type: " << TTxState::TypeName(txType)
-                    << " target path: " << targetPath
-                    << " source path: " << sourcePath);
+                    << " type: " << TTxState::TypeName(txState.TxType)
+                    << " target path: " << txState.TargetPathId
+                    << " source path: " << txState.SourcePathId);
     return txState;
+}
+
+TTxState& TSchemeShard::CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath) {
+    return CreateTx(opId, TTxState(txType, targetPath, sourcePath));
 }
 
 TTxState *TSchemeShard::FindTx(TOperationId opId) {
@@ -7077,7 +7077,7 @@ void TSchemeShard::Handle(TEvHive::TEvCreateTabletReply::TPtr &ev, const TActorC
         return;
     }
 
-    TShardInfo& shardInfo = ShardInfos[shardIdx];
+    TShardInfo& shardInfo = ShardInfos.at(shardIdx);
     const auto txId = shardInfo.CurrentTxId;
 
     if (!Operations.contains(txId)) {
@@ -7115,7 +7115,7 @@ void TSchemeShard::Handle(TEvHive::TEvAdoptTabletReply::TPtr &ev, const TActorCo
         return;
     }
 
-    TShardInfo& shardInfo = ShardInfos[shardIdx];
+    TShardInfo& shardInfo = ShardInfos.at(shardIdx);
     const auto txId = shardInfo.CurrentTxId;
 
     if (!Operations.contains(txId)) {

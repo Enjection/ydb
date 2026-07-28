@@ -114,8 +114,8 @@ public:
                                  << ", type: " << (int)txState->TxType
                                  << ", parent pathId: " << pathId);
                     if (pathId == parent.Base()->PathId) {
-                        txState->SourcePathId.ToProto(remap->MutableSrcPathId());
-                        txState->TargetPathId.ToProto(remap->MutableDstPathId());
+                        txState->SourcePathId.Get().ToProto(remap->MutableSrcPathId());
+                        txState->TargetPathId.Get().ToProto(remap->MutableDstPathId());
                         auto targetIndexName = context.SS->PathsById.at(txState->TargetPathId);
 
                         for (const auto& [_, childPathId] : path->GetChildren()) {
@@ -141,7 +141,7 @@ public:
         Y_ABORT_UNLESS(txState->Shards.size());
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             auto idx = txState->Shards[i].Idx;
-            auto datashardId = context.SS->ShardInfos[idx].TabletID;
+            auto datashardId = context.SS->ShardInfos.at(idx).TabletID;
 
             auto event = context.SS->MakeDataShardProposal(txState->TargetPathId, OperationId, txBody, context.Ctx);
             context.OnComplete.BindMsgToPipe(OperationId, datashardId, idx, event.Release());

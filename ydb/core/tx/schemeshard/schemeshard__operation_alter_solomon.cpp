@@ -48,7 +48,7 @@ public:
             auto solomonPartition = solomon->AlterData->Partitions[shard.Idx];
             Y_VERIFY_S(solomonPartition, "rtmr partitions is null shard idx: " << shard.Idx << " Path: " << txState->TargetPathId);
 
-            auto tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             if (solomonPartition->TabletId != InvalidTabletId && tabletId != solomonPartition->TabletId) {
                 Y_FAIL_S("Solomon partition tablet id mismatch"

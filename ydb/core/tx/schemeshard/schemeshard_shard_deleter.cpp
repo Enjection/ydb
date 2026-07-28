@@ -13,8 +13,7 @@ void TShardDeleter::Shutdown(const NActors::TActorContext &ctx) {
 
 void TShardDeleter::SendDeleteRequests(TTabletId hiveTabletId,
         const THashSet<TShardIdx> &shardsToDelete,
-        const THashMap<NKikimr::NSchemeShard::TShardIdx,
-        NKikimr::NSchemeShard::TShardInfo>& shardsInfos,
+        const TShardInfoMap& shardsInfos,
         const NActors::TActorContext &ctx
     ) {
     LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "SendDeleteRequests, shardsToDelete " << shardsToDelete.size()<< ", to hive " << hiveTabletId << ", at schemeshard " << MyTabletID);
@@ -50,7 +49,7 @@ void TShardDeleter::SendDeleteRequests(TTabletId hiveTabletId,
     }
 }
 
-void TShardDeleter::ResendDeleteRequests(TTabletId hiveTabletId, const THashMap<TShardIdx, TShardInfo>& shardsInfos, const NActors::TActorContext &ctx) {
+void TShardDeleter::ResendDeleteRequests(TTabletId hiveTabletId, const TShardInfoMap& shardsInfos, const NActors::TActorContext &ctx) {
     LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                  "Resending tablet deletion requests from " << MyTabletID << " to " << hiveTabletId);
 
@@ -68,7 +67,7 @@ void TShardDeleter::ResendDeleteRequests(TTabletId hiveTabletId, const THashMap<
 }
 
 void TShardDeleter::ResendDeleteRequest(TTabletId hiveTabletId,
-                                        const THashMap<TShardIdx, TShardInfo>& shardsInfos,
+                                        const TShardInfoMap& shardsInfos,
                                         TShardIdx shardIdx,
                                         const NActors::TActorContext &ctx) {
     LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
@@ -95,7 +94,7 @@ void TShardDeleter::ResendDeleteRequest(TTabletId hiveTabletId,
 void TShardDeleter::RedirectDeleteRequest(TTabletId hiveFromTabletId,
                                           TTabletId hiveToTabletId,
                                           TShardIdx shardIdx,
-                                          const THashMap<TShardIdx, TShardInfo>& shardsInfos,
+                                          const TShardInfoMap& shardsInfos,
                                           const NActors::TActorContext &ctx) {
     LOG_NOTICE_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                  "Redirecting tablet deletion requests from " << hiveFromTabletId << " to " << hiveToTabletId);

@@ -1015,15 +1015,12 @@ public:
 
         if (!ShardsToRemember.empty()) {
             const auto shardIdx = ShardsToRemember.back();
+
+            context.SS->ShardInfos.ReassignPath(shardIdx, txState->TargetPathId);
             TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
-
-            context.SS->IncrementPathDbRefCount(txState->TargetPathId);
-            context.SS->DecrementPathDbRefCount(shardInfo.PathId);
-
-            shardInfo.PathId = txState->TargetPathId;
-            db.Table<Schema::SubDomainShards>().Key(txState->TargetPathId.LocalPathId, shardIdx.GetLocalId()).Update();
+            db.Table<Schema::SubDomainShards>().Key(txState->TargetPathId.Get().LocalPathId, shardIdx.GetLocalId()).Update();
             db.Table<Schema::Shards>().Key(shardIdx.GetLocalId()).Update(
-                NIceDb::TUpdate<Schema::Shards::PathId>(txState->TargetPathId.LocalPathId));
+                NIceDb::TUpdate<Schema::Shards::PathId>(txState->TargetPathId.Get().LocalPathId));
 
             shardInfo.CurrentTxId = OperationId.GetTxId();
             context.SS->PersistShardTx(db, shardIdx, OperationId.GetTxId());

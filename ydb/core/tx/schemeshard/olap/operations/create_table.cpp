@@ -303,7 +303,7 @@ public:
         Y_ABORT_UNLESS(tx.SerializeToString(&columnShardTxBody));
 
         for (auto& shard : txState->Shards) {
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             if (shard.TabletType == ETabletType::ColumnShard) {
                 const ui64 subDomainPathId = context.SS->ResolvePathIdForDomain(txState->TargetPathId).LocalPathId;
@@ -471,7 +471,7 @@ public:
         txState->ClearShardsInProgress();
 
         for (auto& shard : txState->Shards) {
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             switch (shard.TabletType) {
                 case ETabletType::ColumnShard: {
                     auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));
@@ -494,7 +494,7 @@ public:
         if (txState->NeedUpdateObject) {
             auto event = std::make_unique<TEvHive::TEvUpdateTabletsObject>();
             for (const auto& shard : txState->Shards) {
-                TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+                TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
                 event->Record.AddTabletIds(tabletId.GetValue());
             }
             event->Record.SetObjectId(TSimpleRangeHash{}(event->Record.GetTabletIds()));

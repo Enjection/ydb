@@ -50,7 +50,7 @@ public:
 
         context.SS->TabletCounters->Simple()[COUNTER_VIEW_COUNT].Add(1);
 
-        const auto pathId = txState->TargetPathId;
+        const TPathId pathId = txState->TargetPathId;
         auto path = TPath::Init(pathId, context.SS);
 
         NIceDb::TNiceDb db(context.GetDB());
