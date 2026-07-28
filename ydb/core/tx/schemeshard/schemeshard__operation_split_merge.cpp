@@ -1087,9 +1087,11 @@ public:
 
         mutableTableInfo->RegisterSplitMergeOp(OperationId, op);
 
+        // Move only what the scratch state carries: assigning over the live entry would
+        // drop the references CreateTx just gave it.
         auto& txState = context.SS->CreateTx(OperationId, TTxState::TxSplitTablePartition, path->PathId);
-        txState = std::move(op);
-        txState.AcquirePathRefs(context.SS);
+        txState.State = op.State;
+        txState.Shards = std::move(op.Shards);
         context.OnComplete.ActivateTx(OperationId);
 
         for (const auto& shard : txState.Shards) {
