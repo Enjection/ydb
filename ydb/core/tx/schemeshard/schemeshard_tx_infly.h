@@ -130,12 +130,6 @@ struct TTxState {
     bool NeedUpdateObject = false;
     bool NeedSyncHive = false;
     // not persist:
-    // DbRefCount references on TargetPathId/SourcePathId. Holding the handle
-    // is holding the reference: acquired via AcquirePathRefs by both
-    // TSchemeShard::CreateTx and TTxInit restore, released automatically when
-    // the tx state is erased from TxInFlight, wherever that happens.
-    TPathDbRef TargetPathRef;
-    TPathDbRef SourcePathRef;
     THashSet<TShardIdx> ShardsInProgress; // indexes of datashards or pqs that operation waits for
     THashMap<TShardIdx, std::pair<TActorId, ui32>> SchemeChangeNotificationReceived;
     bool ReadyForNotifications = false;
@@ -164,10 +158,20 @@ struct TTxState {
         , StartTime(::Now())
     {}
 
+    // Read-only views for the DbRefCount reconciliation; the handles themselves stay
+    // private so no caller can Reset one and point it at a different path.
+    const TPathDbRef& GetTargetPathRef() const { return TargetPathRef; }
+    const TPathDbRef& GetSourcePathRef() const { return SourcePathRef; }
+
 private:
     // Arming and disarming are TxInFlight's job: an entry becomes referenced by being
     // inserted, and loses its references only by leaving.
     friend class TTxInFlightMap;
+
+    // DbRefCount references on TargetPathId/SourcePathId. Holding the handle is holding
+    // the reference: acquired when the entry enters TxInFlight, released when it leaves.
+    TPathDbRef TargetPathRef;
+    TPathDbRef SourcePathRef;
 
     // `sourceExists` is false only for an orphaned in-flight tx whose source path
     // is gone: reference the target, not the missing source.

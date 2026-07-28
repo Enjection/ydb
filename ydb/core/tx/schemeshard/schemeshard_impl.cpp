@@ -871,8 +871,8 @@ void TSchemeShard::DebugCheckDbRefIntegrity() const {
         bump(ref);
     }
     for (const auto& [opId, txState] : TxInFlight) {
-        bump(txState.TargetPathRef);
-        bump(txState.SourcePathRef);
+        bump(txState.GetTargetPathRef());
+        bump(txState.GetSourcePathRef());
     }
     for (const auto& [txId, pub] : Publications) {
         for (const auto& [key, ref] : pub.Paths) {

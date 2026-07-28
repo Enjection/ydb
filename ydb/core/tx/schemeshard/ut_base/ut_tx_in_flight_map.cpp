@@ -27,6 +27,14 @@ struct TCanAcquirePathRefs<
     std::void_t<decltype(std::declval<T&>().AcquirePathRefs(nullptr, true))>>: std::true_type {};
 
 template <class T, class = void>
+struct TCanReachTargetPathRef: std::false_type {};
+
+template <class T>
+struct TCanReachTargetPathRef<
+    T,
+    std::void_t<decltype(std::declval<T&>().TargetPathRef)>>: std::true_type {};
+
+template <class T, class = void>
 struct TCanAssignTargetPathId: std::false_type {};
 
 template <class T>
@@ -51,6 +59,11 @@ Y_UNIT_TEST_SUITE(TTxInFlightMapTest) {
     Y_UNIT_TEST(ArmingIsNotReachableFromOutside) {
         static_assert(!TCanAcquirePathRefs<TTxState>::value,
             "AcquirePathRefs must stay private to TTxInFlightMap");
+
+        // The handles themselves must be out of reach too: a public TPathDbRef could be
+        // Reset() at a different path, which is the same desync by another route.
+        static_assert(!TCanReachTargetPathRef<TTxState>::value,
+            "TargetPathRef must stay private; read it through GetTargetPathRef()");
 
         static_assert(!std::is_copy_constructible_v<TTxInFlightMap>);
         static_assert(!std::is_copy_assignable_v<TTxInFlightMap>);
