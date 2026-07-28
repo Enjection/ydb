@@ -133,7 +133,7 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
 
             auto& shardInfo = Self->ShardInfos.at(ShardIdx);
 
-            auto pathId = shardInfo.PathId;
+            const TPathId pathId = shardInfo.PathId;
             auto it = Self->Tables.find(pathId);
             if (it != Self->Tables.end()) {
                 it->second->PerShardPartitionConfig.erase(ShardIdx);

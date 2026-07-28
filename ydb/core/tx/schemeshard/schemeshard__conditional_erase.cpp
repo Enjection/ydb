@@ -192,7 +192,7 @@ struct TSchemeShard::TTxRunConditionalErase: public TSchemeShard::TRwTxBase {
 
         NKikimrTxDataShard::TEvConditionalEraseRowsRequest request;
         request.SetDatabaseName(CanonizePath(Self->RootPathElements));
-        request.SetTableId(shardInfo.PathId.LocalPathId);
+        request.SetTableId(shardInfo.PathId.Get().LocalPathId);
         request.SetSchemaVersion(tableInfo->AlterVersion);
 
         for (const auto& [indexId, columnIds]: MakeIndexes(shardInfo.PathId)) {

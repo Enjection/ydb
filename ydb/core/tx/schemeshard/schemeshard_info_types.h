@@ -1577,7 +1577,7 @@ struct TAdoptedShard {
 struct TShardInfo {
     TTabletId TabletID = InvalidTabletId;
     TTxId CurrentTxId = InvalidTxId; ///< @note we support only one modifying transaction on shard at time
-    TPathId PathId = InvalidPathId;
+    TOwnedPathId PathId;
     TTabletTypes::EType TabletType = ETabletType::TypeInvalid;
     TChannelsBindings BindedChannels;
 
@@ -1589,7 +1589,6 @@ struct TShardInfo {
 
     TShardInfo() = default;
     TShardInfo(const TShardInfo& other) = default;
-    TShardInfo &operator=(const TShardInfo& other) = default;
 
     TShardInfo&& WithTabletID(TTabletId tabletId) && {
         TabletID = tabletId;
@@ -1691,12 +1690,24 @@ struct TShardInfo {
     static TShardInfo TestShardSetInfo(TTxId txId, TPathId pathId) {
         return TShardInfo(txId, pathId, ETabletType::TestShard);
     }
+
+private:
+    friend class TShardInfoMap;
+
+    // Whole-value assignment could also reseat PathId through at(), FindPtr(), or a
+    // mutable iterator. It is needed only by rollback restore inside TShardInfoMap.
+    TShardInfo& operator=(const TShardInfo& other) = default;
+
+    void ReassignPath(const TPathId& pathId) {
+        PathId.Set(pathId);
+    }
 };
 
 // The registered shards, holding a DbRefCount reference on each entry's path.
 // Membership is the reference: Emplace acquires, erase releases, ReassignPath moves one.
-// TShardInfo stays a plain value, so the scratch copies the shard factories and
-// split/merge pass around carry no reference.
+// TShardInfo stays copy constructible, so scratch values and rollback snapshots carry
+// no reference of their own. Assignment is private because replacing a live value could
+// otherwise reseat PathId without moving its reference.
 //
 // No operator[]: a default-inserted entry would hold no reference, and a subscript that
 // silently created one is exactly how that would happen unnoticed. Read with at().
@@ -1754,7 +1765,7 @@ public:
             return;
         }
         const TPathId oldPathId = shardInfo.PathId;
-        shardInfo.PathId = pathId;
+        shardInfo.ReassignPath(pathId);
         AcquirePathDbRef(SS, pathId, "shard");
         ReleasePathDbRef(SS, oldPathId, "shard");
     }

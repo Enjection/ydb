@@ -2325,11 +2325,8 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                                 << ", TabletType: " << TTabletTypes::TypeToStr(std::get<4>(rec))
                                 << ", at schemeshard: " << Self->TabletID());
 
-                TShardInfo loaded;
+                TShardInfo loaded(std::get<3>(rec), std::get<2>(rec), std::get<4>(rec));
                 loaded.TabletID = std::get<1>(rec);
-                loaded.PathId = std::get<2>(rec);
-                loaded.CurrentTxId = std::get<3>(rec);
-                loaded.TabletType = std::get<4>(rec);
 
                 TShardInfo& shard = Self->ShardInfos.Emplace(idx, std::move(loaded));
 

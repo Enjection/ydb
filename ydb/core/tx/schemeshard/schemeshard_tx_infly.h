@@ -27,15 +27,19 @@ namespace NKikimrTxDataShard {
 
 namespace NKikimr::NSchemeShard {
 
-// A TPathId that reads like a plain field but can only be written by TTxState. The
-// entry's reference is acquired against this value, so letting any caller reseat it
-// would point an in-flight tx at a path nothing referenced.
+struct TShardInfo;
+
+// A TPathId that reads like a plain field but can only be written by its owning record.
+// A container acquires a reference against this value, so letting any caller reseat it
+// would point the record at a path nothing referenced.
 //
 // Reads convert implicitly, so `pathsById.at(txState->TargetPathId)` still works;
 // `.LocalPathId` and friends go through Get().
 class TOwnedPathId {
 public:
     TOwnedPathId() = default;
+    TOwnedPathId(const TOwnedPathId&) = default;
+    TOwnedPathId(TOwnedPathId&&) = default;
 
     operator const TPathId&() const { return Value; }
     const TPathId& Get() const { return Value; }
@@ -52,6 +56,10 @@ public:
 
 private:
     friend struct TTxState;
+    friend struct TShardInfo;
+
+    TOwnedPathId& operator=(const TOwnedPathId&) = default;
+    TOwnedPathId& operator=(TOwnedPathId&&) = default;
 
     explicit TOwnedPathId(const TPathId& value)
         : Value(value)

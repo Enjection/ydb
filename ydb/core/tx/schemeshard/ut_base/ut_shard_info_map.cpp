@@ -30,6 +30,22 @@ struct TCanSubscript<
     T,
     std::void_t<decltype(std::declval<T&>()[std::declval<TShardIdx>()])>>: std::true_type {};
 
+template <class T, class = void>
+struct TCanAssignShardPathId: std::false_type {};
+
+template <class T>
+struct TCanAssignShardPathId<
+    T,
+    std::void_t<decltype(std::declval<T&>().PathId = std::declval<TPathId>())>>: std::true_type {};
+
+template <class T, class = void>
+struct TCanCopyAssignShardPathId: std::false_type {};
+
+template <class T>
+struct TCanCopyAssignShardPathId<
+    T,
+    std::void_t<decltype(std::declval<T&>().PathId = std::declval<const T&>().PathId)>>: std::true_type {};
+
 } // namespace
 
 Y_UNIT_TEST_SUITE(TShardInfoMapTest) {
@@ -69,6 +85,19 @@ Y_UNIT_TEST_SUITE(TShardInfoMapTest) {
 
         UNIT_ASSERT_EQUAL(map.at(Idx(1)).CurrentTxId, TTxId(7));
         UNIT_ASSERT_VALUES_EQUAL(map.size(), 1u);
+    }
+
+    Y_UNIT_TEST(PathIdIsNotAssignableThroughMutableAccess) {
+        static_assert(!TCanAssignShardPathId<TShardInfo>::value,
+            "TShardInfo::PathId must only be changed through TShardInfoMap");
+        static_assert(!TCanCopyAssignShardPathId<TShardInfo>::value,
+            "TShardInfo::PathId must not be assignable from another shard");
+        static_assert(std::is_copy_constructible_v<TShardInfo>,
+            "scratch values and rollback snapshots must remain copy constructible");
+        static_assert(!std::is_copy_assignable_v<TShardInfo>,
+            "whole-value assignment through mutable map access would reseat PathId");
+        static_assert(!std::is_move_assignable_v<TShardInfo>,
+            "whole-value assignment through mutable map access would reseat PathId");
     }
 
     Y_UNIT_TEST(EraseRemovesOnlyItsEntry) {
