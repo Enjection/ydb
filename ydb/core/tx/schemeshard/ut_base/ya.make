@@ -28,6 +28,7 @@ SRCS(
     ut_table_pg_types.cpp
     ut_commit_redo_limit.cpp
     ut_db_ref_map.cpp
+    ut_tx_in_flight_map.cpp
 )
 
 END()
