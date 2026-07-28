@@ -445,7 +445,7 @@ protected:
         context.SS->PersistAddAlterTable(db, pathId, table->AlterData);
 
         auto newStreamPathId = txState->CdcPathId;
-        auto oldStreamPathId = txState->SourcePathId;
+        TPathId oldStreamPathId = txState->SourcePathId;
         oldStreamPathId.ToProto(notice.MutableOldStreamPathId());
 
         Y_ABORT_UNLESS(context.SS->PathsById.contains(newStreamPathId));

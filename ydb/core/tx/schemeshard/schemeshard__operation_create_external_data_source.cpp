@@ -37,7 +37,7 @@ public:
         Y_ABORT_UNLESS(txState);
         Y_ABORT_UNLESS(txState->TxType == TTxState::TxCreateExternalDataSource);
 
-        const auto pathId = txState->TargetPathId;
+        const TPathId pathId = txState->TargetPathId;
         const auto path = TPath::Init(pathId, context.SS);
         const TPathElement::TPtr pathPtr = context.SS->PathsById.at(pathId);
 

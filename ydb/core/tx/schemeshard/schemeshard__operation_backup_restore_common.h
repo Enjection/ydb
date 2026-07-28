@@ -439,7 +439,7 @@ public:
                             << ", opId: " << OperationId
                             << ", at schemeshard: " << context.SS->TabletID());
 
-            auto event = MakeHolder<TEvCancel>(ui64(OperationId.GetTxId()), txState->TargetPathId.LocalPathId);
+            auto event = MakeHolder<TEvCancel>(ui64(OperationId.GetTxId()), txState->TargetPathId.Get().LocalPathId);
             context.OnComplete.BindMsgToPipe(OperationId, datashardId, idx, event.Release());
         }
 

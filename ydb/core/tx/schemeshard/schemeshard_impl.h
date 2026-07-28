@@ -363,7 +363,7 @@ public:
     THashSet<TOperationId> FailedIncrementalRestoreOperations;
 
     ui64 NextLocalShardIdx = 0;
-    THashMap<TShardIdx, TShardInfo> ShardInfos;
+    TShardInfoMap ShardInfos{this};
     THashMap<TShardIdx, THashMap<TPathId, TTxId>> SharedShards; // Maps shard to all paths that share it, with per-entry LastTxId
     THashMap<TShardIdx, TAdoptedShard> AdoptedShards;
     THashMap<TTabletId, TShardIdx> TabletIdToShardIdx;
@@ -762,9 +762,7 @@ public:
         Y_ABORT_UNLESS(shardIdx.GetOwnerId() == TabletID());
         const auto localId = ui64(shardIdx.GetLocalId());
         Y_VERIFY_S(localId < NextLocalShardIdx, "shardIdx: " << shardIdx << " NextLocalShardIdx: " << NextLocalShardIdx);
-        Y_VERIFY_S(!ShardInfos.contains(shardIdx), "shardIdx: " << shardIdx << " already registered");
-        IncrementPathDbRefCount(shardInfo.PathId, "new shard created");
-        ShardInfos.emplace(shardIdx, std::forward<T>(shardInfo));
+        ShardInfos.Emplace(shardIdx, std::forward<T>(shardInfo));
         return shardIdx;
     }
 

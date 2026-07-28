@@ -28,6 +28,43 @@ namespace NKikimrTxDataShard {
 namespace NKikimr::NSchemeShard {
 
 // Describes in-progress operation
+// A TPathId that reads like a plain field but can only be written by TTxState. The
+// entry's reference is acquired against this value, so letting any caller reseat it
+// would point an in-flight tx at a path nothing referenced.
+//
+// Reads convert implicitly, so `pathsById.at(txState->TargetPathId)` still works;
+// `.LocalPathId` and friends go through Get().
+class TOwnedPathId {
+public:
+    TOwnedPathId() = default;
+
+    operator const TPathId&() const { return Value; }
+    const TPathId& Get() const { return Value; }
+    explicit operator bool() const { return bool(Value); }
+
+    // TPathId declares its comparisons as members, so the implicit conversion above
+    // would not fire for a left-hand TOwnedPathId. Spell them out.
+    friend bool operator==(const TOwnedPathId& l, const TPathId& r) { return l.Value == r; }
+    friend bool operator==(const TPathId& l, const TOwnedPathId& r) { return l == r.Value; }
+    friend bool operator==(const TOwnedPathId& l, const TOwnedPathId& r) { return l.Value == r.Value; }
+    friend bool operator!=(const TOwnedPathId& l, const TPathId& r) { return l.Value != r; }
+    friend bool operator!=(const TPathId& l, const TOwnedPathId& r) { return l != r.Value; }
+    friend bool operator!=(const TOwnedPathId& l, const TOwnedPathId& r) { return l.Value != r.Value; }
+
+private:
+    friend struct TTxState;
+
+    explicit TOwnedPathId(const TPathId& value)
+        : Value(value)
+    {}
+
+    void Set(const TPathId& value) {
+        Value = value;
+    }
+
+    TPathId Value = InvalidPathId;
+};
+
 struct TTxState {
     struct TShardOperation {
         TShardIdx Idx;                   // shard's internal index
@@ -77,8 +114,8 @@ struct TTxState {
 
     // persist - TxInFlight:
     ETxType TxType = TxInvalid;
-    TPathId TargetPathId = InvalidPathId;           // path (dir or table) being modified
-    TPathId SourcePathId = InvalidPathId;           // path (dir or table) being modified
+    TOwnedPathId TargetPathId;                      // path (dir or table) being modified
+    TOwnedPathId SourcePathId;                      // path (dir or table) being modified
     ETxState State = Invalid;
     TStepId MinStep = InvalidStepId;
     TStepId PlanStep = InvalidStepId;
@@ -145,6 +182,12 @@ private:
     void DisarmPathRefs() {
         TargetPathRef.DetachWithoutRelease();
         SourcePathRef.DetachWithoutRelease();
+    }
+
+    // Late source binding at restore: move the field and its reference together.
+    void ReassignSource(TSchemeShard* ss, const TPathId& pathId) {
+        SourcePathId.Set(pathId);
+        SourcePathRef.Reset(ss, pathId, "transaction source path");
     }
 
 public:
@@ -222,6 +265,11 @@ public:
         return Map.erase(opId);
     }
 
+    // TTxInit binds a legacy CopyTable row's source only after its shards are read.
+    void ReassignSourcePath(const TOperationId& opId, const TPathId& pathId) {
+        Map.at(opId).ReassignSource(SS, pathId);
+    }
+
     // Propose rollback: a Paths snapshot owns restoring the counter, so the entry must
     // go without releasing, or the rollback lands twice.
     size_t EraseDisarmed(const TOperationId& opId) {
@@ -258,3 +306,11 @@ private:
 };
 
 }  // namespace NKikimr::NSchemeShard
+
+template<>
+inline void Out<NKikimr::NSchemeShard::TOwnedPathId>(
+    IOutputStream& o,
+    const NKikimr::NSchemeShard::TOwnedPathId& x)
+{
+    return x.Get().Out(o);
+}

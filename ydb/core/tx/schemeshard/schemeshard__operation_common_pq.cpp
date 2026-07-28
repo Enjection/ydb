@@ -547,7 +547,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
             Y_ABORT_UNLESS(pqGroup->AlterData);
 
             event->Record.SetTopicName(topicName);
-            event->Record.SetPathId(txState->TargetPathId.LocalPathId);
+            event->Record.SetPathId(txState->TargetPathId.Get().LocalPathId);
             event->Record.SetPath(TPath::Init(txState->TargetPathId, context.SS).PathString());
             event->Record.SetPartitionPerTablet(pqGroup->AlterData ? pqGroup->AlterData->MaxPartsPerTablet : pqGroup->MaxPartsPerTablet);
             event->Record.SetSchemeShardId(ui64(context.SS->SelfTabletId()));

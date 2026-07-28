@@ -259,11 +259,8 @@ public:
         // move shards
         for (const auto& shard : txState->Shards) {
             auto shardIdx = shard.Idx;
-            TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
 
-            shardInfo.PathId = dstPath->PathId;
-            context.SS->DecrementPathDbRefCount(srcPath.Base()->PathId, "move shard");
-            context.SS->IncrementPathDbRefCount(dstPath.Base()->PathId, "move shard");
+            context.SS->ShardInfos.ReassignPath(shardIdx, dstPath->PathId);
             context.SS->PersistShardPathId(db, shardIdx, dstPath.Base()->PathId);
 
             srcPath.Base()->DecShardsInside();

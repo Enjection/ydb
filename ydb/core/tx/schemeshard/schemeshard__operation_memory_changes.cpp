@@ -202,9 +202,10 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
     while (Shards) {
         const auto& [id, elem] = Shards.top();
         if (elem) {
-            ss->ShardInfos[id] = *elem;
+            // counter rollback is owned by the Paths snapshots - restore, do not re-acquire
+            ss->ShardInfos.RestoreDisarmed(id, *elem);
         } else {
-            ss->ShardInfos.erase(id);
+            ss->ShardInfos.EraseDisarmed(id);
             ss->OnShardRemoved(id);
         }
         Shards.pop();

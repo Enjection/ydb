@@ -29,6 +29,7 @@ SRCS(
     ut_commit_redo_limit.cpp
     ut_db_ref_map.cpp
     ut_tx_in_flight_map.cpp
+    ut_shard_info_map.cpp
 )
 
 END()

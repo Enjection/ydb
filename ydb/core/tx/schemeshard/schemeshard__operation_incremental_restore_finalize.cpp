@@ -476,9 +476,7 @@ public:
         // Use backup collection path as domain path
         TPathId backupCollectionPathId(context.SS->TabletID(), finalize.GetBackupCollectionPathId());
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxIncrementalRestoreFinalize, backupCollectionPathId);
-        
-        txState.TargetPathId = backupCollectionPathId;
-        
+
         auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), ui64(schemeshardTabletId));
 
         txState.State = TTxState::Waiting;

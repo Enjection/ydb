@@ -264,7 +264,7 @@ private:
     }
 
     std::optional<TPathId> FindNewShardOwner(TOperationContext& context, const TTxState& txState) const {
-        const auto targetPathId = txState.TargetPathId;
+        const TPathId targetPathId = txState.TargetPathId;
         for (const auto& shard : txState.Shards) {
             const auto shardIdx = shard.Idx;
             const auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
@@ -282,17 +282,14 @@ private:
     void TransferShardOwnership(TOperationContext& context, NIceDb::TNiceDb& db,
                                 const TShardIdx& shardIdx, const TPathId& targetPathId,
                                 const TPathId& newOwner) {
-        auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
         auto sharedIt = context.SS->SharedShards.find(shardIdx);
         AFL_VERIFY(sharedIt != context.SS->SharedShards.end());
         AFL_VERIFY(sharedIt->second.contains(newOwner));
 
-        shardInfo.PathId = newOwner;
+        context.SS->ShardInfos.ReassignPath(shardIdx, newOwner);
         context.SS->PersistShardPathId(db, shardIdx, newOwner);
         context.SS->PathsById.at(newOwner)->IncShardsInside();
         context.SS->PathsById.at(targetPathId)->DecShardsInside();
-        context.SS->IncrementPathDbRefCount(newOwner);
-        context.SS->DecrementPathDbRefCount(targetPathId);
         RemoveSharedShard(context, shardIdx, newOwner);
     }
 
@@ -330,7 +327,7 @@ private:
         }
 
         context.SS->PersistColumnTableRemove(db, txState->TargetPathId, context.Ctx);
-        const auto targetPathId = txState->TargetPathId;
+        const TPathId targetPathId = txState->TargetPathId;
         if (isStandalone) {
             const auto newOwner = FindNewShardOwner(context, *txState);
             for (auto& shard : txState->Shards) {

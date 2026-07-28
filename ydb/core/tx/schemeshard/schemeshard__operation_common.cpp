@@ -958,12 +958,10 @@ void UpdatePartitioningForCopyTable(TOperationId operationId, TTxState &txState,
         if (shard.Operation == TTxState::CreateParts) {
             Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shard.Idx));
             Y_ABORT_UNLESS(context.SS->ShardInfos[shard.Idx].TabletID == InvalidTabletId, "Dst shard must not exist yet");
-            auto pathId = context.SS->ShardInfos[shard.Idx].PathId;
             dstTableInfo->PerShardPartitionConfig.erase(shard.Idx);
             context.SS->PersistShardDeleted(db, shard.Idx, context.SS->ShardInfos[shard.Idx].BindedChannels);
             context.SS->ShardInfos.erase(shard.Idx);
             domainInfo->RemoveInternalShard(shard.Idx, context.SS);
-            context.SS->DecrementPathDbRefCount(pathId, "remove shard from txState");
         }
     }
     txState.Shards.clear();

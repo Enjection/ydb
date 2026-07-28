@@ -1036,8 +1036,8 @@ public:
 
         TTxState op;
 
+        // TargetPathId is set by CreateTx below, which is what acquires its reference.
         op.TxType = TTxState::TxSplitTablePartition;
-        op.TargetPathId = path.Base()->PathId;
         op.State = TTxState::CreateParts;
 
         // Fill Src shards for tx

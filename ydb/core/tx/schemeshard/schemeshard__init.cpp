@@ -2325,15 +2325,13 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                                 << ", TabletType: " << TTabletTypes::TypeToStr(std::get<4>(rec))
                                 << ", at schemeshard: " << Self->TabletID());
 
-                Y_ABORT_UNLESS(!Self->ShardInfos.contains(idx));
-                TShardInfo& shard = Self->ShardInfos[idx];
+                TShardInfo loaded;
+                loaded.TabletID = std::get<1>(rec);
+                loaded.PathId = std::get<2>(rec);
+                loaded.CurrentTxId = std::get<3>(rec);
+                loaded.TabletType = std::get<4>(rec);
 
-                shard.TabletID = std::get<1>(rec);
-                shard.PathId = std::get<2>(rec);
-                shard.CurrentTxId = std::get<3>(rec);
-                shard.TabletType = std::get<4>(rec);
-
-                Self->IncrementPathDbRefCount(shard.PathId);
+                TShardInfo& shard = Self->ShardInfos.Emplace(idx, std::move(loaded));
 
                 Y_ABORT_UNLESS(shard.TabletType != ETabletType::TypeInvalid, "upgrade schema was wrong");
 
@@ -3911,18 +3909,22 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto operationId = TOperationId(txInFlightRowset.GetValue<Schema::TxInFlightV2::TxId>(),
                                                 txInFlightRowset.GetValue<Schema::TxInFlightV2::TxPartId>());
 
-                // Inserted below, once its paths are known to exist.
-                TTxState loaded;
-
-                loaded.TxType =        (TTxState::ETxType)txInFlightRowset.GetValue<Schema::TxInFlightV2::TxType>();
-
-                loaded.State =         (TTxState::ETxState)txInFlightRowset.GetValue<Schema::TxInFlightV2::State>();
+                const auto txType =    (TTxState::ETxType)txInFlightRowset.GetValue<Schema::TxInFlightV2::TxType>();
 
                 TLocalPathId ownerTarget =  txInFlightRowset.GetValue<Schema::TxInFlightV2::TargetOwnerPathId>();
                 TLocalPathId localTarget =  txInFlightRowset.GetValue<Schema::TxInFlightV2::TargetPathId>();
-                loaded.TargetPathId = ownerTarget == InvalidOwnerId
+                const TPathId targetPathId = ownerTarget == InvalidOwnerId
                     ? TPathId(selfId, localTarget)
                     : TPathId(ownerTarget, localTarget);
+
+                const TPathId sourcePathId = TPathId(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceOwnerId>(),
+                                                txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceLocalPathId>());
+
+                // Inserted below, once its paths are known to exist. The pathIds go
+                // through the constructor: they are not assignable after the fact.
+                TTxState loaded(txType, targetPathId, sourcePathId);
+
+                loaded.State =         (TTxState::ETxState)txInFlightRowset.GetValue<Schema::TxInFlightV2::State>();
 
                 loaded.MinStep =       txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::MinStep>(InvalidStepId);
                 loaded.PlanStep =      txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::PlanStep>(InvalidStepId);
@@ -3933,8 +3935,6 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 loaded.Cancel = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::CancelBackup>(false);
                 loaded.BuildIndexId =  txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::BuildIndexId>();
 
-                loaded.SourcePathId =  TPathId(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceOwnerId>(),
-                                                txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceLocalPathId>());
                 loaded.NeedUpdateObject = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedUpdateObject>(false);
                 loaded.NeedSyncHive = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedSyncHive>(false);
 
@@ -4373,11 +4373,12 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                                        << ", shardIdx: " << shardIdx
                                        << ", shardPathId: " << Self->ShardInfos.at(shardIdx).PathId);
 
-                        txState->SourcePathId = Self->ShardInfos.at(shardIdx).PathId;
-                        Y_ABORT_UNLESS(txState->SourcePathId != InvalidPathId);
-                        Y_VERIFY_S(Self->PathsById.contains(txState->SourcePathId), "No source path element for Operation"
+                        const TPathId srcPathId = Self->ShardInfos.at(shardIdx).PathId;
+                        Y_ABORT_UNLESS(srcPathId != InvalidPathId);
+                        Y_VERIFY_S(Self->PathsById.contains(srcPathId), "No source path element for Operation"
                                      << ", txId: " << operationId.GetTxId()
-                                     << ", pathId: " << txState->SourcePathId);
+                                     << ", pathId: " << srcPathId);
+                        Self->TxInFlight.ReassignSourcePath(operationId, srcPathId);
 
                         TPathElement::TPtr srcPath = Self->PathsById.at(txState->SourcePathId);
                         Y_VERIFY_S(srcPath, "Null path element, pathId: " << txState->SourcePathId);
@@ -4386,7 +4387,6 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                         if (!srcPath->Dropped()) {
                             srcPath->PathState = TPathElement::EPathState::EPathStateCopying;
                         }
-                        txState->SourcePathRef.Reset(Self, txState->SourcePathId, "transaction source path");
                     }
                 }
             }
@@ -5126,8 +5126,8 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                     TExportInfo::TItem& item = exportInfo->Items[itemIdx];
                     item.SourcePathName = rowset.GetValue<Schema::ExportItems::SourcePathName>();
 
-                    item.SourcePathId.OwnerId = rowset.GetValueOrDefault<Schema::ExportItems::SourceOwnerPathId>(selfId);
-                    item.SourcePathId.LocalPathId = rowset.GetValue<Schema::ExportItems::SourcePathId>();
+                    item.SourcePathId.Get().OwnerId = rowset.GetValueOrDefault<Schema::ExportItems::SourceOwnerPathId>(selfId);
+                    item.SourcePathId.Get().LocalPathId = rowset.GetValue<Schema::ExportItems::SourcePathId>();
                     item.SourcePathType = rowset.GetValue<Schema::ExportItems::SourcePathType>();
                     item.ParentIdx = rowset.GetValueOrDefault<Schema::ExportItems::ParentIndex>(Max<ui32>());
 

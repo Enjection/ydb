@@ -157,7 +157,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
         return true;
     }
 
-    auto pathId = txState->TargetPathId;
+    TPathId pathId = txState->TargetPathId;
     Y_ABORT_UNLESS(context.SS->PathsById.contains(pathId));
     TPath path = TPath::Init(pathId, context.SS);
 

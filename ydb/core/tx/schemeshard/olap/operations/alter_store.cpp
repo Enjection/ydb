@@ -127,7 +127,7 @@ public:
             context.SS->FillSeqNo(tx, seqNo);
 
             auto* alter = tx.MutableAlterStore();
-            alter->SetStorePathId(txState->TargetPathId.LocalPathId);
+            alter->SetStorePathId(txState->TargetPathId.Get().LocalPathId);
 
             for (ui32 id : droppedSchemaPresets) {
                 alter->AddDroppedSchemaPresets(id);

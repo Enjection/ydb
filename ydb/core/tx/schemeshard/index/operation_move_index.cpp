@@ -114,8 +114,8 @@ public:
                                  << ", type: " << (int)txState->TxType
                                  << ", parent pathId: " << pathId);
                     if (pathId == parent.Base()->PathId) {
-                        txState->SourcePathId.ToProto(remap->MutableSrcPathId());
-                        txState->TargetPathId.ToProto(remap->MutableDstPathId());
+                        txState->SourcePathId.Get().ToProto(remap->MutableSrcPathId());
+                        txState->TargetPathId.Get().ToProto(remap->MutableDstPathId());
                         auto targetIndexName = context.SS->PathsById.at(txState->TargetPathId);
 
                         for (const auto& [_, childPathId] : path->GetChildren()) {

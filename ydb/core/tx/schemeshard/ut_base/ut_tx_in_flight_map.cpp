@@ -26,6 +26,22 @@ struct TCanAcquirePathRefs<
     T,
     std::void_t<decltype(std::declval<T&>().AcquirePathRefs(nullptr, true))>>: std::true_type {};
 
+template <class T, class = void>
+struct TCanAssignTargetPathId: std::false_type {};
+
+template <class T>
+struct TCanAssignTargetPathId<
+    T,
+    std::void_t<decltype(std::declval<T&>().TargetPathId = std::declval<TPathId>())>>: std::true_type {};
+
+template <class T, class = void>
+struct TCanAssignSourcePathId: std::false_type {};
+
+template <class T>
+struct TCanAssignSourcePathId<
+    T,
+    std::void_t<decltype(std::declval<T&>().SourcePathId = std::declval<TPathId>())>>: std::true_type {};
+
 } // namespace
 
 Y_UNIT_TEST_SUITE(TTxInFlightMapTest) {
@@ -40,6 +56,30 @@ Y_UNIT_TEST_SUITE(TTxInFlightMapTest) {
         static_assert(!std::is_copy_assignable_v<TTxInFlightMap>);
         static_assert(!std::is_move_constructible_v<TTxInFlightMap>);
         static_assert(!std::is_move_assignable_v<TTxInFlightMap>);
+    }
+
+    // Reseating a pathId after insertion would leave the acquired reference pointing at
+    // the old path; the fields are readable but not assignable from outside TTxState.
+    Y_UNIT_TEST(PathIdFieldsAreNotAssignable) {
+        static_assert(!TCanAssignTargetPathId<TTxState>::value,
+            "TargetPathId must not be assignable outside TTxState");
+        static_assert(!TCanAssignSourcePathId<TTxState>::value,
+            "SourcePathId must not be assignable outside TTxState");
+    }
+
+    // Reads still behave like a plain TPathId.
+    Y_UNIT_TEST(PathIdFieldsReadLikeAPathId) {
+        TTxInFlightMap map(nullptr);
+        TTxState& stored = map.Emplace(
+            OpId(1),
+            TTxState(TTxState::TxCopyTable, Path(10), Path(20)));
+
+        const TPathId target = stored.TargetPathId;
+        UNIT_ASSERT_EQUAL(target, Path(10));
+        UNIT_ASSERT_EQUAL(stored.TargetPathId, Path(10));
+        UNIT_ASSERT(stored.TargetPathId != Path(11));
+        UNIT_ASSERT_VALUES_EQUAL(stored.TargetPathId.Get().LocalPathId, 10u);
+        UNIT_ASSERT_VALUES_EQUAL(TStringBuilder() << stored.TargetPathId, TStringBuilder() << Path(10));
     }
 
     Y_UNIT_TEST(EmplaceInsertsAndKeepsState) {

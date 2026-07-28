@@ -237,8 +237,6 @@ public:
 
         txState.TargetPathTargetState = static_cast<NKikimrSchemeOp::EPathState>(NKikimrSchemeOp::EPathStateOutgoingIncrementalRestore);
 
-        // Set the target path ID for coordinator communication
-        txState.TargetPathId = bcPath.Base()->PathId;
         bcPath.Base()->PathState = *txState.TargetPathTargetState;
 
         auto result = MakeHolder<TProposeResponse>(NKikimrScheme::StatusAccepted, ui64(OperationId.GetTxId()), ui64(schemeshardTabletId));

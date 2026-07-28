@@ -161,8 +161,6 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
 
             Self->ShardInfos.erase(ShardIdx);
 
-            Self->DecrementPathDbRefCount(pathId, "shard deleted");
-
             // This is for tests, so it's kinda ok to reply from execute
             auto itSubscribers = Self->ShardDeletionSubscribers.find(ShardIdx);
             if (itSubscribers != Self->ShardDeletionSubscribers.end()) {
