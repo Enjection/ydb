@@ -224,10 +224,7 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
         const auto& [id, elem] = TxStates.top();
         if (!elem) {
             // counter rollback is owned by the Paths snapshots - disarm, do not release
-            if (auto* txState = ss->TxInFlight.FindPtr(id)) {
-                txState->DisarmPathRefs();
-            }
-            ss->TxInFlight.erase(id);
+            ss->TxInFlight.EraseDisarmed(id);
         } else {
             Y_ABORT("No such cases are exist");
         }

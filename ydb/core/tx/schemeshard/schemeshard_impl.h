@@ -348,7 +348,7 @@ public:
 
     THashMap<TTxId, TOperation::TPtr> Operations;
     THashMap<TTxId, TPublicationInfo> Publications;
-    THashMap<TOperationId, TTxState> TxInFlight;
+    TTxInFlightMap TxInFlight{this};
     THashMap<TPathId, TPathDbRef> OwnDbRefs; // path's own type info record ref
     // Non-null only inside an armed propose; undo-less mutators assert against it.
     const TMemoryChanges* ArmedChanges = nullptr;

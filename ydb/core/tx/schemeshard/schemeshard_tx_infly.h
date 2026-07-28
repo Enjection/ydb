@@ -127,6 +127,11 @@ struct TTxState {
         , StartTime(::Now())
     {}
 
+private:
+    // Arming and disarming are TxInFlight's job: an entry becomes referenced by being
+    // inserted, and loses its references only by leaving.
+    friend class TTxInFlightMap;
+
     // `sourceExists` is false only for an orphaned in-flight tx whose source path
     // is gone: reference the target, not the missing source.
     void AcquirePathRefs(TSchemeShard* ss, bool sourceExists = true) {
@@ -142,6 +147,7 @@ struct TTxState {
         SourcePathRef.DetachWithoutRelease();
     }
 
+public:
     void AcceptPendingSchemeNotification() {
         ReadyForNotifications = true;
         for (const auto& shard : SchemeChangeNotificationReceived) {
@@ -179,5 +185,76 @@ struct TTxState {
 // Non-copyable via the TPathDbRef members: assigning over a live tx state drops its refs.
 static_assert(!std::is_copy_assignable_v<TTxState>);
 static_assert(std::is_move_assignable_v<TTxState>);
+
+// The in-flight tx states, holding a DbRefCount reference on each entry's target and
+// source path. Membership is the reference: Emplace acquires, erase releases through
+// ~TTxState, and there is no operator[], so an entry cannot exist unreferenced.
+//
+// The invariant is on the container, not on TTxState::TargetPathId, because a scratch
+// tx state assembled before insertion correctly holds no reference.
+class TTxInFlightMap {
+    using TInner = THashMap<TOperationId, TTxState>;
+
+public:
+    using iterator = typename TInner::iterator;
+    using const_iterator = typename TInner::const_iterator;
+
+    explicit TTxInFlightMap(TSchemeShard* ss)
+        : SS(ss)
+    {}
+
+    // Owns references; a copy would double-acquire.
+    TTxInFlightMap(const TTxInFlightMap&) = delete;
+    TTxInFlightMap& operator=(const TTxInFlightMap&) = delete;
+    TTxInFlightMap(TTxInFlightMap&&) = delete;
+    TTxInFlightMap& operator=(TTxInFlightMap&&) = delete;
+
+    // The only insertion point, and it always acquires.
+    TTxState& Emplace(const TOperationId& opId, TTxState&& state, bool sourceExists = true) {
+        auto [it, inserted] = Map.emplace(opId, std::move(state));
+        Y_VERIFY_S(inserted, "Trying to create duplicate Tx " << opId);
+        it->second.AcquirePathRefs(SS, sourceExists);
+        return it->second;
+    }
+
+    // ~TTxState releases the entry's references.
+    size_t erase(const TOperationId& opId) {
+        return Map.erase(opId);
+    }
+
+    // Propose rollback: a Paths snapshot owns restoring the counter, so the entry must
+    // go without releasing, or the rollback lands twice.
+    size_t EraseDisarmed(const TOperationId& opId) {
+        if (auto* txState = Map.FindPtr(opId)) {
+            txState->DisarmPathRefs();
+        }
+        return Map.erase(opId);
+    }
+
+    // Teardown: PathsById is cleared alongside, so release would target missing paths.
+    void clear() {
+        for (auto& [opId, txState] : Map) {
+            txState.DisarmPathRefs();
+        }
+        Map.clear();
+    }
+
+    TTxState* FindPtr(const TOperationId& opId) { return Map.FindPtr(opId); }
+    const TTxState* FindPtr(const TOperationId& opId) const { return Map.FindPtr(opId); }
+    TTxState& at(const TOperationId& opId) { return Map.at(opId); }
+    const TTxState& at(const TOperationId& opId) const { return Map.at(opId); }
+    bool contains(const TOperationId& opId) const { return Map.contains(opId); }
+    size_t size() const { return Map.size(); }
+    bool empty() const { return Map.empty(); }
+
+    iterator begin() { return Map.begin(); }
+    iterator end() { return Map.end(); }
+    const_iterator begin() const { return Map.begin(); }
+    const_iterator end() const { return Map.end(); }
+
+private:
+    TSchemeShard* SS = nullptr;
+    TInner Map;
+};
 
 }  // namespace NKikimr::NSchemeShard

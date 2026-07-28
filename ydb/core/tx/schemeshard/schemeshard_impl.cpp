@@ -709,9 +709,7 @@ void TSchemeShard::Clear() {
     HasOrphanPlaceholders = false;
 
     // disarm ref handles: the whole state resets, PathsById clears first
-    for (auto& [opId, txState] : TxInFlight) {
-        txState.DisarmPathRefs();
-    }
+    // (TxInFlight disarms itself in clear(), below)
     // ParentRefHeld bits die with their path elements below; nothing to disarm.
     for (auto& [pathId, ref] : OwnDbRefs) {
         ref.DetachWithoutRelease();
@@ -3003,7 +3001,7 @@ void TSchemeShard::ChangeTxState(NIceDb::TNiceDb& db, const TOperationId opId, T
     const auto& ctx = TActivationContext::AsActorContext();
 
     LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD, "Change state for txid " << opId << " "
-                 << NKikimr::NSchemeShard::TxStateName(TxInFlight[opId].State) << " -> " << NKikimr::NSchemeShard::TxStateName(newState));
+                 << NKikimr::NSchemeShard::TxStateName(FindTx(opId)->State) << " -> " << NKikimr::NSchemeShard::TxStateName(newState));
 
     FindTx(opId)->State = newState;
     db.Table<Schema::TxInFlightV2>().Key(opId.GetTxId(), opId.GetSubTxId()).Update(
@@ -6241,10 +6239,8 @@ bool TSchemeShard::ShardIsUnderSplitMergeOp(const TShardIdx& idx) const {
 TTxState &TSchemeShard::CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath) {
     Y_VERIFY_S(!TxInFlight.contains(opId),
                "Trying to create duplicate Tx " << opId);
-    TTxState& txState = TxInFlight[opId];
-    txState = TTxState(txType, targetPath, sourcePath);
+    TTxState& txState = TxInFlight.Emplace(opId, TTxState(txType, targetPath, sourcePath));
     TabletCounters->Simple()[TxTypeInFlightCounter(txType)].Add(1);
-    txState.AcquirePathRefs(this);
     LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
                     "CreateTx for txid " << opId
                     << " type: " << TTxState::TypeName(txType)

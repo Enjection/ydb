@@ -3911,57 +3911,57 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto operationId = TOperationId(txInFlightRowset.GetValue<Schema::TxInFlightV2::TxId>(),
                                                 txInFlightRowset.GetValue<Schema::TxInFlightV2::TxPartId>());
 
-                TTxState& txState = Self->TxInFlight[operationId];
+                // Inserted below, once its paths are known to exist.
+                TTxState loaded;
 
-                txState.TxType =        (TTxState::ETxType)txInFlightRowset.GetValue<Schema::TxInFlightV2::TxType>();
+                loaded.TxType =        (TTxState::ETxType)txInFlightRowset.GetValue<Schema::TxInFlightV2::TxType>();
 
-                txState.State =         (TTxState::ETxState)txInFlightRowset.GetValue<Schema::TxInFlightV2::State>();
+                loaded.State =         (TTxState::ETxState)txInFlightRowset.GetValue<Schema::TxInFlightV2::State>();
 
                 TLocalPathId ownerTarget =  txInFlightRowset.GetValue<Schema::TxInFlightV2::TargetOwnerPathId>();
                 TLocalPathId localTarget =  txInFlightRowset.GetValue<Schema::TxInFlightV2::TargetPathId>();
-                txState.TargetPathId = ownerTarget == InvalidOwnerId
+                loaded.TargetPathId = ownerTarget == InvalidOwnerId
                     ? TPathId(selfId, localTarget)
                     : TPathId(ownerTarget, localTarget);
 
-                txState.MinStep =       txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::MinStep>(InvalidStepId);
-                txState.PlanStep =      txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::PlanStep>(InvalidStepId);
+                loaded.MinStep =       txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::MinStep>(InvalidStepId);
+                loaded.PlanStep =      txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::PlanStep>(InvalidStepId);
 
                 TString extraData =     txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::ExtraBytes>("");
-                txState.StartTime =     TInstant::MicroSeconds(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::StartTime>());
-                txState.DataTotalSize = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::DataTotalSize>(0);
-                txState.Cancel = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::CancelBackup>(false);
-                txState.BuildIndexId =  txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::BuildIndexId>();
+                loaded.StartTime =     TInstant::MicroSeconds(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::StartTime>());
+                loaded.DataTotalSize = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::DataTotalSize>(0);
+                loaded.Cancel = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::CancelBackup>(false);
+                loaded.BuildIndexId =  txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::BuildIndexId>();
 
-                txState.SourcePathId =  TPathId(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceOwnerId>(),
+                loaded.SourcePathId =  TPathId(txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceOwnerId>(),
                                                 txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::SourceLocalPathId>());
-                txState.NeedUpdateObject = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedUpdateObject>(false);
-                txState.NeedSyncHive = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedSyncHive>(false);
+                loaded.NeedUpdateObject = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedUpdateObject>(false);
+                loaded.NeedSyncHive = txInFlightRowset.GetValueOrDefault<Schema::TxInFlightV2::NeedSyncHive>(false);
 
                 if (Self->TolerateOrphanedPaths) {
-                    const bool orphanTarget = !Self->PathsById.contains(txState.TargetPathId);
-                    const bool orphanSource = bool(txState.SourcePathId) && !Self->PathsById.contains(txState.SourcePathId);
+                    const bool orphanTarget = !Self->PathsById.contains(loaded.TargetPathId);
+                    const bool orphanSource = bool(loaded.SourcePathId) && !Self->PathsById.contains(loaded.SourcePathId);
                     if (orphanTarget || orphanSource) {
                         LOG_ERROR_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                             "TTxInit for TxInFlight: " << (orphanTarget ? "target" : "source")
                                 << " path element not found, skipping tx restore and removing its rows"
                                 << ", txId: " << operationId.GetTxId()
                                 << ", partId: " << operationId.GetSubTxId()
-                                << ", TxType: " << TTxState::TypeName(txState.TxType)
-                                << ", pathId: " << (orphanTarget ? txState.TargetPathId : txState.SourcePathId));
-                        Self->PersistRemoveTx(db, operationId, txState);
+                                << ", TxType: " << TTxState::TypeName(loaded.TxType)
+                                << ", pathId: " << (orphanTarget ? loaded.TargetPathId : loaded.SourcePathId));
+                        Self->PersistRemoveTx(db, operationId, loaded);
                         skippedOrphanTxs.insert(operationId);
                         skippedOrphanTxIds.insert(operationId.GetTxId());
-                        Self->TxInFlight.erase(operationId);
                         if (!txInFlightRowset.Next())
                             return false;
                         continue;
                     }
                 }
 
-                if ((txState.TxType == TTxState::TxCopyTable || txState.TxType == TTxState::TxReadOnlyCopyColumnTable) && txState.SourcePathId) {
-                    Y_ABORT_UNLESS(txState.SourcePathId);
-                    TPathElement::TPtr srcPath = Self->PathsById.at(txState.SourcePathId);
-                    Y_VERIFY_S(srcPath, "Null path element, pathId: " << txState.SourcePathId);
+                if ((loaded.TxType == TTxState::TxCopyTable || loaded.TxType == TTxState::TxReadOnlyCopyColumnTable) && loaded.SourcePathId) {
+                    Y_ABORT_UNLESS(loaded.SourcePathId);
+                    TPathElement::TPtr srcPath = Self->PathsById.at(loaded.SourcePathId);
+                    Y_VERIFY_S(srcPath, "Null path element, pathId: " << loaded.SourcePathId);
 
                     // CopyTable source must not be altered or dropped while the Tx is in progress
                     if (!srcPath->Dropped()) {
@@ -3969,10 +3969,10 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                     }
                 }
 
-                if (txState.TxType == TTxState::TxMoveTable || txState.TxType == TTxState::TxMoveTableIndex || txState.TxType == TTxState::TxMoveSequence || txState.TxType == TTxState::TxMoveLocalIndex) {
-                    Y_ABORT_UNLESS(txState.SourcePathId);
-                    TPathElement::TPtr srcPath = Self->PathsById.at(txState.SourcePathId);
-                    Y_VERIFY_S(srcPath, "Null path element, pathId: " << txState.SourcePathId);
+                if (loaded.TxType == TTxState::TxMoveTable || loaded.TxType == TTxState::TxMoveTableIndex || loaded.TxType == TTxState::TxMoveSequence || loaded.TxType == TTxState::TxMoveLocalIndex) {
+                    Y_ABORT_UNLESS(loaded.SourcePathId);
+                    TPathElement::TPtr srcPath = Self->PathsById.at(loaded.SourcePathId);
+                    Y_VERIFY_S(srcPath, "Null path element, pathId: " << loaded.SourcePathId);
 
                     // Moving source must not be altered or dropped while the Tx is in progress
                     if (!srcPath->Dropped()) {
@@ -3982,14 +3982,14 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
 
                 // Orphaned sources are skipped above when TolerateOrphanedPaths is on,
                 // so a missing source here means the control is off: fail fast.
-                const bool sourceExists = !txState.SourcePathId || Self->PathsById.contains(txState.SourcePathId);
-                if (txState.SourcePathId && !sourceExists) {
+                const bool sourceExists = !loaded.SourcePathId || Self->PathsById.contains(loaded.SourcePathId);
+                if (loaded.SourcePathId && !sourceExists) {
                     Y_VERIFY_S(Self->TolerateOrphanedPaths, "Source path element not found for in-flight tx"
                         << ", txId: " << operationId.GetTxId()
-                        << ", TxType: " << TTxState::TypeName(txState.TxType)
-                        << ", pathId: " << txState.SourcePathId);
+                        << ", TxType: " << TTxState::TypeName(loaded.TxType)
+                        << ", pathId: " << loaded.SourcePathId);
                 }
-                txState.AcquirePathRefs(Self, sourceExists);
+                TTxState& txState = Self->TxInFlight.Emplace(operationId, std::move(loaded), sourceExists);
 
                 if (txState.TxType == TTxState::TxCreateSubDomain) {
                     Y_ABORT_UNLESS(Self->SubDomains.contains(txState.TargetPathId));
