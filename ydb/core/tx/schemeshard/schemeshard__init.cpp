@@ -2856,7 +2856,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 TString poolName = std::get<3>(rec);
 
                 Y_ABORT_UNLESS(Self->ShardInfos.contains(shardIdx));
-                TShardInfo& shardInfo = Self->ShardInfos[shardIdx];
+                TShardInfo& shardInfo = Self->ShardInfos.at(shardIdx);
                 if (shardInfo.BindedChannels.size() <= channelId) {
                     shardInfo.BindedChannels.resize(channelId + 1);
                 }
@@ -3691,7 +3691,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto it = nbsVolumeShards.find(pathId);
                 if (it != nbsVolumeShards.end()) {
                     auto shardIdx = it->second;
-                    const auto& shard = Self->ShardInfos[shardIdx];
+                    const auto& shard = Self->ShardInfos.at(shardIdx);
                     volume->VolumeTabletId = shard.TabletID;
                     volume->VolumeShardIdx = shardIdx;
                 }
@@ -3787,7 +3787,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto it = fileStoreShards.find(pathId);
                 if (it != fileStoreShards.end()) {
                     TShardIdx shardIdx = it->second;
-                    const auto& shard = Self->ShardInfos[shardIdx];
+                    const auto& shard = Self->ShardInfos.at(shardIdx);
                     fs->IndexShardIdx = shardIdx;
                     fs->IndexTabletId = shard.TabletID;
                 }
@@ -3854,7 +3854,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto it = kesusShards.find(pathId);
                 if (it != kesusShards.end()) {
                     const auto& shardIdx = it->second;
-                    const auto& shard = Self->ShardInfos[shardIdx];
+                    const auto& shard = Self->ShardInfos.at(shardIdx);
                     kesus->KesusShardIdx = shardIdx;
                     kesus->KesusTabletId = shard.TabletID;
                 }

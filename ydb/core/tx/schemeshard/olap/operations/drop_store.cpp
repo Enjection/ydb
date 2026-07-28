@@ -190,7 +190,7 @@ public:
         for (auto& shard : txState->Shards) {
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::ColumnShard);
 
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));
 
             context.OnComplete.BindMsgToPipe(OperationId, tabletId, shard.Idx, event.release());
@@ -340,9 +340,9 @@ public:
 
         for (auto shardIdx : storeInfo->GetColumnShards()) {
             Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::DropParts);
+            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::DropParts);
 
-            context.SS->ShardInfos[shardIdx].CurrentTxId = OperationId.GetTxId();
+            context.SS->ShardInfos.at(shardIdx).CurrentTxId = OperationId.GetTxId();
             context.SS->PersistShardTx(db, shardIdx, OperationId.GetTxId());
         }
 

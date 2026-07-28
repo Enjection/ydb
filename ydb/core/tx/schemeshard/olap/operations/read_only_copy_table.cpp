@@ -80,7 +80,7 @@ public:
         txState->ClearShardsInProgress();
         for (const auto& shard: txState->Shards) {
             auto idx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(idx).TabletID;
             auto event = context.SS->MakeShardProposal(dstPath, OperationId, seqNo, txBody, context.Ctx);
             context.OnComplete.BindMsgToPipe(OperationId, tabletId, idx, event.Release());
         }
@@ -211,7 +211,7 @@ public:
         txState->ClearShardsInProgress();
 
         for (const auto& shard : txState->Shards) {
-            const TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            const TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::ColumnShard);
 
             auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));

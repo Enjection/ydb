@@ -94,7 +94,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
         Y_ABORT_UNLESS(shard.TabletType == ETabletType::BlockStoreVolume
             || shard.TabletType == ETabletType::BlockStoreVolumeDirect);
         TShardIdx shardIdx = shard.Idx;
-        TTabletId tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+        TTabletId tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
         volume->VolumeTabletId = tabletId;
         if (volume->AlterData) {
@@ -110,7 +110,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
 
         for (const auto& p : volume->Shards) {
             const auto& part = p.second;
-            const auto& partTabletId = context.SS->ShardInfos[p.first].TabletID;
+            const auto& partTabletId = context.SS->ShardInfos.at(p.first).TabletID;
             auto info = event->Record.AddPartitions();
             info->SetPartitionId(part->PartitionId);
             info->SetTabletId(ui64(partTabletId));

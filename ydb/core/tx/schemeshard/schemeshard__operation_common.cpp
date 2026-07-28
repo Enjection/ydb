@@ -21,7 +21,7 @@ namespace NSchemeShard {
 THolder<TEvHive::TEvCreateTablet> CreateEvCreateTablet(TPathElement::TPtr targetPath, TShardIdx shardIdx, TSchemeShard* ss)
 {
     auto tablePartitionConfig = ss->GetTablePartitionConfigWithAlterData(targetPath->PathId);
-    const auto& shard = ss->ShardInfos[shardIdx];
+    const auto& shard = ss->ShardInfos.at(shardIdx);
 
     if (shard.TabletType == ETabletType::BlockStorePartition ||
         shard.TabletType == ETabletType::BlockStorePartition2 ||
@@ -145,7 +145,7 @@ bool TCreateParts::HandleReply(TEvHive::TEvAdoptTabletReply::TPtr& ev, TOperatio
         return false;
     }
 
-    TShardInfo& shardInfo = context.SS->ShardInfos[shardIdx];
+    TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
     Y_ABORT_UNLESS(shardInfo.TabletID == InvalidTabletId || shardInfo.TabletID == tabletId);
 
     Y_ABORT_UNLESS(tabletId != InvalidTabletId);
@@ -294,7 +294,7 @@ bool TCreateParts::HandleReply(TEvHive::TEvCreateTabletReply::TPtr& ev, TOperati
 THolder<TEvHive::TEvAdoptTablet> TCreateParts::AdoptRequest(TShardIdx shardIdx, TOperationContext& context) {
     Y_ABORT_UNLESS(context.SS->AdoptedShards.contains(shardIdx));
     auto& adoptedShard = context.SS->AdoptedShards[shardIdx];
-    auto& shard = context.SS->ShardInfos[shardIdx];
+    auto& shard = context.SS->ShardInfos.at(shardIdx);
 
     THolder<TEvHive::TEvAdoptTablet> ev = MakeHolder<TEvHive::TEvAdoptTablet>(
         ui64(shard.TabletID),
@@ -722,7 +722,7 @@ void AckAllSchemaChanges(const TOperationId &operationId, TTxState &txState, TOp
     for (const auto& items : txState.SchemeChangeNotificationReceived) {
         const TActorId ackTo = items.second.first;
         const auto shardIdx = items.first;
-        const auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+        const auto tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
         LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                     "send schema changes ack message"
@@ -957,9 +957,9 @@ void UpdatePartitioningForCopyTable(TOperationId operationId, TTxState &txState,
         context.SS->PersistRemoveTxShard(db, operationId, shard.Idx);
         if (shard.Operation == TTxState::CreateParts) {
             Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shard.Idx));
-            Y_ABORT_UNLESS(context.SS->ShardInfos[shard.Idx].TabletID == InvalidTabletId, "Dst shard must not exist yet");
+            Y_ABORT_UNLESS(context.SS->ShardInfos.at(shard.Idx).TabletID == InvalidTabletId, "Dst shard must not exist yet");
             dstTableInfo->PerShardPartitionConfig.erase(shard.Idx);
-            context.SS->PersistShardDeleted(db, shard.Idx, context.SS->ShardInfos[shard.Idx].BindedChannels);
+            context.SS->PersistShardDeleted(db, shard.Idx, context.SS->ShardInfos.at(shard.Idx).BindedChannels);
             context.SS->ShardInfos.erase(shard.Idx);
             domainInfo->RemoveInternalShard(shard.Idx, context.SS);
         }
@@ -1028,7 +1028,7 @@ void UpdatePartitioningForCopyTable(TOperationId operationId, TTxState &txState,
     // Persist new shards info
     for (const auto* shard : dstTableInfo->GetPartitions()) {
         Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shard->ShardIdx), "shard info is set before");
-        const auto tabletType = context.SS->ShardInfos[shard->ShardIdx].TabletType;
+        const auto tabletType = context.SS->ShardInfos.at(shard->ShardIdx).TabletType;
         context.SS->PersistShardMapping(db, shard->ShardIdx, InvalidTabletId, txState.TargetPathId, operationId.GetTxId(), tabletType);
         context.SS->PersistChannelsBinding(db, shard->ShardIdx, channelsBinding);
 
@@ -1059,7 +1059,7 @@ TVector<TTableShardInfo> ApplyPartitioningCopyTable(const TShardInfo &templateDa
         // Source shards need to get "Send parts" transaction
         auto srcShardIdx = srcTableInfo->GetPartitions()[i]->ShardIdx;
         Y_ABORT_UNLESS(ss->ShardInfos.contains(srcShardIdx), "Source table shard not found");
-        auto srcTabletId = ss->ShardInfos[srcShardIdx].TabletID;
+        auto srcTabletId = ss->ShardInfos.at(srcShardIdx).TabletID;
         Y_ABORT_UNLESS(srcTabletId != InvalidTabletId);
         txState.Shards.emplace_back(srcShardIdx, ETabletType::DataShard, TTxState::ConfigureParts);
         // Destination shards need to be created, configured and then they will receive parts

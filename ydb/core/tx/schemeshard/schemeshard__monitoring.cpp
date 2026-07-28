@@ -2150,7 +2150,7 @@ private:
 
             OutputShardInfo(shardIdx, str);
 
-            const TShardInfo& shard = Self->ShardInfos[shardIdx];
+            const TShardInfo& shard = Self->ShardInfos.at(shardIdx);
 
             if (!Self->PathsById.contains(shard.PathId)) {
                 TAG(TH4) {

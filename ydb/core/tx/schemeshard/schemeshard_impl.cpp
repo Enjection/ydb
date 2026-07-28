@@ -7073,7 +7073,7 @@ void TSchemeShard::Handle(TEvHive::TEvCreateTabletReply::TPtr &ev, const TActorC
         return;
     }
 
-    TShardInfo& shardInfo = ShardInfos[shardIdx];
+    TShardInfo& shardInfo = ShardInfos.at(shardIdx);
     const auto txId = shardInfo.CurrentTxId;
 
     if (!Operations.contains(txId)) {
@@ -7111,7 +7111,7 @@ void TSchemeShard::Handle(TEvHive::TEvAdoptTabletReply::TPtr &ev, const TActorCo
         return;
     }
 
-    TShardInfo& shardInfo = ShardInfos[shardIdx];
+    TShardInfo& shardInfo = ShardInfos.at(shardIdx);
     const auto txId = shardInfo.CurrentTxId;
 
     if (!Operations.contains(txId)) {

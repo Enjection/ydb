@@ -150,7 +150,7 @@ TTxState& PrepareChanges(TOperationId operationId, TPathElement::TPtr parentDir,
     context.SS->PersistUpdateNextShardIdx(db);
     for (auto shard : txState.Shards) {
         Y_ABORT_UNLESS(shard.Operation == TTxState::CreateParts);
-        context.SS->PersistChannelsBinding(db, shard.Idx, context.SS->ShardInfos[shard.Idx].BindedChannels);
+        context.SS->PersistChannelsBinding(db, shard.Idx, context.SS->ShardInfos.at(shard.Idx).BindedChannels);
         context.SS->PersistShardMapping(db, shard.Idx, InvalidTabletId, pathId, operationId.GetTxId(), shard.TabletType);
     }
     Y_ABORT_UNLESS(txState.Shards.size() == shardsToCreate);

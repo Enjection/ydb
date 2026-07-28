@@ -569,7 +569,7 @@ bool TTxStoreTableStats::PersistSingleStats(const TPathId& pathId,
     TVector<TShardIdx> shardsToMerge;
     TString mergeReason;
     if ((!index || index->State == NKikimrSchemeOp::EIndexStateReady)
-        && table->CheckCanMergePartitions(Self->SplitSettings, forceShardSplitSettings, shardIdx, Self->ShardInfos[shardIdx].TabletID, shardsToMerge, mainTableForIndex, now, mergeReason)
+        && table->CheckCanMergePartitions(Self->SplitSettings, forceShardSplitSettings, shardIdx, Self->ShardInfos.at(shardIdx).TabletID, shardsToMerge, mainTableForIndex, now, mergeReason)
     ) {
         TTxId txId = Self->GetCachedTxId(ctx);
 
@@ -582,7 +582,7 @@ bool TTxStoreTableStats::PersistSingleStats(const TPathId& pathId,
             return true;
         }
 
-        auto request = MergeRequest(Self, txId, Self->ShardInfos[shardIdx].PathId, shardsToMerge);
+        auto request = MergeRequest(Self, txId, Self->ShardInfos.at(shardIdx).PathId, shardsToMerge);
 
         LOG_INFO_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
             "Propose merge request: " << request->Record.ShortDebugString()

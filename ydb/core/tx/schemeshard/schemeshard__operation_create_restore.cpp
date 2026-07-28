@@ -41,7 +41,7 @@ struct TRestore {
         const auto seqNo = context.SS->StartRound(txState);
         for (ui32 i = 0; i < txState.Shards.size(); ++i) {
             const auto& idx = txState.Shards[i].Idx;
-            const auto& shardId = context.SS->ShardInfos[idx].TabletID;
+            const auto& shardId = context.SS->ShardInfos.at(idx).TabletID;
 
             LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "Propose restore"

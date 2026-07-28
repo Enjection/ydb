@@ -55,7 +55,7 @@ public:
         auto seqNo = context.SS->StartRound(*txState);
 
         for (auto& shard : txState->Shards) {
-            const TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            const TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             AFL_VERIFY(shard.TabletType == ETabletType::ColumnShard);
             auto txShardString = update->GetShardTxBodyString((ui64)tabletId, seqNo);
             auto event = std::make_unique<TEvColumnShard::TEvProposeTransaction>(
@@ -203,7 +203,7 @@ public:
         txState->ClearShardsInProgress();
 
         for (auto& shard : txState->Shards) {
-            TTabletId tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            TTabletId tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             switch (shard.TabletType) {
                 case ETabletType::ColumnShard: {
                     auto event = std::make_unique<TEvColumnShard::TEvNotifyTxCompletion>(ui64(OperationId.GetTxId()));
@@ -340,9 +340,9 @@ public:
                 auto shardIdx = context.SS->TabletIdToShardIdx.at(tabletId);
 
                 Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::ConfigureParts);
+                txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::ConfigureParts);
 
-                context.SS->ShardInfos[shardIdx].CurrentTxId = OperationId.GetTxId();
+                context.SS->ShardInfos.at(shardIdx).CurrentTxId = OperationId.GetTxId();
                 context.SS->PersistShardTx(db, shardIdx, OperationId.GetTxId());
             }
 

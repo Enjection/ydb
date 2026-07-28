@@ -99,7 +99,7 @@ public:
 
         for (auto& shard : txState->Shards) {
             auto shardIdx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::SequenceShard);
 
@@ -350,7 +350,7 @@ public:
         for (const auto& shardIdxProto : sequenceInfo->Sharding.GetSequenceShards()) {
             TShardIdx shardIdx = FromProto(shardIdxProto);
             Y_VERIFY_S(context.SS->ShardInfos.contains(shardIdx), "Unknown shardIdx " << shardIdx);
-            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos[shardIdx].TabletType, TTxState::DropParts);
+            txState.Shards.emplace_back(shardIdx, context.SS->ShardInfos.at(shardIdx).TabletType, TTxState::DropParts);
             // N.B. we don't change or persist CurrentTxId for the shard unlike most operations
             // The reason is that we don't operate on the shard itself, only on objects inside the shard
         }

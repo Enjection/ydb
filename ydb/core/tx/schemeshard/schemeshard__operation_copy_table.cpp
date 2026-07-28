@@ -85,10 +85,10 @@ public:
 
         for (ui32 i = 0; i < dstTableInfo->GetPartitions().size(); ++i) {
             TShardIdx srcShardIdx = srcTableInfo->GetPartitions()[i]->ShardIdx;
-            TTabletId srcDatashardId = context.SS->ShardInfos[srcShardIdx].TabletID;
+            TTabletId srcDatashardId = context.SS->ShardInfos.at(srcShardIdx).TabletID;
 
             TShardIdx dstShardIdx = dstTableInfo->GetPartitions()[i]->ShardIdx;
-            TTabletId dstDatashardId = context.SS->ShardInfos[dstShardIdx].TabletID;
+            TTabletId dstDatashardId = context.SS->ShardInfos.at(dstShardIdx).TabletID;
 
             auto seqNo = context.SS->StartRound(*txState);
 

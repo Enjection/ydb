@@ -51,7 +51,7 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
 
         // "Forget" the deleted shard
         if (Self->ShardInfos.contains(ShardIdx)) {
-            auto tabletType = Self->ShardInfos[ShardIdx].TabletType;
+            auto tabletType = Self->ShardInfos.at(ShardIdx).TabletType;
             switch (tabletType) {
             case ETabletType::DataShard:
                 Self->TabletCounters->Simple()[COUNTER_TABLE_SHARD_INACTIVE_COUNT].Sub(1);

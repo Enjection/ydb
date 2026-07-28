@@ -127,7 +127,7 @@ public:
             auto solomonPartition = solomonVol->Partitions[shard.Idx];
             Y_VERIFY_S(solomonPartition, "rtmr partitions is null shard idx: " << shard.Idx << " Path: " << txState->TargetPathId);
 
-            auto tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             solomonPartition->TabletId = tabletId;
         }
 
@@ -390,7 +390,7 @@ public:
                 auto& shard = adoptedShards[tabletId];
                 context.SS->AdoptedShards[shardIdx] = shard;
                 context.SS->PersistAdoptedShardMapping(db, shardIdx, tabletId, shard.PrevOwner, shard.PrevShardIdx);
-                context.SS->ShardInfos[shardIdx].TabletID = tabletId;
+                context.SS->ShardInfos.at(shardIdx).TabletID = tabletId;
             }
 
             context.SS->PersistShardMapping(db, shardIdx, part.second->TabletId, newSolomon->PathId, OperationId.GetTxId(), solomonPartitionInfo.TabletType);

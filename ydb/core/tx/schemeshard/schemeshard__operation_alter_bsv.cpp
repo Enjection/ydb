@@ -142,7 +142,7 @@ public:
         // reconfigure old shards
         for (const auto& kv : volume->Shards) {
             auto shardIdx = kv.first;
-            auto& shardInfo = context.SS->ShardInfos[shardIdx];
+            auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
             auto partitionOp = TTxState::ConfigureParts;
 
             if (!shardInfo.BindedChannels.empty()) {
@@ -192,7 +192,7 @@ public:
         // update the volume shard if needed
         auto volumeOp = TTxState::ConfigureParts;
         auto shardIdx = volume->VolumeShardIdx;
-        auto& shardInfo = context.SS->ShardInfos[shardIdx];
+        auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
         for (ui32 i = 0; i < volumeChannels.size(); ++i) {
             if (i >= shardInfo.BindedChannels.size()) {
                 shardInfo.BindedChannels.push_back(volumeChannels[i]);

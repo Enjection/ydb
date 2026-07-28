@@ -120,7 +120,7 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
                         txState->ShardsInProgress.insert(shardIdx);
                         
                         LOG_I(DebugHint() << " Added shard " << shardIdx 
-                              << " (tablet: " << context.SS->ShardInfos[shardIdx].TabletID << ") to txState");
+                              << " (tablet: " << context.SS->ShardInfos.at(shardIdx).TabletID << ") to txState");
                     }
                 }
             }
@@ -130,7 +130,7 @@ class TIncrementalRestoreFinalizeOp: public TSubOperationWithContext {
             // Send ALTER TABLE transactions to all datashards
             for (const auto& shard : txState->Shards) {
                 auto shardIdx = shard.Idx;
-                auto datashardId = context.SS->ShardInfos[shardIdx].TabletID;
+                auto datashardId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
                 LOG_I(DebugHint() << " Propose ALTER to datashard " << datashardId 
                       << " shardIdx: " << shardIdx << " txid: " << OperationId);

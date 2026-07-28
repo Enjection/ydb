@@ -29,7 +29,7 @@ void PersistShards(NIceDb::TNiceDb& db, TTxState& txState, ui64 shardsToCreate, 
     for (const auto& shard : txState.Shards) {
         Y_ABORT_UNLESS(shard.Operation == TTxState::ETxState::CreateParts);
         Y_ABORT_UNLESS(ss->ShardInfos.contains(shard.Idx), "shard info is set before");
-        auto& shardInfo = ss->ShardInfos[shard.Idx];
+        auto& shardInfo = ss->ShardInfos.at(shard.Idx);
         ss->PersistShardMapping(db, shard.Idx, InvalidTabletId, shardInfo.PathId, shardInfo.CurrentTxId, shardInfo.TabletType);
         ss->PersistChannelsBinding(db, shard.Idx, shardInfo.BindedChannels);
     }

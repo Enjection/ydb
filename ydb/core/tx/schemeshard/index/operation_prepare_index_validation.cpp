@@ -61,7 +61,7 @@ public:
 
         for (ui32 i = 0; i < txState->Shards.size(); ++i) {
             TShardIdx shardIdx = txState->Shards[i].Idx;
-            TTabletId datashardId = context.SS->ShardInfos[shardIdx].TabletID;
+            TTabletId datashardId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
             auto seqNo = context.SS->StartRound(*txState);
 

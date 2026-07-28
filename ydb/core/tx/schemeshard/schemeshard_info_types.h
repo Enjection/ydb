@@ -1698,8 +1698,8 @@ struct TShardInfo {
 // TShardInfo stays a plain value, so the scratch copies the shard factories and
 // split/merge pass around carry no reference.
 //
-// operator[] resolves to at(): every subscript use in the tree reads or mutates a shard
-// that already exists, and a default-insert here would be an unreferenced entry.
+// No operator[]: a default-inserted entry would hold no reference, and a subscript that
+// silently created one is exactly how that would happen unnoticed. Read with at().
 class TShardInfoMap {
     using TInner = THashMap<TShardIdx, TShardInfo>;
 
@@ -1764,8 +1764,6 @@ public:
         Map.clear();
     }
 
-    TShardInfo& operator[](const TShardIdx& shardIdx) { return Map.at(shardIdx); }
-    const TShardInfo& operator[](const TShardIdx& shardIdx) const { return Map.at(shardIdx); }
     TShardInfo& at(const TShardIdx& shardIdx) { return Map.at(shardIdx); }
     const TShardInfo& at(const TShardIdx& shardIdx) const { return Map.at(shardIdx); }
     TShardInfo* FindPtr(const TShardIdx& shardIdx) { return Map.FindPtr(shardIdx); }

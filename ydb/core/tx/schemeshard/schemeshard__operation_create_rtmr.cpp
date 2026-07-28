@@ -94,7 +94,7 @@ public:
             auto rtmrPartition = rtmrVol->Partitions[shard.Idx];
             Y_VERIFY_S(rtmrPartition, "rtmr partitions is null shard idx " <<  shard.Idx << " Path " << txState->TargetPathId);
 
-            auto tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
             rtmrPartition->TabletId = tabletId;
         }
 

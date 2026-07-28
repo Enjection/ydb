@@ -64,7 +64,7 @@ namespace NKikimr::NSchemeShard {
                     for (auto& shard : txState->Shards) {
                         auto shardIdx = shard.Idx;
                         blobDepotInfo->BlobDepotShardIdx = shard.Idx;
-                        auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+                        auto tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
                         blobDepotInfo->BlobDepotTabletId = tabletId;
                         Y_ABORT_UNLESS(shard.TabletType == ETabletType::BlobDepot);
                         auto event = std::make_unique<TEvBlobDepot::TEvApplyConfig>(static_cast<ui64>(OperationId.GetTxId()));
@@ -365,7 +365,7 @@ namespace NKikimr::NSchemeShard {
                 context.SS->PersistUpdateNextShardIdx(db);
                 for (auto shard : txState.Shards) {
                     Y_ABORT_UNLESS(shard.Operation == TTxState::CreateParts);
-                    context.SS->PersistChannelsBinding(db, shard.Idx, context.SS->ShardInfos[shard.Idx].BindedChannels);
+                    context.SS->PersistChannelsBinding(db, shard.Idx, context.SS->ShardInfos.at(shard.Idx).BindedChannels);
                     context.SS->PersistShardMapping(db, shard.Idx, InvalidTabletId, pathId, OperationId.GetTxId(), shard.TabletType);
                 }
 

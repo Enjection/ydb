@@ -22,6 +22,14 @@ TShardInfo Info(ui64 pathLocalId) {
     return TShardInfo(TTxId(1), Path(pathLocalId), ETabletType::DataShard);
 }
 
+template <class T, class = void>
+struct TCanSubscript: std::false_type {};
+
+template <class T>
+struct TCanSubscript<
+    T,
+    std::void_t<decltype(std::declval<T&>()[std::declval<TShardIdx>()])>>: std::true_type {};
+
 } // namespace
 
 Y_UNIT_TEST_SUITE(TShardInfoMapTest) {
@@ -45,13 +53,19 @@ Y_UNIT_TEST_SUITE(TShardInfoMapTest) {
         UNIT_ASSERT_EQUAL(map.FindPtr(Idx(1)), &stored);
     }
 
-    // Subscript is at(): the tree only ever subscripts shards that already exist, and a
-    // default-insert here would be an entry holding no reference.
-    Y_UNIT_TEST(SubscriptReadsExistingEntry) {
+    // There is no operator[]: a default-inserted entry would hold no reference, so the
+    // only way in is Emplace.
+    Y_UNIT_TEST(HasNoSubscriptOperator) {
+        static_assert(!TCanSubscript<TShardInfoMap>::value,
+            "TShardInfoMap must not offer operator[]; a default-insert would be an "
+            "entry holding no reference");
+    }
+
+    Y_UNIT_TEST(AtGivesMutableAccess) {
         TShardInfoMap map(nullptr);
         map.Emplace(Idx(1), Info(10));
 
-        map[Idx(1)].CurrentTxId = TTxId(7);
+        map.at(Idx(1)).CurrentTxId = TTxId(7);
 
         UNIT_ASSERT_EQUAL(map.at(Idx(1)).CurrentTxId, TTxId(7));
         UNIT_ASSERT_VALUES_EQUAL(map.size(), 1u);

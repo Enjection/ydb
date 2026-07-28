@@ -147,7 +147,7 @@ void MakePQTabletConfig(const TOperationContext& context,
         }
 
         auto* partitionInfo = it->second;
-        const auto& tabletId = context.SS->ShardInfos[partitionInfo->ShardIdx].TabletID;
+        const auto& tabletId = context.SS->ShardInfos.at(partitionInfo->ShardIdx).TabletID;
 
         auto& partition = *config.AddAllPartitions();
         FillPartition(partition, partitionInfo, ui64(tabletId));
@@ -559,7 +559,7 @@ bool TConfigureParts::ProgressState(TOperationContext& context) {
 
             for (const auto& p : pqGroup->Shards) {
                 const auto& pqShard = p.second;
-                const auto& tabletId = context.SS->ShardInfos[p.first].TabletID;
+                const auto& tabletId = context.SS->ShardInfos.at(p.first).TabletID;
                 auto tablet = event->Record.AddTablets();
                 tablet->SetTabletId(ui64(tabletId));
                 tablet->SetOwner(ui64(context.SS->SelfTabletId()));

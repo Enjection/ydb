@@ -635,7 +635,7 @@ public:
 
         for (auto& shard : txState->Shards) {
             auto shardIdx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[shard.Idx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shard.Idx).TabletID;
 
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::SequenceShard);
 

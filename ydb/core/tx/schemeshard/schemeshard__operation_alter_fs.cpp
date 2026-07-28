@@ -102,7 +102,7 @@ public:
         for (const auto& shard: txState->Shards) {
             Y_ABORT_UNLESS(shard.TabletType == ETabletType::FileStore);
             auto shardIdx = shard.Idx;
-            auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
+            auto tabletId = context.SS->ShardInfos.at(shardIdx).TabletID;
 
             TAutoPtr<TEvFileStore::TEvUpdateConfig> event(new TEvFileStore::TEvUpdateConfig());
             event->Record.SetTxId(ui64(OperationId.GetTxId()));
@@ -472,7 +472,7 @@ TTxState& TAlterFileStore::PrepareChanges(
         TTabletId tabletId = fs->IndexTabletId;
 
         Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shardIdx));
-        auto& shardInfo = context.SS->ShardInfos[shardIdx];
+        auto& shardInfo = context.SS->ShardInfos.at(shardIdx);
         Y_ABORT_UNLESS(shardInfo.TabletID == tabletId);
         txState.Shards.emplace_back(shardIdx, ETabletType::FileStore, TTxState::CreateParts);
         shardInfo.CurrentTxId = operationId.GetTxId();
@@ -561,7 +561,7 @@ void TAlterFileStore::ApplyChannelBindings(
         const TChannelsBindings& channelBindings,
         TOperationContext& context)
 {
-    auto& shardInfo = context.SS->ShardInfos[fs->IndexShardIdx];
+    auto& shardInfo = context.SS->ShardInfos.at(fs->IndexShardIdx);
     if (!shardInfo.BindedChannels.empty()) {
         Y_ABORT_UNLESS(shardInfo.BindedChannels.size() <= channelBindings.size());
         shardInfo.BindedChannels.resize(channelBindings.size());
