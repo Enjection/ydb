@@ -93,10 +93,10 @@ Y_UNIT_TEST_SUITE(TShardInfoMapTest) {
 
         const TShardInfo snapshot = map.at(Idx(1));
 
-        UNIT_ASSERT_VALUES_EQUAL(map.EraseDisarmed(Idx(1)), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(map.EraseWithoutRelease(Idx(1)), 1u);
         UNIT_ASSERT(!map.contains(Idx(1)));
 
-        map.RestoreDisarmed(Idx(1), snapshot);
+        map.RestoreWithoutAcquire(Idx(1), snapshot);
         UNIT_ASSERT(map.contains(Idx(1)));
         UNIT_ASSERT_EQUAL(map.at(Idx(1)).PathId, Path(10));
     }

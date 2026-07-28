@@ -203,12 +203,12 @@ Y_UNIT_TEST_SUITE(TTxInFlightMapTest) {
         UNIT_ASSERT_VALUES_EQUAL(map.size(), 0u);
     }
 
-    Y_UNIT_TEST(EraseDisarmedRemovesEntry) {
+    Y_UNIT_TEST(EraseWithoutReleaseRemovesEntry) {
         TTxInFlightMap map(nullptr);
         map.Emplace(OpId(1), TTxState(TTxState::TxCreateTable, Path(10)));
 
-        UNIT_ASSERT_VALUES_EQUAL(map.EraseDisarmed(OpId(1)), 1u);
-        UNIT_ASSERT_VALUES_EQUAL(map.EraseDisarmed(OpId(1)), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(map.EraseWithoutRelease(OpId(1)), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(map.EraseWithoutRelease(OpId(1)), 0u);
         UNIT_ASSERT(map.empty());
     }
 }

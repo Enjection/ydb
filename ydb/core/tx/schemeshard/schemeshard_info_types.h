@@ -1738,12 +1738,12 @@ public:
 
     // Propose rollback: a Paths snapshot owns restoring the counter, so the entry must
     // go without releasing, or the rollback lands twice.
-    size_t EraseDisarmed(const TShardIdx& shardIdx) {
+    size_t EraseWithoutRelease(const TShardIdx& shardIdx) {
         return Map.erase(shardIdx);
     }
 
     // Propose rollback: restore a snapshotted value, counters owned by Paths as above.
-    void RestoreDisarmed(const TShardIdx& shardIdx, const TShardInfo& shardInfo) {
+    void RestoreWithoutAcquire(const TShardIdx& shardIdx, const TShardInfo& shardInfo) {
         Map[shardIdx] = shardInfo;
     }
 

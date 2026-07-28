@@ -27,7 +27,6 @@ namespace NKikimrTxDataShard {
 
 namespace NKikimr::NSchemeShard {
 
-// Describes in-progress operation
 // A TPathId that reads like a plain field but can only be written by TTxState. The
 // entry's reference is acquired against this value, so letting any caller reseat it
 // would point an in-flight tx at a path nothing referenced.
@@ -65,6 +64,7 @@ private:
     TPathId Value = InvalidPathId;
 };
 
+// Describes in-progress operation
 struct TTxState {
     struct TShardOperation {
         TShardIdx Idx;                   // shard's internal index
@@ -276,7 +276,7 @@ public:
 
     // Propose rollback: a Paths snapshot owns restoring the counter, so the entry must
     // go without releasing, or the rollback lands twice.
-    size_t EraseDisarmed(const TOperationId& opId) {
+    size_t EraseWithoutRelease(const TOperationId& opId) {
         if (auto* txState = Map.FindPtr(opId)) {
             txState->DisarmPathRefs();
         }
