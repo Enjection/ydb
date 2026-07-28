@@ -380,7 +380,7 @@ void FillTableBoundaries(
 void FillTablePartitions(
     google::protobuf::RepeatedPtrField<NKikimrSchemeOp::TTablePartition>* result,
     const TTableInfo& tableInfo,
-    const THashMap<TShardIdx, TShardInfo>& shardInfos,
+    const TShardInfoMap& shardInfos,
     bool includeKeys
 ) {
     result->Reserve(tableInfo.GetPartitions().size());
@@ -402,7 +402,7 @@ void FillTablePartitions(
 
 const TString& GetSerializedTablePartitions(
     TTableInfo& tableInfo,
-    const THashMap<TShardIdx, TShardInfo>& shardInfos,
+    const TShardInfoMap& shardInfos,
     bool returnRangeKey
 ) {
     TString& cache = (returnRangeKey

@@ -5126,8 +5126,8 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                     TExportInfo::TItem& item = exportInfo->Items[itemIdx];
                     item.SourcePathName = rowset.GetValue<Schema::ExportItems::SourcePathName>();
 
-                    item.SourcePathId.Get().OwnerId = rowset.GetValueOrDefault<Schema::ExportItems::SourceOwnerPathId>(selfId);
-                    item.SourcePathId.Get().LocalPathId = rowset.GetValue<Schema::ExportItems::SourcePathId>();
+                    item.SourcePathId.OwnerId = rowset.GetValueOrDefault<Schema::ExportItems::SourceOwnerPathId>(selfId);
+                    item.SourcePathId.LocalPathId = rowset.GetValue<Schema::ExportItems::SourcePathId>();
                     item.SourcePathType = rowset.GetValue<Schema::ExportItems::SourcePathType>();
                     item.ParentIdx = rowset.GetValueOrDefault<Schema::ExportItems::ParentIndex>(Max<ui32>());
 

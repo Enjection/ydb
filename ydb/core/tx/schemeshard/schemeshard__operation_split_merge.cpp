@@ -1034,10 +1034,9 @@ public:
             }
         }
 
-        TTxState op;
-
-        // TargetPathId is set by CreateTx below, which is what acquires its reference.
-        op.TxType = TTxState::TxSplitTablePartition;
+        // This is a scratch state and owns no path references until CreateTx moves the
+        // complete value into TxInFlight below.
+        TTxState op(TTxState::TxSplitTablePartition, path->PathId);
         op.State = TTxState::CreateParts;
 
         // Fill Src shards for tx
@@ -1087,11 +1086,9 @@ public:
 
         mutableTableInfo->RegisterSplitMergeOp(OperationId, op);
 
-        // Move only what the scratch state carries: assigning over the live entry would
-        // drop the references CreateTx just gave it.
-        auto& txState = context.SS->CreateTx(OperationId, TTxState::TxSplitTablePartition, path->PathId);
-        txState.State = op.State;
-        txState.Shards = std::move(op.Shards);
+        // Move the whole scratch state so newly added TTxState fields cannot be silently
+        // omitted here. TxInFlight acquires its path references after insertion.
+        auto& txState = context.SS->CreateTx(OperationId, std::move(op));
         context.OnComplete.ActivateTx(OperationId);
 
         for (const auto& shard : txState.Shards) {

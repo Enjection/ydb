@@ -2419,7 +2419,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
 
     void UpdateCounters(IQuotaCounters* counters);
 
-    void ActualizeAlterData(const THashMap<TShardIdx, TShardInfo>& allShards, TInstant now, bool isExternal, IQuotaCounters* counters) {
+    void ActualizeAlterData(const TShardInfoMap& allShards, TInstant now, bool isExternal, IQuotaCounters* counters) {
         Y_ENSURE(AlterData);
 
         AlterData->SetPathsInside(GetPathsInside());
@@ -2622,7 +2622,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         return !PrivateShards.empty() || (CoordinatorSelector && !CoordinatorSelector->List().empty());
     }
 
-    void Initialize(const THashMap<TShardIdx, TShardInfo>& allShards) {
+    void Initialize(const TShardInfoMap& allShards) {
         if (InitiatedAsGlobal) {
             return;
         }
@@ -2910,7 +2910,7 @@ private:
 
     TMaybeAuditSettings AuditSettings;
 
-    TVector<TTabletId> FilterPrivateTablets(TTabletTypes::EType type, const THashMap<TShardIdx, TShardInfo>& allShards) const {
+    TVector<TTabletId> FilterPrivateTablets(TTabletTypes::EType type, const TShardInfoMap& allShards) const {
         TVector<TTabletId> tablets;
         for (auto shardId: PrivateShards) {
 
@@ -3005,7 +3005,7 @@ struct TBlockStoreVolumeInfo : public TSimpleRefCount<TBlockStoreVolumeInfo> {
         AlterData.Reset();
     }
 
-    const TVector<TTabletId>& GetTablets(const THashMap<TShardIdx, TShardInfo>& allShards) {
+    const TVector<TTabletId>& GetTablets(const TShardInfoMap& allShards) {
         if (TabletCache.AlterVersion == AlterVersion) {
             return TabletCache.Tablets;
         }

@@ -51,7 +51,7 @@ struct TRestore {
         
             auto fillRestoreTask = [&](auto& restore) {
                 restore.CopyFrom(restoreSettings);
-                restore.SetTableId(pathId.LocalPathId);
+                restore.SetTableId(pathId.Get().LocalPathId);
                 restore.SetShardNum(i);
             };
 

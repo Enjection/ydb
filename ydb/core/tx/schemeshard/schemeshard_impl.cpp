@@ -6236,17 +6236,21 @@ bool TSchemeShard::ShardIsUnderSplitMergeOp(const TShardIdx& idx) const {
     return true;
 }
 
-TTxState &TSchemeShard::CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath) {
+TTxState& TSchemeShard::CreateTx(TOperationId opId, TTxState&& state) {
     Y_VERIFY_S(!TxInFlight.contains(opId),
                "Trying to create duplicate Tx " << opId);
-    TTxState& txState = TxInFlight.Emplace(opId, TTxState(txType, targetPath, sourcePath));
-    TabletCounters->Simple()[TxTypeInFlightCounter(txType)].Add(1);
+    TTxState& txState = TxInFlight.Emplace(opId, std::move(state));
+    TabletCounters->Simple()[TxTypeInFlightCounter(txState.TxType)].Add(1);
     LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::FLAT_TX_SCHEMESHARD,
                     "CreateTx for txid " << opId
-                    << " type: " << TTxState::TypeName(txType)
-                    << " target path: " << targetPath
-                    << " source path: " << sourcePath);
+                    << " type: " << TTxState::TypeName(txState.TxType)
+                    << " target path: " << txState.TargetPathId
+                    << " source path: " << txState.SourcePathId);
     return txState;
+}
+
+TTxState& TSchemeShard::CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath) {
+    return CreateTx(opId, TTxState(txType, targetPath, sourcePath));
 }
 
 TTxState *TSchemeShard::FindTx(TOperationId opId) {

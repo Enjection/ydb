@@ -766,6 +766,7 @@ public:
         return shardIdx;
     }
 
+    TTxState& CreateTx(TOperationId opId, TTxState&& txState);
     TTxState& CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath = InvalidPathId);
     TTxState* FindTx(TOperationId opId);
     TTxState* FindTxSafe(TOperationId opId, const TTxState::ETxType& txType);

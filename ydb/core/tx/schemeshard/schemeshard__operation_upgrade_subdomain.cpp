@@ -1017,6 +1017,7 @@ public:
             const auto shardIdx = ShardsToRemember.back();
 
             context.SS->ShardInfos.ReassignPath(shardIdx, txState->TargetPathId);
+            TShardInfo& shardInfo = context.SS->ShardInfos.at(shardIdx);
             db.Table<Schema::SubDomainShards>().Key(txState->TargetPathId.Get().LocalPathId, shardIdx.GetLocalId()).Update();
             db.Table<Schema::Shards>().Key(shardIdx.GetLocalId()).Update(
                 NIceDb::TUpdate<Schema::Shards::PathId>(txState->TargetPathId.Get().LocalPathId));

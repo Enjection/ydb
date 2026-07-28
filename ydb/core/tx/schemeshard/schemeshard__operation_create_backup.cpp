@@ -52,7 +52,7 @@ struct TBackup {
 
             NKikimrTxColumnShard::TBackupTxBody txBodyBackup;
             *txBodyBackup.MutableBackupTask() = backup;
-            txBodyBackup.MutableBackupTask()->SetTableId(pathId.LocalPathId);
+            txBodyBackup.MutableBackupTask()->SetTableId(pathId.Get().LocalPathId);
             txBodyBackup.MutableBackupTask()->SetShardNum(i);
             auto event = context.SS->MakeColumnShardProposal(pathId, opId, seqNo, txBodyBackup.SerializeAsString(), context.Ctx, NKikimrTxColumnShard::TX_KIND_BACKUP);
             context.OnComplete.BindMsgToPipe(opId, columnShardId, idx, event.Release());
