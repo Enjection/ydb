@@ -16,6 +16,7 @@ PEERDIR(
 
 SRCS(
     ut_path_footprint.cpp
+    ut_replay.cpp
 )
 
 YQL_LAST_ABI_VERSION()
