@@ -2214,7 +2214,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
     Y_UNIT_TEST(CanonicalizeDropTableById) {
         auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
         tx.MutableDrop()->SetId(42);
-        const auto fp = FakeResolve(tx, "/MyRoot", {{42, "/MyRoot/Dir/T"}});
+        auto fp = FakeResolve(tx, "/MyRoot", {{42, "/MyRoot/Dir/T"}});
 
         auto copy = tx;
         const auto result = CanonicalizeToPaths(copy, fp);
@@ -2226,6 +2226,18 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         UNIT_ASSERT_C(!copy.GetDrop().HasId(), "the id must go: rmdir.cpp:32 takes it over the name");
         // The request the footprint was resolved from is never touched.
         UNIT_ASSERT(tx.GetDrop().HasId());
+
+        // The footprint follows the rewrite, so RelocatePaths sees the working
+        // dir canonicalization invented rather than the one the client sent.
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDir, "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirCanon, "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirRelToDb, "Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries.size(), 2u);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Field, EPathField::Drop_Name);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Kind, EPathRefKind::LeafUnderWorkingDir);
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.Value, "T");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.FieldPath, "Drop.Name");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].RelPathToWorkingDir, "T");
     }
 
     Y_UNIT_TEST(CanonicalizeAlterTableByPathIdClearsBothIdForms) {
@@ -2236,7 +2248,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         auto* column = tx.MutableAlterTable()->AddColumns();
         column->SetName("added");
         column->SetType("Uint64");
-        const auto fp = FakeResolve(tx, "/MyRoot", {{7, "/MyRoot/Dir/T"}});
+        auto fp = FakeResolve(tx, "/MyRoot", {{7, "/MyRoot/Dir/T"}});
 
         auto copy = tx;
         const auto result = CanonicalizeToPaths(copy, fp);
@@ -2256,7 +2268,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         auto& info = *tx.MutableSplitMergeTablePartitions();
         info.SetTableOwnerId(72057594046678944ull);
         info.SetTableLocalId(11);
-        const auto fp = FakeResolve(tx, "/MyRoot", {{11, "/MyRoot/Dir/T"}});
+        auto fp = FakeResolve(tx, "/MyRoot", {{11, "/MyRoot/Dir/T"}});
 
         auto copy = tx;
         const auto result = CanonicalizeToPaths(copy, fp);
@@ -2268,13 +2280,22 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot");
         UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableOwnerId());
         UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableLocalId());
+
+        // The footprint now describes the request as rewritten, so relocation
+        // reads an Absolute TablePath instead of a path id.
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries.size(), 1u);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Field,
+            EPathField::SplitMergeTablePartitions_TablePath);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Kind, EPathRefKind::Absolute);
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.Value, "/MyRoot/Dir/T");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDir, "/MyRoot");
     }
 
     Y_UNIT_TEST(CanonicalizeUnknownIdIsUntransformable) {
         auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
         tx.MutableDrop()->SetId(42);
         // Nothing resolves the id: it names a path this schemeshard does not have.
-        const auto fp = FakeResolve(tx, "/MyRoot");
+        auto fp = FakeResolve(tx, "/MyRoot");
 
         auto copy = tx;
         const auto result = CanonicalizeToPaths(copy, fp);
@@ -2288,7 +2309,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
     Y_UNIT_TEST(CanonicalizeLeavesAByNameRequestAlone) {
         auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot/Dir");
         tx.MutableDrop()->SetName("T");
-        const auto fp = FakeResolve(tx, "/MyRoot");
+        auto fp = FakeResolve(tx, "/MyRoot");
 
         auto copy = tx;
         const auto result = CanonicalizeToPaths(copy, fp);
@@ -2404,14 +2425,38 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         UNIT_ASSERT_VALUES_EQUAL(tx.GetDrop().GetId(), 42u);
 
         // Canonicalizing first is what makes the request relocatable: the drop
-        // then names a working dir and a leaf, and the working dir moves.
+        // then names a working dir and a leaf, and the footprint canonicalize
+        // patched carries both into relocation. No re-resolution needed.
         auto canonical = tx;
-        CanonicalizeToPaths(canonical, fp);
-        const auto canonicalFp = FakeResolve(canonical, "/MyRoot/db1");
+        auto canonicalFp = fp;
+        CanonicalizeToPaths(canonical, canonicalFp);
         const auto second = RelocatePaths(canonical, canonicalFp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
         UNIT_ASSERT(second.Skipped.empty());
         UNIT_ASSERT_VALUES_EQUAL(canonical.GetWorkingDir(), "/MyRoot2/x/db2/dir");
         UNIT_ASSERT_VALUES_EQUAL(canonical.GetDrop().GetName(), "T");
+    }
+
+    // The defect S7g found in the replay experiment: a by-id request carries no
+    // working dir of its own, so a footprint describing it as submitted has
+    // nothing under the old database for relocation to rewrite. Canonicalize
+    // now patches the footprint, and the two compose over one footprint.
+    Y_UNIT_TEST(CanonicalizeThenRelocateWithoutAWorkingDir) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "");
+        tx.MutableDrop()->SetId(42);
+        auto fp = FakeResolve(tx, "/MyRoot/db1", {{42, "/MyRoot/db1/dir/T"}});
+        // Nothing here is under the database being moved: the request as
+        // submitted names only a path id.
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirCanon, "");
+
+        UNIT_ASSERT(CanonicalizeToPaths(tx, fp).Changed);
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirCanon, "/MyRoot/db1/dir");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Skipped.empty());
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetWorkingDir(), "/MyRoot2/x/db2/dir");
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetDrop().GetName(), "T");
     }
 
     // The kind a field resolves with can depend on the operation carrying it
@@ -2538,7 +2583,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
 
         // The footprint the schemeshard itself resolved for this request.
         UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - mark, 1u);
-        const TPathFootprint& footprint = collector.Requests[mark].Footprint;
+        TPathFootprint footprint = collector.Requests[mark].Footprint;
 
         auto canonical = byId;
         const auto result = CanonicalizeToPaths(canonical, footprint);
@@ -2589,7 +2634,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
 
         // The footprint the schemeshard itself resolved for this request.
         UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - mark, 1u);
-        const TPathFootprint& footprint = collector.Requests[mark].Footprint;
+        TPathFootprint footprint = collector.Requests[mark].Footprint;
 
         auto canonical = byId;
         UNIT_ASSERT(CanonicalizeToPaths(canonical, footprint).Changed);

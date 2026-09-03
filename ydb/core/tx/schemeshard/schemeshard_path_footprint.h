@@ -682,7 +682,22 @@ struct TCanonicalizeResult {
 // The id form wins over the name form in every Propose() that accepts both, so
 // the id field is always cleared; writing a name beside a live path id would
 // change nothing.
-TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp);
+//
+// `fp` is updated in place to describe the request as rewritten, so that the
+// same footprint can then drive RelocatePaths. A by-id request usually carries
+// no WorkingDir at all -- Propose() ignores it -- and canonicalization has to
+// invent one from the resolved path; a footprint still describing the request
+// as submitted would make relocation skip that invented working dir and leave
+// the rewritten request pointing at the source database. Patched: WorkingDir,
+// WorkingDirCanon, WorkingDirRelToDb, DatabasePathId, every entry's
+// RelPathToWorkingDir, and the rewritten entry's Ref (Field, FieldPath, Kind,
+// Value, and the cleared path id).
+//
+// Canonicalization moves the request's working dir, so a request that also
+// carries a working-dir-relative field would change meaning. No operation
+// combines a by-id field with one, which is why this is a documented
+// precondition rather than a check.
+TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, TPathFootprint& fp);
 
 // Where the request's database is moving. Both paths are absolute and
 // canonical, e.g. "/MyRoot/db1" -> "/MyRoot2/dir/db2".
@@ -701,6 +716,12 @@ struct TRelocateResult {
 
 // Rewrite every path the request spells out so that it points into
 // r.NewDatabasePath instead of r.OldDatabasePath.
+//
+// `fp` must be the footprint of `tx` as it stands now, not of some earlier
+// form of it: the working-dir rewrite reads TPathFootprint::WorkingDirCanon
+// and every per-entry decision reads that entry's raw value and AbsPath. After
+// CanonicalizeToPaths, pass the footprint it patched (or re-resolve one);
+// after any other edit of the request, re-resolve.
 //
 // Only values that name a path outside the working dir are rewritten:
 // Absolute always, PathUnderWorkingDir only when the raw value starts with a

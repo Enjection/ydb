@@ -442,7 +442,9 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
             step.StatusA = SendAndWait(runtime, env, ++txId, original);
             UNIT_ASSERT_VALUES_EQUAL_C(collector.Requests.size() - mark, 1u,
                 name << ": expected exactly one request footprint");
-            const TPathFootprint& footprint = collector.Requests[mark].Footprint;
+            // A copy: canonicalization patches the footprint so that relocation
+            // reads the request as rewritten rather than as submitted.
+            TPathFootprint footprint = collector.Requests[mark].Footprint;
 
             auto rewritten = original;
             const TString before = rewritten.DebugString();
@@ -575,14 +577,14 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
         //     is the case that forces CanonicalizeToPaths to run first, on the
         //     schemeshard that owns the id.
         //
-        //     The working dir is set even though a by-id drop ignores it: with
-        //     the two rewriters sharing one footprint it is the only thing that
-        //     carries the request into the new database. See
-        //     CanonicalizeThenRelocateNeedsTheWorkingDir below for why.
+        //     No working dir at all, which is how a by-id drop normally
+        //     arrives: Propose() ignores it. Canonicalization invents one from
+        //     the resolved path and patches the footprint, so relocation moves
+        //     it into dbB. See CanonicalizeInventsTheWorkingDirRelocationMoves.
         {
             const auto self = DescribePath(runtime, DbA + "/dir/tmp")
                 .GetPathDescription().GetSelf();
-            auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, DbA + "/dir");
+            auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "");
             tx.MutableDrop()->SetId(self.GetPathId());
             replay("DropTable tmp by id", tx);
         }
@@ -601,17 +603,12 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
                 step.Name << ": untransformable " << JoinSeq(",", step.Untransformable));
         }
 
-        // Skipped is reported, not asserted empty: RelocatePaths walks the
-        // footprint of the *original* request, so a by-id field it already saw
-        // is reported even after CanonicalizeToPaths removed it from the proto.
-        // Only the by-id drop is allowed to report one.
+        // Nothing is skipped, the by-id drop included: canonicalization
+        // rewrote its footprint entry into the name form before relocation
+        // walked it.
         for (const auto& step : report) {
-            if (step.Name.Contains("by id")) {
-                UNIT_ASSERT_VALUES_EQUAL_C(JoinSeq(",", step.Skipped), "Drop.Id", step.Name);
-            } else {
-                UNIT_ASSERT_C(step.Skipped.empty(),
-                    step.Name << ": skipped " << JoinSeq(",", step.Skipped));
-            }
+            UNIT_ASSERT_C(step.Skipped.empty(),
+                step.Name << ": skipped " << JoinSeq(",", step.Skipped));
         }
 
         // Every request names at least a working dir under dbA, so relocation
@@ -650,18 +647,16 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
         }));
     }
 
-    // The one composition rule the experiment above had to obey, pinned on its
-    // own because getting it wrong silently replays into the source database.
+    // The composition rule the experiment above depends on, pinned on its own
+    // because getting it wrong silently replays into the source database.
     //
-    // CanonicalizeToPaths writes a working dir derived from the resolved path;
-    // RelocatePaths reads TPathFootprint::WorkingDirCanon, which still
-    // describes the request as it was *submitted*. When the by-id request
-    // carried no working dir of its own, the canonicalized one is therefore
-    // invisible to relocation and survives into the replayed request, pointing
-    // at the old database. Nothing is corrupted -- the request is simply not
-    // relocated -- but the caller has to either set a working dir or re-resolve
-    // the footprint of the canonicalized request before relocating.
-    Y_UNIT_TEST(CanonicalizeThenRelocateNeedsTheWorkingDir) {
+    // CanonicalizeToPaths writes a working dir derived from the resolved path
+    // and patches the footprint with it, so RelocatePaths -- which rewrites
+    // TPathFootprint::WorkingDirCanon -- sees the request as canonicalized
+    // rather than as submitted. Both probes below must land in dbB: the one
+    // whose request carried a working dir, and the one whose working dir only
+    // exists because canonicalization invented it.
+    Y_UNIT_TEST(CanonicalizeInventsTheWorkingDirRelocationMoves) {
         TRequestFootprintCollector collector;
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
@@ -698,7 +693,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
                 NKikimrScheme::EStatus_Name(SendAndWait(runtime, env, ++txId, tx)),
                 NKikimrScheme::EStatus_Name(NKikimrScheme::StatusAccepted));
             UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - mark, 1u);
-            const TPathFootprint footprint = collector.Requests[mark].Footprint;
+            TPathFootprint footprint = collector.Requests[mark].Footprint;
 
             auto rewritten = tx;
             CanonicalizeToPaths(rewritten, footprint);
@@ -706,15 +701,16 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintReplay) {
             return rewritten;
         };
 
-        // Without a working dir of its own, the one canonicalization invented
-        // is invisible to relocation and still names the source database.
+        // No working dir at all: the only one the request ends up with is the
+        // one canonicalization derived from the resolved path id.
         {
             const auto rewritten = rewrite("t1", "");
             UNIT_ASSERT_VALUES_EQUAL(rewritten.GetDrop().GetName(), "t1");
-            UNIT_ASSERT_VALUES_EQUAL(rewritten.GetWorkingDir(), DbA + "/dir");
+            UNIT_ASSERT_VALUES_EQUAL(rewritten.GetWorkingDir(), DbB + "/dir");
         }
 
-        // With one, both rewriters agree and the request lands in dbB.
+        // A working dir the client sent, which canonicalization overwrites with
+        // the same path. Relocation moves it either way.
         {
             const auto rewritten = rewrite("t2", DbA + "/dir");
             UNIT_ASSERT_VALUES_EQUAL(rewritten.GetDrop().GetName(), "t2");

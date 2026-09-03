@@ -1507,20 +1507,73 @@ bool SetPathField(NKikimrSchemeOp::TModifyScheme& tx, EPathField field, ui32 ind
     }
 }
 
-// Rewrite one by-id field into its name form. False when the entry does not
-// name a by-id field this knows about, or when its resolved path cannot be
-// split into a working dir and a leaf.
-bool CanonicalizeEntry(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprintEntry& entry) {
+// The database an entry lives in, recovered from the entry itself: its AbsPath
+// with RelPathToDatabase removed. Empty when the two do not line up, which is
+// what a footprint records for a path whose database did not resolve.
+TString DatabasePathOfEntry(const TPathFootprintEntry& entry) {
     const TStringBuf abs = entry.AbsPath;
+    const TStringBuf rel = entry.RelPathToDatabase;
+    if (abs.empty()) {
+        return TString();
+    }
+    if (rel.empty()) {
+        return TString(abs);
+    }
+    if (abs.size() > rel.size() && abs.EndsWith(rel) && abs[abs.size() - rel.size() - 1] == '/') {
+        const size_t cut = abs.size() - rel.size() - 1;
+        return cut == 0 ? TString("/") : TString(abs.substr(0, cut));
+    }
+    return TString();
+}
+
+// Point the footprint at the working dir canonicalization has just written.
+// Both forms are set to the same string: it was cut out of an AbsPath, which
+// is canonical already.
+void MoveFootprintWorkingDir(TPathFootprint& fp, const TString& workingDir,
+        const TString& databasePath) {
+    fp.WorkingDir = workingDir;
+    fp.WorkingDirCanon = workingDir;
+    fp.WorkingDirRelToDb = StripPrefix(workingDir, databasePath);
+    for (auto& entry : fp.Entries) {
+        if (!entry.AbsPath.empty()) {
+            entry.RelPathToWorkingDir = StripPrefix(entry.AbsPath, workingDir);
+        }
+    }
+}
+
+// The entry now describes a name-addressed field. Role is unchanged: every
+// by-id field this rewrites is a Target, and so is the name form it becomes.
+void RetargetEntry(TPathFootprintEntry& entry, EPathField field, EPathRefKind kind,
+        const TString& value) {
+    entry.Ref.Field = field;
+    // None of the name forms carries a placeholder, so the template is the
+    // rendered field path.
+    entry.Ref.FieldPath = TString(PathFieldName(field));
+    entry.Ref.Kind = kind;
+    entry.Ref.Value = value;
+    entry.Ref.OwnerId = 0;
+    entry.Ref.LocalPathId = 0;
+}
+
+// Rewrite one by-id field into its name form, in the request and in the
+// footprint entry that described it. False when the entry does not name a
+// by-id field this knows about, or when its resolved path cannot be split into
+// a working dir and a leaf.
+bool CanonicalizeEntry(NKikimrSchemeOp::TModifyScheme& tx, TPathFootprint& fp,
+        size_t entryIndex) {
+    TPathFootprintEntry& entry = fp.Entries[entryIndex];
+    const TString abs = entry.AbsPath;
 
     // SplitMerge is the one case that keeps an absolute path rather than a
     // WorkingDir plus a leaf: Propose() calls TPath::Resolve(TablePath) with
     // no WorkingDir join (schemeshard__operation_split_merge.cpp:849).
     if (entry.Ref.Field == EPathField::SplitMergeTablePartitions_TableLocalId) {
         auto& info = *tx.MutableSplitMergeTablePartitions();
-        info.SetTablePath(TString(abs));
+        info.SetTablePath(abs);
         info.ClearTableOwnerId();
         info.ClearTableLocalId();
+        RetargetEntry(entry, EPathField::SplitMergeTablePartitions_TablePath,
+            EPathRefKind::Absolute, abs);
         return true;
     }
 
@@ -1530,42 +1583,52 @@ bool CanonicalizeEntry(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprintE
         return false;
     }
 
+    EPathField nameField = EPathField::Count;
     switch (entry.Ref.Field) {
     case EPathField::Drop_Id:
-        tx.SetWorkingDir(parent);
         tx.MutableDrop()->SetName(leaf);
         tx.MutableDrop()->ClearId();
-        return true;
+        nameField = EPathField::Drop_Name;
+        break;
     case EPathField::AlterTable_PathId:
     case EPathField::AlterTable_Id_Deprecated:
-        tx.SetWorkingDir(parent);
         tx.MutableAlterTable()->SetName(leaf);
         // Both id forms have to go: alter_table.cpp:607 takes either one over
         // the name.
         tx.MutableAlterTable()->ClearPathId();
         tx.MutableAlterTable()->ClearId_Deprecated();
-        return true;
+        nameField = EPathField::AlterTable_Name;
+        break;
     case EPathField::AlterPersQueueGroup_PathId:
-        tx.SetWorkingDir(parent);
         tx.MutableAlterPersQueueGroup()->SetName(leaf);
         tx.MutableAlterPersQueueGroup()->ClearPathId();
-        return true;
+        nameField = EPathField::AlterPersQueueGroup_Name;
+        break;
     case EPathField::AlterBlockStoreVolume_PathId:
-        tx.SetWorkingDir(parent);
         tx.MutableAlterBlockStoreVolume()->SetName(leaf);
         tx.MutableAlterBlockStoreVolume()->ClearPathId();
-        return true;
+        nameField = EPathField::AlterBlockStoreVolume_Name;
+        break;
     case EPathField::AlterReplication_PathId:
         // Transfer has no submessage of its own: an alter-transfer request is
         // this same TAlterReplication read by a different strategy
         // (schemeshard__operation_alter_replication.cpp:32-69,365).
-        tx.SetWorkingDir(parent);
         tx.MutableAlterReplication()->SetName(leaf);
         tx.MutableAlterReplication()->ClearPathId();
-        return true;
+        nameField = EPathField::AlterReplication_Name;
+        break;
     default:
         return false;
     }
+
+    tx.SetWorkingDir(parent);
+    RetargetEntry(entry, nameField, EPathRefKind::LeafUnderWorkingDir, leaf);
+    // The database of the path just named, which is the database the new
+    // working dir lives in; the old one was derived from a working dir the
+    // request may not even have carried.
+    fp.DatabasePathId = entry.DatabasePathId;
+    MoveFootprintWorkingDir(fp, parent, DatabasePathOfEntry(entry));
+    return true;
 }
 
 }  // namespace
@@ -1581,17 +1644,17 @@ bool CanRelocatePathField(EPathField field) {
     }
 }
 
-TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp) {
+TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, TPathFootprint& fp) {
     TCanonicalizeResult result;
 
-    for (const auto& entry : fp.Entries) {
-        if (entry.Ref.Kind != EPathRefKind::ById) {
+    for (size_t i = 0; i < fp.Entries.size(); ++i) {
+        if (fp.Entries[i].Ref.Kind != EPathRefKind::ById) {
             continue;
         }
         // An id nothing resolved to: the operation would be rejected on this
         // schemeshard anyway, and guessing a name would invent a target.
-        if (entry.AbsPath.empty() || !CanonicalizeEntry(tx, entry)) {
-            result.Untransformable.push_back(entry.Ref.Field);
+        if (fp.Entries[i].AbsPath.empty() || !CanonicalizeEntry(tx, fp, i)) {
+            result.Untransformable.push_back(fp.Entries[i].Ref.Field);
             continue;
         }
         result.Changed = true;
