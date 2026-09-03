@@ -1437,6 +1437,74 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         UNIT_ASSERT_VALUES_EQUAL(dst.Entry->Exists, false);
     }
 
+    // The Move* parts resolve their destination with
+    // TPath::ResolveWithInactive, because the destination's parent may be held
+    // by an earlier part of the same transaction. The part-level footprint
+    // resolves it the same way, so it never reports a path the operation will
+    // not use; the request-level footprint has no part to walk back from and
+    // stays on the plain resolver.
+    Y_UNIT_TEST(MoveIndexedTableResolvesEveryMoveDestination) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Table"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const size_t mark = collector.Parts.size();
+        const size_t requestMark = collector.Requests.size();
+        TestMoveTable(runtime, ++txId, "/MyRoot/Table", "/MyRoot/Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts, mark);
+
+        // The MoveTable part: destination resolved through the inactive-aware
+        // resolver, same answer as the operation's own dstPath.
+        const auto& tableDst = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.DstPath");
+        UNIT_ASSERT_VALUES_EQUAL(tableDst.Entry->AbsPath, "/MyRoot/Moved");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(tableDst.Entry->Ref.Role)), "Target");
+
+        // The source keeps the plain resolver: it is the still-active original.
+        const auto& tableSrc = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.SrcPath");
+        UNIT_ASSERT_VALUES_EQUAL(tableSrc.Entry->AbsPath, "/MyRoot/Table");
+        UNIT_ASSERT_VALUES_EQUAL(tableSrc.Entry->Exists, true);
+
+        // The derived MoveTableIndex part hangs its destination off a table
+        // that only the earlier MoveTable part of this transaction created.
+        const auto& indexDst = RequireEntry(entries,
+            "ESchemeOpMoveTableIndex", "MoveTableIndex.DstPath");
+        UNIT_ASSERT_VALUES_EQUAL(indexDst.Entry->AbsPath, "/MyRoot/Moved/byValue");
+        const auto& indexSrc = RequireEntry(entries,
+            "ESchemeOpMoveTableIndex", "MoveTableIndex.SrcPath");
+        UNIT_ASSERT_VALUES_EQUAL(indexSrc.Entry->AbsPath, "/MyRoot/Table/byValue");
+
+        // The request footprint is resolved before any part exists, so it uses
+        // the plain resolver and still describes the request as submitted.
+        UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - requestMark, 1u);
+        const TPathFootprint& request = collector.Requests[requestMark].Footprint;
+        UNIT_ASSERT_VALUES_EQUAL(request.PartId, InvalidSubTxId);
+        bool sawDst = false;
+        for (const auto& entry : request.Entries) {
+            if (entry.Ref.FieldPath == "MoveTable.DstPath") {
+                UNIT_ASSERT_VALUES_EQUAL(entry.AbsPath, "/MyRoot/Moved");
+                sawDst = true;
+            }
+        }
+        UNIT_ASSERT_C(sawDst, "no MoveTable.DstPath in the request footprint");
+    }
+
     Y_UNIT_TEST(DropTableByNameAndById) {
         TFootprintCollector collector;
         TTestBasicRuntime runtime;

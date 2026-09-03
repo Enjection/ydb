@@ -542,7 +542,17 @@ struct TPathFootprint {
 };
 
 // Layer 2: normalization through TPath only. Never aborts on bad input.
-TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss);
+//
+// opId is the sub-operation this footprint belongs to, when there is one. The
+// Target of a Move* part is then resolved with TPath::ResolveWithInactive,
+// which is exactly what those Propose() implementations do: a destination
+// whose parent is still inactive because an earlier part of the same
+// transaction is holding it resolves the same way it will for the operation,
+// instead of reporting exists=0 against a name nothing is linked under yet.
+// InvalidOperationId, the default, means "no part context" — the request-level
+// footprint describes the request as submitted, before any part ran.
+TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss,
+    TOperationId opId = InvalidOperationId);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Observation channels.

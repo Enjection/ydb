@@ -128,7 +128,8 @@ bool TSchemeShard::ProcessOperationParts(
         TMemoryChanges::TMark memChangesMark;
         size_t publishedMark = 0;
         if (wantFootprints) {
-            footprint = ResolvePathFootprint(part->GetTransaction(), context.SS);
+            footprint = ResolvePathFootprint(part->GetTransaction(), context.SS,
+                part->GetOperationId());
             footprint.OriginalTxIndex = originalTxIndex;
             // Marks taken here, collected after Propose(): what the part wrote
             // in memory and what it asked SchemeBoard to publish is the diff.

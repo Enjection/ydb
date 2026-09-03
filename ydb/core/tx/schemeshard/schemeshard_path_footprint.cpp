@@ -1122,10 +1122,35 @@ TPathRefOwned Materialize(const TPathRef& ref) {
 
 }  // namespace
 
-TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss) {
+namespace {
+
+// The parts whose Propose() resolves its destination with
+// TPath::ResolveWithInactive rather than with a plain TPath::Resolve:
+// schemeshard__operation_move_table.cpp, schemeshard__operation_move_sequence.cpp
+// and index/operation_move_table_index.cpp. ESchemeOpMoveIndex is not one of
+// them — it is a top-level op that expands into MoveTableIndex parts, and it
+// carries its paths as LeafUnderSibling, not Absolute.
+bool ResolvesTargetWithInactive(NKikimrSchemeOp::EOperationType type) {
+    switch (type) {
+    case NKikimrSchemeOp::ESchemeOpMoveTable:
+    case NKikimrSchemeOp::ESchemeOpMoveTableIndex:
+    case NKikimrSchemeOp::ESchemeOpMoveSequence:
+        return true;
+    default:
+        return false;
+    }
+}
+
+}  // namespace
+
+TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss,
+        TOperationId opId) {
     TPathFootprint footprint;
     footprint.WorkingDir = tx.GetWorkingDir();
     footprint.PartOpType = tx.GetOperationType();
+    // ResolveWithInactive needs a live sub-operation to walk back from, so it
+    // is only reachable from the part-level hook.
+    const bool inactiveAwareTarget = bool(opId) && ResolvesTargetWithInactive(footprint.PartOpType);
 
     // Resolved once per footprint and reused by every entry below.
     const TPath workingDirPath = TPath::Resolve(footprint.WorkingDir, ss);
@@ -1193,6 +1218,8 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
             // never joined in — not even when the value has no leading slash.
             if (ref.Value.empty()) {
                 path = TPath(workingDirPath);
+            } else if (inactiveAwareTarget && ref.Role == EPathRefRole::Target) {
+                path = TPath::ResolveWithInactive(opId, ref.Value, ss);
             } else {
                 path = TPath::Resolve(ref.Value, ss);
             }
