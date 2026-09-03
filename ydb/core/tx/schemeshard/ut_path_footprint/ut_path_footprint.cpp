@@ -9,6 +9,8 @@
 #include <util/generic/algorithm.h>
 #include <util/generic/hash.h>
 #include <util/generic/hash_set.h>
+#include <util/string/cast.h>
+#include <util/string/join.h>
 #include <util/string/split.h>
 
 using namespace NKikimr;
@@ -218,6 +220,229 @@ const TFootprintLine& RequireLineByAbsPath(const TVector<TFootprintLine>& lines,
     }
     UNIT_FAIL("no PathFootprint line for " << opType << " at " << absPath);
     return lines.front();
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Rewrite helpers.
+//
+// The layer-3 rewriters take a footprint that ResolvePathFootprint produced on
+// the schemeshard that owns the paths. A pure test has no schemeshard, so it
+// builds the footprint from the real extractor and fakes only the resolution:
+// the field identities, kinds, roles and raw values under test are the
+// production ones, and the AbsPath is whatever the test says the path is.
+
+TString JoinAbs(TStringBuf dir, TStringBuf leaf) {
+    if (leaf.empty()) {
+        return TString(dir);
+    }
+    if (dir.empty() || dir == "/") {
+        return TStringBuilder() << '/' << leaf;
+    }
+    return TStringBuilder() << dir << '/' << leaf;
+}
+
+TString StripDbPrefix(TStringBuf abs, TStringBuf db) {
+    if (db.empty() || db == "/") {
+        return TString(abs.StartsWith('/') ? abs.substr(1) : abs);
+    }
+    if (abs == db) {
+        return TString();
+    }
+    if (abs.StartsWith(db) && abs.size() > db.size() && abs[db.size()] == '/') {
+        return TString(abs.substr(db.size() + 1));
+    }
+    return TString(abs);
+}
+
+TString LeafOf(TStringBuf abs) {
+    const size_t slash = abs.rfind('/');
+    return TString(slash == TStringBuf::npos ? abs : abs.substr(slash + 1));
+}
+
+// Absolute path of a value resolved the way ResolvePathFootprint would.
+// `byId` maps a local path id to the path it stands for; an id missing from it
+// is an id that did not resolve.
+TPathFootprint FakeResolve(const NKikimrSchemeOp::TModifyScheme& tx, const TString& databasePath,
+        const THashMap<ui64, TString>& byId = {})
+{
+    const TString workingDir = tx.GetWorkingDir();
+
+    TPathFootprint fp;
+    fp.WorkingDir = workingDir;
+    fp.WorkingDirCanon = workingDir;
+    fp.WorkingDirRelToDb = StripDbPrefix(workingDir, databasePath);
+    fp.PartOpType = tx.GetOperationType();
+
+    const auto relativeOrAbsolute = [&](TStringBuf value) {
+        return value.StartsWith('/') ? TString(value) : JoinAbs(workingDir, value);
+    };
+
+    for (const auto& ref : ExtractPathRefs(tx)) {
+        TPathFootprintEntry entry;
+        entry.Ref.Field = ref.Field;
+        entry.Ref.FieldPath = FieldPath(ref);
+        entry.Ref.Value = TString(ref.Value);
+        entry.Ref.OwnerId = ref.OwnerId;
+        entry.Ref.LocalPathId = ref.LocalPathId;
+        entry.Ref.Kind = ref.Kind;
+        entry.Ref.Role = ref.Role;
+        entry.Ref.BasePath = TString(ref.BasePath);
+        entry.Ref.AnchorIndex = ref.AnchorIndex;
+        entry.Ref.Index = ref.Index;
+
+        const auto anchor = [&]() -> const TPathFootprintEntry* {
+            return ref.AnchorIndex >= 0 && size_t(ref.AnchorIndex) < fp.Entries.size()
+                ? &fp.Entries[ref.AnchorIndex]
+                : nullptr;
+        };
+
+        switch (ref.Kind) {
+        case EPathRefKind::LeafUnderWorkingDir:
+            entry.AbsPath = JoinAbs(workingDir, ref.Value);
+            break;
+        case EPathRefKind::PathUnderWorkingDirSplit:
+            entry.AbsPath = JoinAbs(workingDir,
+                ref.Value.StartsWith('/') ? ref.Value.substr(1) : ref.Value);
+            break;
+        case EPathRefKind::PathUnderWorkingDir:
+            entry.AbsPath = ref.Value.empty() ? workingDir : relativeOrAbsolute(ref.Value);
+            break;
+        case EPathRefKind::Absolute:
+            entry.AbsPath = ref.Value.empty() ? workingDir : TString(ref.Value);
+            break;
+        case EPathRefKind::LeafUnderSibling:
+            if (ref.BasePath.empty()) {
+                if (const auto* base = anchor(); base && !base->AbsPath.empty()) {
+                    entry.AbsPath = JoinAbs(base->AbsPath, ref.Value);
+                }
+            } else {
+                entry.AbsPath = JoinAbs(relativeOrAbsolute(ref.BasePath), ref.Value);
+            }
+            break;
+        case EPathRefKind::ById:
+            if (const auto* resolved = byId.FindPtr(ref.LocalPathId)) {
+                entry.AbsPath = *resolved;
+            }
+            break;
+        case EPathRefKind::Implicit:
+            if (const auto* base = anchor()) {
+                entry.AbsPath = base->AbsPath;
+            }
+            break;
+        }
+
+        entry.Exists = !entry.AbsPath.empty();
+        entry.RelPathToParent = LeafOf(entry.AbsPath);
+        entry.RelPathToDatabase = StripDbPrefix(entry.AbsPath, databasePath);
+        entry.RelPathToWorkingDir = StripDbPrefix(entry.AbsPath, workingDir);
+        fp.Entries.push_back(std::move(entry));
+    }
+
+    return fp;
+}
+
+// The EPathField a rendered field path came from. Templates are unique, so the
+// match is exact for a field with no placeholder; a "{i}" template matches by
+// prefix and suffix, with the decimal in between as the index.
+bool ParseFieldPath(TStringBuf rendered, EPathField& field, ui32& index) {
+    for (size_t i = 0; i < size_t(EPathField::Count); ++i) {
+        const auto candidate = static_cast<EPathField>(i);
+        const TStringBuf tmpl = PathFieldName(candidate);
+        const size_t open = tmpl.find("{i}");
+        if (open == TStringBuf::npos) {
+            if (tmpl.find('{') == TStringBuf::npos && tmpl == rendered) {
+                field = candidate;
+                index = Max<ui32>();
+                return true;
+            }
+            continue;
+        }
+        const TStringBuf prefix = tmpl.substr(0, open);
+        const TStringBuf suffix = tmpl.substr(open + 3);
+        if (suffix.find('{') != TStringBuf::npos) {
+            continue;  // a "{j}"/"{key}" template; no test needs one yet
+        }
+        if (!rendered.StartsWith(prefix) || !rendered.EndsWith(suffix)
+                || rendered.size() <= prefix.size() + suffix.size()) {
+            continue;
+        }
+        const TStringBuf digits =
+            rendered.substr(prefix.size(), rendered.size() - prefix.size() - suffix.size());
+        ui32 parsed = 0;
+        if (!TryFromString(digits, parsed)) {
+            continue;
+        }
+        field = candidate;
+        index = parsed;
+        return true;
+    }
+    return false;
+}
+
+EPathRefKind ParseKind(TStringBuf name) {
+    for (const auto kind : {EPathRefKind::LeafUnderWorkingDir, EPathRefKind::PathUnderWorkingDir,
+            EPathRefKind::PathUnderWorkingDirSplit, EPathRefKind::Absolute,
+            EPathRefKind::LeafUnderSibling, EPathRefKind::ById, EPathRefKind::Implicit}) {
+        if (PathRefKindName(kind) == name) {
+            return kind;
+        }
+    }
+    UNIT_FAIL("unknown path ref kind " << name);
+    return EPathRefKind::Implicit;
+}
+
+// The request footprint the schemeshard itself resolved, read back out of the
+// log lines it emitted. Only what the rewriters consume is filled in: nothing
+// else survives the log, and nothing else is needed.
+TPathFootprint FootprintFromLog(const TVector<TFootprintLine>& lines) {
+    TPathFootprint fp;
+    UNIT_ASSERT_C(!lines.empty(), "no request footprint lines in the log");
+    fp.WorkingDir = lines.front().Get("workingDir");
+    fp.WorkingDirCanon = fp.WorkingDir;
+    fp.WorkingDirRelToDb = lines.front().Get("workingDirRelToDb");
+
+    for (const auto& line : lines) {
+        const TString fieldPath = line.Get("fieldPath");
+        if (fieldPath == "<writeSet>") {
+            continue;
+        }
+        TPathFootprintEntry entry;
+        UNIT_ASSERT_C(ParseFieldPath(fieldPath, entry.Ref.Field, entry.Ref.Index),
+            "log line names an unknown field path " << fieldPath);
+        entry.Ref.FieldPath = fieldPath;
+        entry.Ref.Kind = ParseKind(line.Get("kind"));
+        entry.AbsPath = line.Get("absPath");
+        entry.RelPathToParent = line.Get("relToParent");
+        entry.RelPathToDatabase = line.Get("relToDb");
+        entry.RelPathToWorkingDir = line.Get("relToWorkingDir");
+        entry.Exists = line.Get("exists") == "1";
+        fp.Entries.push_back(std::move(entry));
+    }
+    return fp;
+}
+
+// The raw value of a field is not in the log, and RelocatePaths needs it to
+// decide whether a PathUnderWorkingDir value was written absolutely. Take it
+// from the request the footprint belongs to, which is what the production
+// caller has too.
+void FillRawValuesFrom(TPathFootprint& fp, const NKikimrSchemeOp::TModifyScheme& tx) {
+    const auto refs = ExtractPathRefs(tx);
+    UNIT_ASSERT_VALUES_EQUAL(refs.size(), fp.Entries.size());
+    for (size_t i = 0; i < refs.size(); ++i) {
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[i].Ref.FieldPath, FieldPath(refs[i]));
+        fp.Entries[i].Ref.Value = TString(refs[i].Value);
+        fp.Entries[i].Ref.BasePath = TString(refs[i].BasePath);
+        fp.Entries[i].Ref.AnchorIndex = refs[i].AnchorIndex;
+    }
+}
+
+// Sends a hand-built TModifyScheme; helpers.h exports no such entry point.
+void SendModify(TTestActorRuntime& runtime, ui64 txId, const NKikimrSchemeOp::TModifyScheme& tx) {
+    auto* ev = new TEvTx(txId, TTestTxConfig::SchemeShard);
+    *ev->Record.AddTransaction() = tx;
+    AsyncSend(runtime, TTestTxConfig::SchemeShard, ev);
+    TestModificationResults(runtime, txId, {{NKikimrScheme::StatusAccepted}});
 }
 
 }  // namespace
@@ -1772,5 +1997,453 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintProtoCoverage) {
             " ExtractPathRefs nor classified in this test. Read each field's use,"
             " then add it to the extractor, to NotAPath, or to Unclassified:"
             << Dump(uncovered));
+    }
+}
+
+// Layer 3: canonicalizing a by-id request into a by-name one, and moving every
+// path a request spells out into another database.
+Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
+
+    Y_UNIT_TEST(CanonicalizeDropTableById) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
+        tx.MutableDrop()->SetId(42);
+        const auto fp = FakeResolve(tx, "/MyRoot", {{42, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Untransformable.empty());
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetDrop().GetName(), "T");
+        UNIT_ASSERT_C(!copy.GetDrop().HasId(), "the id must go: rmdir.cpp:32 takes it over the name");
+        // The request the footprint was resolved from is never touched.
+        UNIT_ASSERT(tx.GetDrop().HasId());
+    }
+
+    Y_UNIT_TEST(CanonicalizeAlterTableByPathIdClearsBothIdForms) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTable, "/MyRoot");
+        TPathId(TOwnerId(72057594046678944ull), TLocalPathId(7)).ToProto(
+            tx.MutableAlterTable()->MutablePathId());
+        tx.MutableAlterTable()->SetId_Deprecated(7);
+        auto* column = tx.MutableAlterTable()->AddColumns();
+        column->SetName("added");
+        column->SetType("Uint64");
+        const auto fp = FakeResolve(tx, "/MyRoot", {{7, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().GetName(), "T");
+        UNIT_ASSERT(!copy.GetAlterTable().HasPathId());
+        UNIT_ASSERT(!copy.GetAlterTable().HasId_Deprecated());
+        // Everything else survives untouched.
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().ColumnsSize(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().GetColumns(0).GetName(), "added");
+    }
+
+    Y_UNIT_TEST(CanonicalizeSplitMergeKeepsTheAbsoluteTablePath) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpSplitMergeTablePartitions, "/MyRoot");
+        auto& info = *tx.MutableSplitMergeTablePartitions();
+        info.SetTableOwnerId(72057594046678944ull);
+        info.SetTableLocalId(11);
+        const auto fp = FakeResolve(tx, "/MyRoot", {{11, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        // split_merge.cpp:849 resolves TablePath absolutely, WorkingDir is not
+        // consulted and must not be rewritten.
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetSplitMergeTablePartitions().GetTablePath(), "/MyRoot/Dir/T");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot");
+        UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableOwnerId());
+        UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableLocalId());
+    }
+
+    Y_UNIT_TEST(CanonicalizeUnknownIdIsUntransformable) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
+        tx.MutableDrop()->SetId(42);
+        // Nothing resolves the id: it names a path this schemeshard does not have.
+        const auto fp = FakeResolve(tx, "/MyRoot");
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(!result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(result.Untransformable.size(), 1u);
+        UNIT_ASSERT_EQUAL(result.Untransformable[0], EPathField::Drop_Id);
+        UNIT_ASSERT_VALUES_EQUAL(copy.DebugString(), tx.DebugString());
+    }
+
+    Y_UNIT_TEST(CanonicalizeLeavesAByNameRequestAlone) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot/Dir");
+        tx.MutableDrop()->SetName("T");
+        const auto fp = FakeResolve(tx, "/MyRoot");
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(!result.Changed);
+        UNIT_ASSERT(result.Untransformable.empty());
+        UNIT_ASSERT_VALUES_EQUAL(copy.DebugString(), tx.DebugString());
+    }
+
+    Y_UNIT_TEST(RelocateMoveTableRewritesBothPaths) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpMoveTable, "/MyRoot/db1");
+        tx.MutableMoveTable()->SetSrcPath("/MyRoot/db1/a");
+        tx.MutableMoveTable()->SetDstPath("/MyRoot/db1/b");
+        const auto fp = FakeResolve(tx, "/MyRoot/db1");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Skipped.empty());
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetMoveTable().GetSrcPath(), "/MyRoot2/x/db2/a");
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetMoveTable().GetDstPath(), "/MyRoot2/x/db2/b");
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetWorkingDir(), "/MyRoot2/x/db2");
+    }
+
+    Y_UNIT_TEST(RelocateCreateTableTouchesOnlyTheWorkingDir) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateTable, "/MyRoot/db1/dir");
+        tx.MutableCreateTable()->SetName("t");
+        const auto fp = FakeResolve(tx, "/MyRoot/db1");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetWorkingDir(), "/MyRoot2/x/db2/dir");
+        // A leaf name is relative to the working dir and moves with it.
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetCreateTable().GetName(), "t");
+    }
+
+    Y_UNIT_TEST(RelocateConsistentCopyTablesRewritesEveryItem) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateConsistentCopyTables, "/MyRoot/db1");
+        for (int i = 0; i < 2; ++i) {
+            auto* item = tx.MutableCreateConsistentCopyTables()->AddCopyTableDescriptions();
+            item->SetSrcPath(Sprintf("/MyRoot/db1/src%d", i));
+            item->SetDstPath(Sprintf("/MyRoot/db1/dir/dst%d", i));
+        }
+        const auto fp = FakeResolve(tx, "/MyRoot/db1");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        const auto& copied = tx.GetCreateConsistentCopyTables();
+        UNIT_ASSERT_VALUES_EQUAL(copied.GetCopyTableDescriptions(0).GetSrcPath(), "/MyRoot2/x/db2/src0");
+        UNIT_ASSERT_VALUES_EQUAL(copied.GetCopyTableDescriptions(0).GetDstPath(), "/MyRoot2/x/db2/dir/dst0");
+        UNIT_ASSERT_VALUES_EQUAL(copied.GetCopyTableDescriptions(1).GetSrcPath(), "/MyRoot2/x/db2/src1");
+        UNIT_ASSERT_VALUES_EQUAL(copied.GetCopyTableDescriptions(1).GetDstPath(), "/MyRoot2/x/db2/dir/dst1");
+    }
+
+    Y_UNIT_TEST(RelocateRewritesAPathUnderWorkingDirOnlyWhenItIsAbsolute) {
+        const auto relocate = [](const TString& pathName) {
+            auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterUserAttributes, "/MyRoot/db1/dir");
+            tx.MutableAlterUserAttributes()->SetPathName(pathName);
+            const auto fp = FakeResolve(tx, "/MyRoot/db1");
+            RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+            return tx.GetAlterUserAttributes().GetPathName();
+        };
+
+        UNIT_ASSERT_VALUES_EQUAL(relocate("/MyRoot/db1/dir/sub"), "/MyRoot2/x/db2/dir/sub");
+        // Relative means "under the working dir", which the working-dir rewrite
+        // already moved.
+        UNIT_ASSERT_VALUES_EQUAL(relocate("sub"), "sub");
+    }
+
+    Y_UNIT_TEST(RelocateLeavesPathsOutsideTheDatabaseAlone) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpMoveTable, "/MyRoot/other");
+        tx.MutableMoveTable()->SetSrcPath("/MyRoot/other/a");
+        tx.MutableMoveTable()->SetDstPath("/MyRoot/other/b");
+        const auto before = tx.DebugString();
+        const auto fp = FakeResolve(tx, "/MyRoot/other");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(!result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(tx.DebugString(), before);
+    }
+
+    Y_UNIT_TEST(RelocateNeverTouchesAReplicationSourcePath) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateTransfer, "/MyRoot/db1");
+        auto& desc = *tx.MutableReplication();
+        desc.SetName("transfer");
+        auto& target = *desc.MutableConfig()->MutableTransferSpecific()->MutableTarget();
+        // A path on the *remote* cluster. It is never extracted and must never
+        // be rewritten, however much it looks like a local path.
+        target.SetSrcPath("/MyRoot/db1/remote");
+        target.SetDstPath("/MyRoot/db1/local");
+        const auto fp = FakeResolve(tx, "/MyRoot/db1");
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        const auto& moved = tx.GetReplication().GetConfig().GetTransferSpecific().GetTarget();
+        UNIT_ASSERT_VALUES_EQUAL(moved.GetDstPath(), "/MyRoot2/x/db2/local");
+        UNIT_ASSERT_VALUES_EQUAL(moved.GetSrcPath(), "/MyRoot/db1/remote");
+    }
+
+    Y_UNIT_TEST(RelocateSkipsAByIdRequest) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot/db1");
+        tx.MutableDrop()->SetId(42);
+        const auto fp = FakeResolve(tx, "/MyRoot/db1", {{42, "/MyRoot/db1/dir/T"}});
+
+        const auto result = RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT_VALUES_EQUAL(result.Skipped.size(), 1u);
+        UNIT_ASSERT_EQUAL(result.Skipped[0], EPathField::Drop_Id);
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetDrop().GetId(), 42u);
+
+        // Canonicalizing first is what makes the request relocatable: the drop
+        // then names a working dir and a leaf, and the working dir moves.
+        auto canonical = tx;
+        CanonicalizeToPaths(canonical, fp);
+        const auto canonicalFp = FakeResolve(canonical, "/MyRoot/db1");
+        const auto second = RelocatePaths(canonical, canonicalFp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+        UNIT_ASSERT(second.Skipped.empty());
+        UNIT_ASSERT_VALUES_EQUAL(canonical.GetWorkingDir(), "/MyRoot2/x/db2/dir");
+        UNIT_ASSERT_VALUES_EQUAL(canonical.GetDrop().GetName(), "T");
+    }
+
+    // The kind a field resolves with can depend on the operation carrying it
+    // (finding D7). The footprint records the kind that Propose() actually
+    // used, so the rewriter reads it from the entry and never has to key on the
+    // operation type itself.
+    Y_UNIT_TEST(RelocateFollowsThePerOperationKindOfTheSameField) {
+        const auto relocate = [](NKikimrSchemeOp::EOperationType type) {
+            auto tx = MakeTx(type, "/MyRoot/db1/dir");
+            tx.MutableDropCdcStream()->SetTableName("/MyRoot/db1/dir/T");
+            tx.MutableDropCdcStream()->AddStreamName("stream");
+            const auto fp = FakeResolve(tx, "/MyRoot/db1");
+            RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+            return tx.GetDropCdcStream().GetTableName();
+        };
+
+        // Top level: PathUnderWorkingDir, and the value is absolute.
+        UNIT_ASSERT_VALUES_EQUAL(relocate(NKikimrSchemeOp::ESchemeOpDropCdcStream),
+            "/MyRoot2/x/db2/dir/T");
+        // The AtTable part resolves the same field with a plain Dive, so the
+        // value is a leaf and rides on the working dir instead.
+        UNIT_ASSERT_VALUES_EQUAL(relocate(NKikimrSchemeOp::ESchemeOpDropCdcStreamAtTable),
+            "/MyRoot/db1/dir/T");
+    }
+
+    Y_UNIT_TEST(RelocateNeverRewritesASplitChild) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterContinuousBackup, "/MyRoot/db1");
+        // A leading slash does not escape the working dir for a split child:
+        // TPath::Child(value, TSplitChildTag{}) dives it segment by segment.
+        tx.MutableAlterContinuousBackup()->SetTableName("/MyRoot/db1/T");
+        const auto fp = FakeResolve(tx, "/MyRoot/db1");
+
+        RelocatePaths(tx, fp, {"/MyRoot/db1", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetAlterContinuousBackup().GetTableName(), "/MyRoot/db1/T");
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetWorkingDir(), "/MyRoot2/x/db2");
+    }
+
+    // Every field that can carry a relocatable path needs a setter, and nothing
+    // else may have one: a setter on a leaf-name field would double-apply the
+    // working-dir move.
+    Y_UNIT_TEST(EveryRelocatableFieldHasASetter) {
+        TVector<TString> missing;
+        TVector<TString> unexpected;
+        size_t setters = 0;
+        for (size_t i = 0; i < size_t(EPathField::Count); ++i) {
+            const auto field = static_cast<EPathField>(i);
+            const TString name(PathFieldName(field));
+            const auto kind = PathFieldDefaultKind(field);
+            const bool relocatable =
+                kind == EPathRefKind::Absolute || kind == EPathRefKind::PathUnderWorkingDir;
+            // The synthetic working-dir entry has no field behind it; the
+            // working-dir rewrite covers it.
+            const bool exempt = field == EPathField::WorkingDirItself;
+            // Absolute only when its value starts with a slash, so its table
+            // default is LeafUnderSibling.
+            const bool conditional = field == EPathField::AlterTable_Column_DefaultFromSequence;
+
+            const bool has = CanRelocatePathField(field);
+            setters += has ? 1 : 0;
+            if ((relocatable && !exempt) || conditional) {
+                if (!has) {
+                    missing.push_back(name);
+                }
+            } else if (has) {
+                unexpected.push_back(name);
+            }
+        }
+        UNIT_ASSERT_C(missing.empty(), "no setter for " << JoinSeq(", ", missing));
+        UNIT_ASSERT_C(unexpected.empty(), "setter for a field that never moves: "
+            << JoinSeq(", ", unexpected));
+        UNIT_ASSERT_C(setters > 30, "only " << setters << " setters");
+    }
+
+    Y_UNIT_TEST(StripApplyIf) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot/Dir");
+        tx.MutableDrop()->SetName("T");
+        for (ui64 pathId : {3ull, 4ull}) {
+            auto* applyIf = tx.AddApplyIf();
+            applyIf->SetPathId(pathId);
+            applyIf->SetPathVersion(1);
+        }
+
+        const auto stripped = StripSourceLocalPreconditions(tx);
+
+        UNIT_ASSERT_VALUES_EQUAL(stripped.size(), 2u);
+        UNIT_ASSERT_EQUAL(stripped[0], EPathField::ApplyIf_PathId);
+        UNIT_ASSERT_VALUES_EQUAL(tx.ApplyIfSize(), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(tx.GetDrop().GetName(), "T");
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // Propose-level: the same rewrites driven by a footprint the schemeshard
+    // itself resolved, checked against what the schemeshard accepts.
+
+    Y_UNIT_TEST(CanonicalizedDropByIdEqualsTheByNameRequest) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestMkDir(runtime, ++txId, "/MyRoot", "Dir");
+        env.TestWaitNotification(runtime, txId);
+        TestCreateTable(runtime, ++txId, "/MyRoot/Dir", R"(
+            Name: "T"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const ui64 localPathId =
+            DescribePath(runtime, "/MyRoot/Dir/T").GetPathDescription().GetSelf().GetPathId();
+
+        // The by-id request, exactly as a client would send it, run through the
+        // real schemeshard so that the footprint is the real one.
+        NKikimrSchemeOp::TModifyScheme byId;
+        {
+            THolder<TEvTx> request(DropTableRequest(++txId, localPathId));
+            byId = request->Record.GetTransaction(0);
+        }
+        const size_t mark = log.size();
+        SendModify(runtime, txId, byId);
+        env.TestWaitNotification(runtime, txId);
+
+        auto footprint = FootprintFromLog(ParseRequestFootprintLog(log, mark));
+        FillRawValuesFrom(footprint, byId);
+
+        auto canonical = byId;
+        const auto result = CanonicalizeToPaths(canonical, footprint);
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Untransformable.empty());
+
+        // The by-name request the helper builds for the same table. If the two
+        // protos agree, canonicalization matches Propose() semantics on real
+        // schemeshard state.
+        NKikimrSchemeOp::TModifyScheme byName;
+        {
+            THolder<TEvTx> request(DropTableRequest(txId + 1, "/MyRoot/Dir", "T"));
+            byName = request->Record.GetTransaction(0);
+        }
+        UNIT_ASSERT_VALUES_EQUAL(canonical.DebugString(), byName.DebugString());
+    }
+
+    Y_UNIT_TEST(CanonicalizedAlterTableByPathIdIsAcceptedByName) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestMkDir(runtime, ++txId, "/MyRoot", "Dir");
+        env.TestWaitNotification(runtime, txId);
+        TestCreateTable(runtime, ++txId, "/MyRoot/Dir", R"(
+            Name: "T"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto self = DescribePath(runtime, "/MyRoot/Dir/T").GetPathDescription().GetSelf();
+
+        NKikimrSchemeOp::TModifyScheme byId;
+        byId.SetOperationType(NKikimrSchemeOp::ESchemeOpAlterTable);
+        TPathId(TOwnerId(self.GetSchemeshardId()), TLocalPathId(self.GetPathId()))
+            .ToProto(byId.MutableAlterTable()->MutablePathId());
+        {
+            auto* column = byId.MutableAlterTable()->AddColumns();
+            column->SetName("added");
+            column->SetType("Uint64");
+        }
+
+        const size_t mark = log.size();
+        SendModify(runtime, ++txId, byId);
+        env.TestWaitNotification(runtime, txId);
+
+        auto footprint = FootprintFromLog(ParseRequestFootprintLog(log, mark));
+        FillRawValuesFrom(footprint, byId);
+
+        auto canonical = byId;
+        UNIT_ASSERT(CanonicalizeToPaths(canonical, footprint).Changed);
+        UNIT_ASSERT_VALUES_EQUAL(canonical.GetWorkingDir(), "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(canonical.GetAlterTable().GetName(), "T");
+        UNIT_ASSERT(!canonical.GetAlterTable().HasPathId());
+
+        // The by-name form the schemeshard accepts for the same alter, which is
+        // the proof that the rewrite is semantics-preserving and not just
+        // string-equal.
+        NKikimrSchemeOp::TModifyScheme byName = canonical;
+        byName.MutableAlterTable()->MutableColumns(0)->SetName("added2");
+        SendModify(runtime, ++txId, byName);
+        env.TestWaitNotification(runtime, txId);
+
+        const auto described = DescribePath(runtime, "/MyRoot/Dir/T");
+        TVector<TString> columns;
+        for (const auto& column : described.GetPathDescription().GetTable().GetColumns()) {
+            columns.push_back(column.GetName());
+        }
+        Sort(columns);
+        UNIT_ASSERT_VALUES_EQUAL(JoinSeq(",", columns), "added,added2,key");
+    }
+
+    Y_UNIT_TEST(RelocateDrivenByASchemeShardResolvedFootprint) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Src"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        NKikimrSchemeOp::TModifyScheme move;
+        move.SetOperationType(NKikimrSchemeOp::ESchemeOpMoveTable);
+        move.SetWorkingDir("/MyRoot");
+        move.MutableMoveTable()->SetSrcPath("/MyRoot/Src");
+        move.MutableMoveTable()->SetDstPath("/MyRoot/Dst");
+
+        const size_t mark = log.size();
+        SendModify(runtime, ++txId, move);
+        env.TestWaitNotification(runtime, txId);
+
+        auto footprint = FootprintFromLog(ParseRequestFootprintLog(log, mark));
+        FillRawValuesFrom(footprint, move);
+        // The footprint the schemeshard resolved, not one the test invented.
+        UNIT_ASSERT_VALUES_EQUAL(footprint.WorkingDir, "/MyRoot");
+        UNIT_ASSERT_VALUES_EQUAL(footprint.Entries.size(), 3u);
+
+        auto relocated = move;
+        const auto result = RelocatePaths(relocated, footprint, {"/MyRoot", "/MyRoot2/x/db2"});
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Skipped.empty());
+        UNIT_ASSERT_VALUES_EQUAL(relocated.GetWorkingDir(), "/MyRoot2/x/db2");
+        UNIT_ASSERT_VALUES_EQUAL(relocated.GetMoveTable().GetSrcPath(), "/MyRoot2/x/db2/Src");
+        UNIT_ASSERT_VALUES_EQUAL(relocated.GetMoveTable().GetDstPath(), "/MyRoot2/x/db2/Dst");
     }
 }

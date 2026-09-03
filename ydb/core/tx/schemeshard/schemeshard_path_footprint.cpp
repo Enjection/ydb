@@ -1109,6 +1109,7 @@ TPathRefOwned Materialize(const TPathRef& ref) {
     TPathRefOwned owned;
     owned.Field = ref.Field;
     owned.FieldPath = FieldPath(ref);
+    owned.Index = ref.Index;
     owned.Value = TString(ref.Value);
     owned.OwnerId = ref.OwnerId;
     owned.LocalPathId = ref.LocalPathId;
@@ -1132,6 +1133,7 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
     // from. Stripping against tx.GetWorkingDir() would silently fail whenever
     // the raw proto string is not already canonical.
     const TString workingDirCanon = workingDirPath.PathString();
+    footprint.WorkingDirCanon = workingDirCanon;
 
     TString dbPath;
     {
@@ -1254,6 +1256,363 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
     }
 
     return footprint;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Layer 3: rewriting a request.
+
+namespace {
+
+bool IsRootPath(TStringBuf path) {
+    return path.empty() || path == "/";
+}
+
+// Is `abs` the path `prefix`, or something under it? Both must be canonical,
+// which every AbsPath and WorkingDirCanon in a footprint is.
+bool IsAtOrUnder(TStringBuf abs, TStringBuf prefix) {
+    if (abs.empty()) {
+        return false;
+    }
+    if (IsRootPath(prefix)) {
+        return abs.StartsWith('/');
+    }
+    if (abs == prefix) {
+        return true;
+    }
+    return abs.size() > prefix.size() && abs.StartsWith(prefix) && abs[prefix.size()] == '/';
+}
+
+// `abs` with `prefix` removed. Empty when the two are the same path. Only
+// meaningful when IsAtOrUnder(abs, prefix).
+TStringBuf RelativeTo(TStringBuf abs, TStringBuf prefix) {
+    if (IsRootPath(prefix)) {
+        return abs.StartsWith('/') ? abs.substr(1) : abs;
+    }
+    if (abs == prefix) {
+        return TStringBuf();
+    }
+    return abs.substr(prefix.size() + 1);
+}
+
+TString JoinUnder(TStringBuf base, TStringBuf rel) {
+    if (rel.empty()) {
+        return TString(base);
+    }
+    if (IsRootPath(base)) {
+        return TStringBuilder() << '/' << rel;
+    }
+    return TStringBuilder() << base << '/' << rel;
+}
+
+// Split a canonical absolute path into the directory it lives in and its leaf
+// name. `leafHint` is the entry's RelPathToParent, which TPath::LeafName()
+// produced from the same path; the suffix scan is the fallback for an entry
+// that has no hint.
+bool SplitParentLeaf(TStringBuf abs, TStringBuf leafHint, TString& parent, TString& leaf) {
+    if (abs.empty()) {
+        return false;
+    }
+    if (!leafHint.empty() && abs.size() > leafHint.size() + 1 && abs.EndsWith(leafHint)
+            && abs[abs.size() - leafHint.size() - 1] == '/') {
+        parent = TString(abs.substr(0, abs.size() - leafHint.size() - 1));
+        leaf = TString(leafHint);
+        return true;
+    }
+    const size_t slash = abs.rfind('/');
+    if (slash == TStringBuf::npos || slash + 1 >= abs.size()) {
+        return false;
+    }
+    parent = slash == 0 ? TString("/") : TString(abs.substr(0, slash));
+    leaf = TString(abs.substr(slash + 1));
+    return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// The setter table: how to write a new value into each field that can carry a
+// relocatable path.
+//
+// One row per EPathField whose kind is Absolute or PathUnderWorkingDir, in the
+// table's own order, plus AlterTable.Columns[].DefaultFromSequence, which is
+// Absolute only when its value starts with a slash. Kept next to the field
+// table rather than inside it: a row here needs protobuf accessors, which the
+// header deliberately does not reach for.
+//
+// A row is a statement, not an expression, so an indexed field can bail out on
+// a footprint whose indexes no longer match the request.
+
+#define SS_PATH_SETTER_GUARD_INDEX(size)                                                       \
+    if (static_cast<i64>(index) >= static_cast<i64>(size)) {                                   \
+        return false;                                                                          \
+    }
+
+#define SCHEMESHARD_PATH_FIELD_SETTERS(X)                                                      \
+    X(CreateTable_CopyFromTable,                                                               \
+        tx.MutableCreateTable()->SetCopyFromTable(value);)                                     \
+    X(AlterTable_Column_DefaultFromSequence,                                                   \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetAlterTable().ColumnsSize())                           \
+        tx.MutableAlterTable()->MutableColumns(index)->SetDefaultFromSequence(value);)          \
+    X(AlterPersQueueGroup_IncrementalBackup_DstPath,                                           \
+        tx.MutableAlterPersQueueGroup()->MutablePQTabletConfig()->MutableOffloadConfig()        \
+            ->MutableIncrementalBackup()->SetDstPath(value);)                                   \
+    X(SplitMergeTablePartitions_TablePath,                                                     \
+        tx.MutableSplitMergeTablePartitions()->SetTablePath(value);)                            \
+    X(AlterUserAttributes_PathName,                                                            \
+        tx.MutableAlterUserAttributes()->SetPathName(value);)                                   \
+    X(CopyTables_Item_SrcPath,                                                                 \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetCreateConsistentCopyTables().CopyTableDescriptionsSize()) \
+        tx.MutableCreateConsistentCopyTables()->MutableCopyTableDescriptions(index)             \
+            ->SetSrcPath(value);)                                                              \
+    X(CopyTables_Item_DstPath,                                                                 \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetCreateConsistentCopyTables().CopyTableDescriptionsSize()) \
+        tx.MutableCreateConsistentCopyTables()->MutableCopyTableDescriptions(index)             \
+            ->SetDstPath(value);)                                                              \
+    X(InitiateIndexBuild_Table,                                                                \
+        tx.MutableInitiateIndexBuild()->SetTable(value);)                                       \
+    X(ApplyIndexBuild_TablePath,                                                               \
+        tx.MutableApplyIndexBuild()->SetTablePath(value);)                                      \
+    X(DropIndex_TableName,                                                                     \
+        tx.MutableDropIndex()->SetTableName(value);)                                            \
+    X(CancelIndexBuild_TablePath,                                                              \
+        tx.MutableCancelIndexBuild()->SetTablePath(value);)                                     \
+    X(CreateColumnTable_CopyFromTable,                                                         \
+        tx.MutableCreateColumnTable()->SetCopyFromTable(value);)                                \
+    X(CreateCdcStream_TableName,                                                               \
+        tx.MutableCreateCdcStream()->SetTableName(value);)                                      \
+    X(AlterCdcStream_TableName,                                                                \
+        tx.MutableAlterCdcStream()->SetTableName(value);)                                       \
+    X(DropCdcStream_TableName,                                                                 \
+        tx.MutableDropCdcStream()->SetTableName(value);)                                        \
+    X(RotateCdcStream_TableName,                                                               \
+        tx.MutableRotateCdcStream()->SetTableName(value);)                                      \
+    X(MoveTable_SrcPath, tx.MutableMoveTable()->SetSrcPath(value);)                             \
+    X(MoveTable_DstPath, tx.MutableMoveTable()->SetDstPath(value);)                             \
+    X(MoveTableIndex_SrcPath, tx.MutableMoveTableIndex()->SetSrcPath(value);)                   \
+    X(MoveTableIndex_DstPath, tx.MutableMoveTableIndex()->SetDstPath(value);)                   \
+    X(MoveSequence_SrcPath, tx.MutableMoveSequence()->SetSrcPath(value);)                       \
+    X(MoveSequence_DstPath, tx.MutableMoveSequence()->SetDstPath(value);)                       \
+    X(CopySequence_CopyFrom, tx.MutableCopySequence()->SetCopyFrom(value);)                     \
+    X(Replication_TransferTarget_DstPath,                                                      \
+        tx.MutableReplication()->MutableConfig()->MutableTransferSpecific()->MutableTarget()    \
+            ->SetDstPath(value);)                                                              \
+    X(Replication_TransferTarget_DirectoryPath,                                                \
+        tx.MutableReplication()->MutableConfig()->MutableTransferSpecific()->MutableTarget()    \
+            ->SetDirectoryPath(value);)                                                        \
+    X(Replication_SpecificTarget_DstPath,                                                      \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetReplication().GetConfig().GetSpecific().TargetsSize()) \
+        tx.MutableReplication()->MutableConfig()->MutableSpecific()->MutableTargets(index)      \
+            ->SetDstPath(value);)                                                              \
+    X(Replication_AlterTransfer_DirectoryPath,                                                 \
+        tx.MutableReplication()->MutableAlterTransfer()->SetDirectoryPath(value);)              \
+    X(AlterReplication_TransferTarget_DstPath,                                                 \
+        tx.MutableAlterReplication()->MutableConfig()->MutableTransferSpecific()               \
+            ->MutableTarget()->SetDstPath(value);)                                             \
+    X(AlterReplication_TransferTarget_DirectoryPath,                                           \
+        tx.MutableAlterReplication()->MutableConfig()->MutableTransferSpecific()               \
+            ->MutableTarget()->SetDirectoryPath(value);)                                       \
+    X(AlterReplication_SpecificTarget_DstPath,                                                 \
+        SS_PATH_SETTER_GUARD_INDEX(                                                            \
+            tx.GetAlterReplication().GetConfig().GetSpecific().TargetsSize())                  \
+        tx.MutableAlterReplication()->MutableConfig()->MutableSpecific()->MutableTargets(index) \
+            ->SetDstPath(value);)                                                              \
+    X(AlterReplication_AlterTransfer_DirectoryPath,                                            \
+        tx.MutableAlterReplication()->MutableAlterTransfer()->SetDirectoryPath(value);)         \
+    X(MoveIndex_TablePath, tx.MutableMoveIndex()->SetTablePath(value);)                         \
+    X(CreateExternalTable_DataSourcePath,                                                      \
+        tx.MutableCreateExternalTable()->SetDataSourcePath(value);)                             \
+    X(InitiateColumnBuild_Table, tx.MutableInitiateColumnBuild()->SetTable(value);)             \
+    X(DropColumnBuild_Settings_Table,                                                          \
+        tx.MutableDropColumnBuild()->MutableSettings()->SetTable(value);)                       \
+    X(RestoreMultipleIncrementalBackups_SrcTablePaths,                                         \
+        SS_PATH_SETTER_GUARD_INDEX(                                                            \
+            tx.GetRestoreMultipleIncrementalBackups().SrcTablePathsSize())                     \
+        tx.MutableRestoreMultipleIncrementalBackups()->SetSrcTablePaths(index, value);)         \
+    X(RestoreMultipleIncrementalBackups_DstTablePath,                                          \
+        tx.MutableRestoreMultipleIncrementalBackups()->SetDstTablePath(value);)                 \
+    X(CreateBackupCollection_Entry_Path,                                                       \
+        SS_PATH_SETTER_GUARD_INDEX(                                                            \
+            tx.GetCreateBackupCollection().GetExplicitEntryList().EntriesSize())               \
+        tx.MutableCreateBackupCollection()->MutableExplicitEntryList()                          \
+            ->MutableEntries(index)->SetPath(value);)                                          \
+    X(ChangePathState_Path, tx.MutableChangePathState()->SetPath(value);)                       \
+    X(IncrementalRestoreLockTargets_DstPaths,                                                  \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetIncrementalRestoreLockTargets().DstPathsSize())       \
+        tx.MutableIncrementalRestoreLockTargets()->SetDstPaths(index, value);)                  \
+    X(IncrementalRestoreLockTargets_SrcPaths,                                                  \
+        SS_PATH_SETTER_GUARD_INDEX(tx.GetIncrementalRestoreLockTargets().SrcPathsSize())       \
+        tx.MutableIncrementalRestoreLockTargets()->SetSrcPaths(index, value);)                  \
+    X(TruncateTable_TableName, tx.MutableTruncateTable()->SetTableName(value);)
+
+// Writes `value` into the one protobuf field `field` names. False when the
+// field has no setter (it can never carry a relocatable path) or when the
+// ref's index is out of range for this request.
+bool SetPathField(NKikimrSchemeOp::TModifyScheme& tx, EPathField field, ui32 index,
+        const TString& value) {
+    switch (field) {
+#define SCHEMESHARD_PATH_FIELD_SETTER_CASE(name, stmt)                                         \
+    case EPathField::name:                                                                     \
+        stmt                                                                                   \
+        return true;
+        SCHEMESHARD_PATH_FIELD_SETTERS(SCHEMESHARD_PATH_FIELD_SETTER_CASE)
+#undef SCHEMESHARD_PATH_FIELD_SETTER_CASE
+    default:
+        return false;
+    }
+}
+
+// Rewrite one by-id field into its name form. False when the entry does not
+// name a by-id field this knows about, or when its resolved path cannot be
+// split into a working dir and a leaf.
+bool CanonicalizeEntry(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprintEntry& entry) {
+    const TStringBuf abs = entry.AbsPath;
+
+    // SplitMerge is the one case that keeps an absolute path rather than a
+    // WorkingDir plus a leaf: Propose() calls TPath::Resolve(TablePath) with
+    // no WorkingDir join (schemeshard__operation_split_merge.cpp:849).
+    if (entry.Ref.Field == EPathField::SplitMergeTablePartitions_TableLocalId) {
+        auto& info = *tx.MutableSplitMergeTablePartitions();
+        info.SetTablePath(TString(abs));
+        info.ClearTableOwnerId();
+        info.ClearTableLocalId();
+        return true;
+    }
+
+    TString parent;
+    TString leaf;
+    if (!SplitParentLeaf(abs, entry.RelPathToParent, parent, leaf)) {
+        return false;
+    }
+
+    switch (entry.Ref.Field) {
+    case EPathField::Drop_Id:
+        tx.SetWorkingDir(parent);
+        tx.MutableDrop()->SetName(leaf);
+        tx.MutableDrop()->ClearId();
+        return true;
+    case EPathField::AlterTable_PathId:
+    case EPathField::AlterTable_Id_Deprecated:
+        tx.SetWorkingDir(parent);
+        tx.MutableAlterTable()->SetName(leaf);
+        // Both id forms have to go: alter_table.cpp:607 takes either one over
+        // the name.
+        tx.MutableAlterTable()->ClearPathId();
+        tx.MutableAlterTable()->ClearId_Deprecated();
+        return true;
+    case EPathField::AlterPersQueueGroup_PathId:
+        tx.SetWorkingDir(parent);
+        tx.MutableAlterPersQueueGroup()->SetName(leaf);
+        tx.MutableAlterPersQueueGroup()->ClearPathId();
+        return true;
+    case EPathField::AlterBlockStoreVolume_PathId:
+        tx.SetWorkingDir(parent);
+        tx.MutableAlterBlockStoreVolume()->SetName(leaf);
+        tx.MutableAlterBlockStoreVolume()->ClearPathId();
+        return true;
+    case EPathField::AlterReplication_PathId:
+        // Transfer has no submessage of its own: an alter-transfer request is
+        // this same TAlterReplication read by a different strategy
+        // (schemeshard__operation_alter_replication.cpp:32-69,365).
+        tx.SetWorkingDir(parent);
+        tx.MutableAlterReplication()->SetName(leaf);
+        tx.MutableAlterReplication()->ClearPathId();
+        return true;
+    default:
+        return false;
+    }
+}
+
+}  // namespace
+
+bool CanRelocatePathField(EPathField field) {
+    switch (field) {
+#define SCHEMESHARD_PATH_FIELD_SETTER_PRESENT(name, stmt) case EPathField::name:
+        SCHEMESHARD_PATH_FIELD_SETTERS(SCHEMESHARD_PATH_FIELD_SETTER_PRESENT)
+#undef SCHEMESHARD_PATH_FIELD_SETTER_PRESENT
+        return true;
+    default:
+        return false;
+    }
+}
+
+TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp) {
+    TCanonicalizeResult result;
+
+    for (const auto& entry : fp.Entries) {
+        if (entry.Ref.Kind != EPathRefKind::ById) {
+            continue;
+        }
+        // An id nothing resolved to: the operation would be rejected on this
+        // schemeshard anyway, and guessing a name would invent a target.
+        if (entry.AbsPath.empty() || !CanonicalizeEntry(tx, entry)) {
+            result.Untransformable.push_back(entry.Ref.Field);
+            continue;
+        }
+        result.Changed = true;
+    }
+
+    return result;
+}
+
+TRelocateResult RelocatePaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp,
+        const TRelocation& r) {
+    TRelocateResult result;
+
+    for (const auto& entry : fp.Entries) {
+        switch (entry.Ref.Kind) {
+        case EPathRefKind::ById:
+            // Canonicalization has to run first: a path id says nothing about
+            // where the path lives in the new database.
+            result.Skipped.push_back(entry.Ref.Field);
+            continue;
+        case EPathRefKind::LeafUnderWorkingDir:
+        case EPathRefKind::PathUnderWorkingDirSplit:
+        case EPathRefKind::LeafUnderSibling:
+        case EPathRefKind::Implicit:
+            // All of these hang off something else -- the working dir or a
+            // base field -- which is rewritten on its own. A split child stays
+            // under the working dir even when it starts with a slash.
+            continue;
+        case EPathRefKind::PathUnderWorkingDir:
+            // Relative here means "under the working dir", which moves with it.
+            if (!entry.Ref.Value.StartsWith('/')) {
+                continue;
+            }
+            break;
+        case EPathRefKind::Absolute:
+            break;
+        }
+
+        if (entry.Ref.Value.empty() || !IsAtOrUnder(entry.AbsPath, r.OldDatabasePath)) {
+            // Outside the database being moved, or a synthetic entry with no
+            // field behind it (the CreateFullBackupOp working dir).
+            continue;
+        }
+
+        const TString relocated =
+            JoinUnder(r.NewDatabasePath, RelativeTo(entry.AbsPath, r.OldDatabasePath));
+        if (SetPathField(tx, entry.Ref.Field, entry.Ref.Index, relocated)) {
+            result.Changed = true;
+        } else {
+            // Either the field table gained a relocatable row without a setter
+            // or the footprint does not belong to this request.
+            result.Skipped.push_back(entry.Ref.Field);
+        }
+    }
+
+    // The working dir last, so that the PathUnderWorkingDir decisions above
+    // read the value the footprint was resolved against.
+    if (IsAtOrUnder(fp.WorkingDirCanon, r.OldDatabasePath)) {
+        tx.SetWorkingDir(JoinUnder(r.NewDatabasePath,
+            RelativeTo(fp.WorkingDirCanon, r.OldDatabasePath)));
+        result.Changed = true;
+    }
+
+    return result;
+}
+
+TVector<EPathField> StripSourceLocalPreconditions(NKikimrSchemeOp::TModifyScheme& tx) {
+    TVector<EPathField> stripped(tx.ApplyIfSize(), EPathField::ApplyIf_PathId);
+    tx.ClearApplyIf();
+    return stripped;
 }
 
 }  // namespace NKikimr::NSchemeShard

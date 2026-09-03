@@ -384,7 +384,12 @@ enum class EPathRefRole {
     X(TruncateTable_TableName, "TruncateTable.TableName",                                           \
         "NKikimrSchemeOp.TTruncateTable.TableName", PathUnderWorkingDir, Target)                    \
     X(CreateTestShardSet_Name, "CreateTestShardSet.Name",                                           \
-        "NKikimrSchemeOp.TCreateTestShardSet.Name", LeafUnderWorkingDir, Target)
+        "NKikimrSchemeOp.TCreateTestShardSet.Name", LeafUnderWorkingDir, Target)                    \
+    /* Not emitted by ExtractPathRefs: TModifyScheme.ApplyIf is a precondition on                   \
+       the source schemeshard's path ids and versions, not a path the operation                     \
+       touches. The row exists so StripSourceLocalPreconditions can name what it                    \
+       removed. */                                                                                  \
+    X(ApplyIf_PathId, "ApplyIf[{i}].PathId", "", ById, Dependency)
 
 // Compile-time identity of one path-carrying field. Replaces the field-path
 // string that TPathRef used to carry: rendering it is now a resolve-time
@@ -473,6 +478,11 @@ struct TPathRefOwned {
     EPathField Field = EPathField::Count;
     // Rendered once, here, from the field's template.
     TString FieldPath;
+    // The repeated-field position, kept beside the rendered field path because
+    // RelocatePaths has to address the same element again to write to it.
+    // SubIndex and MapKey are not kept: no field that carries one of those is
+    // ever rewritten.
+    ui32 Index = Max<ui32>();
     TString Value;
     ui64 OwnerId = 0;
     ui64 LocalPathId = 0;
@@ -495,7 +505,12 @@ struct TPathFootprintEntry {
 };
 
 struct TPathFootprint {
+    // The request's WorkingDir exactly as the client spelled it.
     TString WorkingDir;
+    // The same directory after TPath::Resolve, which is what every AbsPath
+    // below is built from. The raw string may be non-canonical, so a prefix
+    // test against it can silently fail; test against this one.
+    TString WorkingDirCanon;
     TString WorkingDirRelToDb;
     TPathId DatabasePathId;
     TVector<TPathFootprintEntry> Entries;
@@ -544,5 +559,80 @@ TString FormatPathFootprintLine(const TPathFootprint& footprint,
 // publications as "owner:local" ids. Kept out of the per-entry line because it
 // belongs to the part, not to any one field.
 TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId);
+
+////////////////////////////////////////////////////////////////////////////////
+// Layer 3: rewriting a request.
+//
+// Both rewriters take a TModifyScheme and the TPathFootprint that
+// ResolvePathFootprint produced *from that same request*, on the schemeshard
+// that owns the paths. The footprint is what turns a path id into a path
+// string and a raw value into an absolute one; without it neither rewrite is
+// possible without a second schemeshard walk.
+//
+// Never mutate a part's Transaction. TOperation parts hold references into the
+// bytes the client sent and Propose() is entitled to keep seeing them; every
+// caller must rewrite a copy.
+
+// What CanonicalizeToPaths could not rewrite: one entry per by-id field whose
+// path id did not resolve on this schemeshard. Such a request would be
+// rejected anyway, so the caller decides whether to drop it or keep it as-is.
+struct TCanonicalizeResult {
+    bool Changed = false;
+    TVector<EPathField> Untransformable;
+};
+
+// Rewrite by-id addressing into the equivalent by-name form: WorkingDir plus a
+// leaf name for the Drop/Alter* families, an absolute TablePath for SplitMerge.
+//
+// The id form wins over the name form in every Propose() that accepts both, so
+// the id field is always cleared; writing a name beside a live path id would
+// change nothing.
+TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp);
+
+// Where the request's database is moving. Both paths are absolute and
+// canonical, e.g. "/MyRoot/db1" -> "/MyRoot2/dir/db2".
+struct TRelocation {
+    TString OldDatabasePath;
+    TString NewDatabasePath;
+};
+
+struct TRelocateResult {
+    bool Changed = false;
+    // By-id fields found in the footprint. An id means nothing in the new
+    // database, so the caller must run CanonicalizeToPaths first; anything
+    // listed here was left untouched.
+    TVector<EPathField> Skipped;
+};
+
+// Rewrite every path the request spells out so that it points into
+// r.NewDatabasePath instead of r.OldDatabasePath.
+//
+// Only values that name a path outside the working dir are rewritten:
+// Absolute always, PathUnderWorkingDir only when the raw value starts with a
+// slash. Leaf names, split children and sibling leaves ride along on the
+// WorkingDir rewrite and are deliberately left alone; rewriting both a base
+// and its leaf would double-apply the move. Paths that do not live under
+// r.OldDatabasePath are left alone too, which is what keeps a replication
+// SrcPath (a path on a remote cluster) safe even before noting that the
+// extractor never emits it: only fields the extractor emitted are ever
+// written, and the setter table has a row for none but those.
+TRelocateResult RelocatePaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFootprint& fp,
+    const TRelocation& r);
+
+// Whether RelocatePaths knows how to write a new value into this field. True
+// for exactly the fields that can carry a relocatable path; asserted field by
+// field by the tests.
+bool CanRelocatePathField(EPathField field);
+
+// Drop the preconditions that only mean something on the schemeshard the
+// request was proposed to, and return one entry per precondition removed.
+//
+// Today that is TModifyScheme.ApplyIf, which pins path ids, path versions and
+// lock ids of the source schemeshard. It has no name form, so it cannot be
+// canonicalized, only stripped. This is policy, not a semantic no-op: the
+// request loses its optimistic-concurrency check and may succeed where the
+// original would have been rejected. A consumer that needs the check back has
+// to re-derive it against the target state.
+TVector<EPathField> StripSourceLocalPreconditions(NKikimrSchemeOp::TModifyScheme& tx);
 
 }  // namespace NKikimr::NSchemeShard
