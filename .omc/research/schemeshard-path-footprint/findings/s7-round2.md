@@ -423,3 +423,109 @@ The `ut_path_footprint` run at the S7c commit alone was
 96 of the 122 lines in the memory-changes header are the mechanical
 `TStack` -> `TUndoStack` rename plus the new type and mark struct; no existing
 statement changed behaviour.
+
+## S7f — compile-time path field identity, allocation-free extraction
+
+Plan §8.5, first half: field identity moves from a `TString FieldPath` built
+per ref into a compile-time enum plus a static table. No observable behavior
+changed: the same field-path strings, kinds, roles and values reach the log and
+the tests, and all 136 op types still resolve to the same refs.
+
+### The table
+
+`SCHEMESHARD_PATH_FIELDS(X)` lives in `schemeshard_path_footprint.h`, right
+above `enum class EPathField : ui16`. **144 enumerators**, one per distinct
+protobuf field the extractor reads plus one synthetic row per Implicit marker
+and per id-valued field. Five columns:
+
+1. enumerator (`<Submessage>_<Field>`, e.g. `CopyTables_Item_IndexImplCdc_StreamName`);
+2. the field-path template, with `{i}` / `{j}` / `{key}` placeholders;
+3. the fully qualified protobuf field name, `""` for a synthetic/id row;
+4. default `EPathRefKind`; 5. default `EPathRefRole`.
+
+Generated from it in `schemeshard_path_footprint.cpp`: the enum itself, four
+`constexpr` arrays (`FieldTemplates`, `FieldProtoNames`, `FieldKinds`,
+`FieldRoles`) with `static_assert`s tying their size to `EPathField::Count`,
+the accessors `PathFieldName` / `PathFieldProtoName` / `PathFieldDefaultKind` /
+`PathFieldDefaultRole`, and `KnownPathFieldNames()` (the non-empty proto column,
+`SortUnique`d — the hand-maintained 86-entry list is gone).
+
+The proto-name column reproduces the old `KnownPathFieldNames()` set exactly:
+86 names, verified by set-diff against `HEAD~2`. Two prefixes share a proto
+field in several places (Replication vs AlterReplication, Create vs Alter for
+FileStore/Secret/BackupCollection), which is why generation deduplicates.
+
+### Two indices, not one
+
+The plan sketched a single `Index`. Two CopyTableDescriptions field paths need
+two positions at once
+(`...[{i}].DropSrcCdcStream.StreamName[{j}]`, and
+`...[{i}].IndexImplTableDropCdcStreams[{key}].StreamName[{j}]` needs all three),
+so `TPathRef` carries `Index`, `SubIndex` and `MapKey`.
+
+### Lifetime
+
+`TPathRef::Value` / `BasePath` / `MapKey` are now `TStringBuf` into the request
+proto. The one base path that is *computed* rather than read
+(`JoinPath({SrcPath, indexImplTable})` for index-impl-table cdc streams) is
+interned in `TPathRefs::Owned`, a `TDeque<TString>` returned alongside the refs;
+a deque never relocates, so the views stay valid. `ExtractPathRefs` therefore
+returns `TPathRefs` (a `TVector<TPathRef>` plus that arena, with
+`size`/`operator[]`/`begin`/`end` so call sites read unchanged) instead of a
+bare vector.
+
+A footprint outlives its `TModifyScheme` (`operation->PathFootprints`, and the
+request layer resolves from a local `rewrittenTransactions` vector), so
+`TPathFootprintEntry::Ref` is now a `TPathRefOwned` with `TString` members and a
+`FieldPath` materialized once, in `ResolvePathFootprint`. That keeps
+`FormatPathFootprintLine` and the log format byte-identical.
+
+### What stayed hand-written, and why
+
+The 136-case op-type switch. Per plan instruction this stage moves field
+identity only; folding the switch into per-op X-macro lists (the `RewritePaths`
+idea) is §8.5's second half. The switch still has no `default:`, so a new
+`EOperationType` is still a `-Wswitch` error — that caught a dropped
+`ESchemeOpDropBlockStoreVolume` case during this refactor.
+
+Sink helpers now take an `EPathField`: `Add` (table defaults), `AddAs` (per-op
+override), `Sibling`, `SiblingOf`, `ById`, `Implicit`, each with an optional
+`TRefAt{Index, SubIndex, Key}`. **Ten call sites** use `AddAs` because the same
+protobuf field resolves differently depending on the operation carrying it —
+more than the three the brief expected: the four CDC `TableName` fields
+(Create/Alter/Drop/Rotate) under their AtTable parts, the four stream-name
+fields under their Impl parts, `DropIndex.TableName` under
+`DropTableIndexAtMainTable`, and `AlterTable.Columns[].DefaultFromSequence` when
+the value starts with a slash (that one varies per *value*, not per op).
+
+### Tests
+
+`ut_path_footprint`: **45 OK** (43 before, 2 added). Existing tests changed only
+where they read the removed `TPathRef::FieldPath` member — `FieldPaths()`,
+`CheckRef()` and four assertions now call the free `FieldPath(ref)`. No expected
+string changed.
+
+- `EveryPathFieldRendersAndIsListedOnce` — every enumerator has a non-empty,
+  unique template; rendering leaves no `{`/`}` and substitutes `{i}`/`{j}`/
+  `{key}`; `KnownPathFieldNames()` is exactly the non-empty proto column,
+  deduplicated, sorted, with no empty entry.
+- `ExtractedValuesPointIntoTheRequest` — `refs[0].Value.data() ==
+  tx.GetMoveTable().GetSrcPath().data()` for MoveTable src/dst, and a sibling
+  `BasePath` points at `MoveIndex.TablePath` in the request.
+
+Regression: `ut_cdc_stream` + `ut_auditsettings`, **49 OK**.
+
+### Gotcha worth recording
+
+A nested struct's default member initializers cannot be used in the enclosing
+class's default arguments (`void Add(..., TAt at = {})` with `struct TAt` inside
+`TRefSink`). Clang rejects it with a cascade of misleading errors, including
+"non-const lvalue reference cannot bind to a temporary". `TRefAt` had to move to
+namespace scope.
+
+### Commits
+
+- `1157126707` refactor: compile-time path field identities in footprint extractor
+- `e901047118` test: pin the path field table and allocation-free extraction
+
+Behavior change: none.
