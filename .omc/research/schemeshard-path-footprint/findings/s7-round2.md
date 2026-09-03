@@ -257,3 +257,169 @@ plus `TSchemeShardPathFootprintProtoCoverage::EveryPathLikeFieldIsClassified`.
 
 Both pushed to `enjection/feat/schemeshard-path-footprint`.
 
+
+---
+
+## S7c / S7d
+
+Branch `feat/schemeshard-path-footprint`, on top of `a25be8bd5a9`.
+
+| commit | subject |
+|---|---|
+| `b855fe53f00` | feat: record propose-time write set and publications in path footprint |
+| `e713ee51807` | feat: attribute part footprints to the originating request transaction |
+
+Both pushed to `enjection/feat/schemeshard-path-footprint`.
+
+### S7c — what changed
+
+`schemeshard__operation_memory_changes.h:19-56` adds `TUndoStack<T>`, a
+`TVector`-backed stack with the same `emplace` / `top` / `pop` / `size` /
+`operator bool` surface as the `TStack` it replaces, plus `begin()` / `end()`.
+All 24 undo-log declarations (`:58-141`) switched to it. `UnDo()` is untouched:
+it still pops from the back, which is still the last pushed element.
+
+`schemeshard__operation_memory_changes.h:143-181` adds `TMemoryChanges::TMark`
+(19 `size_t`s, one per TPathId-keyed stack) plus `Mark()` and
+`CollectPathIdsSince()`, implemented at
+`schemeshard__operation_memory_changes.cpp:223-288`. The collector dedupes
+against whatever is already in `out`. Skipped, as the design notes recommend:
+`Shards` and `TxStates` (not path-keyed), `LongIncrementalRestoreOps`
+(TOperationId), `IncrementalBackups` / `FullBackups` (ui64), and `SubDomains`
+(only ever the database path, which the footprint already carries as
+`DatabasePathId`).
+
+`schemeshard__operation_side_effects.h:101-103` /
+`schemeshard__operation_side_effects.cpp:158-174` add `PublishedCount(txId)`
+and `CollectPublishedSince(txId, mark, out)` beside `PublishToSchemeBoard`.
+`PublishPaths` is keyed by txId, so a part's own publications are an index
+range into the deque shared by the whole request.
+
+`schemeshard_path_footprint.h:101-115` adds `WriteSet`, `Published` and
+`WriteSetMayBeIncomplete` to `TPathFootprint`;
+`schemeshard_path_footprint.cpp:140-183` adds `JoinPathIds`, the shared
+`FormatPathFootprintPrefix` (now carrying `writeSet#`, `published#`,
+`incomplete#`) and `FormatPathFootprintWriteSetLine`, which emits one extra
+line per part with `fieldPath# <writeSet>` and the ids as `owner:local`.
+The hook is `schemeshard__operation.cpp:116-145`: both marks before
+`Propose()`, both collections plus the incompleteness bit after it.
+
+### S7c — deviations from the design notes
+
+1. **No version on `Published`.** The notes proposed
+   `TVector<pair<TPathId, ui64>>` filled from
+   `GetPathVersion(...).GetGeneralVersion()`. The brief specified a plain
+   `TVector<TPathId>` and that is what shipped. It is also the better answer:
+   the version at Propose time is not the version that gets persisted, so for
+   any multi-part request the recorded number would be wrong by construction.
+2. **No `BecameUndoUnsafe`.** Only the conservative
+   `WriteSetMayBeIncomplete = !context.IsUndoChangesSafe()` is recorded, per
+   the brief. Since `IsUndoChangesSafe()` is monotone within one request this
+   is exactly the notes' `(safeBefore && !safeAfter) || !safeBefore`.
+3. **`CollectPathIdsSince` dedupes.** The notes left duplicates to the caller;
+   the brief asked for dedup, so the collector does it.
+4. `#include <util/generic/stack.h>` was left in the memory-changes header even
+   though nothing in it uses `TStack` any more, to avoid breaking transitive
+   includes elsewhere.
+
+### S7c — finding: CreateTable's write set is empty by construction
+
+`TCreateTable::Propose` never calls `context.MemChanges.Grab*`. It writes
+straight through `NIceDb::TNiceDb db(context.GetDB())`
+(`schemeshard__operation_create_table.cpp:730`). So the CreateTable part
+reports `writeSet# 0, incomplete# 1`, and the new table's path id appears in no
+write set of the request. The generated `MkDir` parts do go through
+`TMemoryChanges` and report an exact two-entry write set (the new directory and
+the parent whose child list changed), with `incomplete# 0` because they run
+before any direct db write.
+
+This contradicts the brief's expected assertion ("CreateTable's write set
+contains the new table path id and its parent dir"). The test asserts what is
+actually true, in both directions, and explains why. It is the clearest
+demonstration available of what the incompleteness bit is for.
+
+Dropping an indexed table *does* show the cascade. `TDropTable::Propose` grabs
+the dropped path and its parent (`schemeshard__operation_drop_table.cpp:572`),
+so the union of the request's part write sets contains the main table, its
+parent, the index and the index impl table, none of which except the table
+itself is named anywhere in the request proto.
+
+### S7d — what changed
+
+`schemeshard__operation.h:18-30` adds `TOperation::RequestFootprints`.
+`schemeshard_path_footprint.h:101-106` adds `TPathFootprint::OriginalTxIndex`.
+`FormatPathFootprintLine` gained a `prefix` parameter (default
+`"PathFootprint"`); the shared prefix builder now prints
+`partId# <request>` when `PartId == InvalidSubTxId`, and `originalTxIndex#` on
+every line of both layers.
+
+`schemeshard__operation.cpp:279-299` is the H1 pass, placed between Phase Zero
+and Phase One and logged with the `PathFootprint request` prefix; the comment
+there documents the three early returns above it that yield no request
+footprint (duplicate txId, quota failure, rewrite failure) and the Phase One
+split failure that leaves `RequestFootprints` populated with `PathFootprints`
+still empty. Phase One (`:302-331`) builds the two parallel origin vectors;
+Phases Two and Three (`:338-360`) are indexed loops passing the origin into
+`ProcessOperationParts`, which gained a `ui32 originalTxIndex` parameter after
+`prevProposeUndoSafe` (`schemeshard_impl.h:496-507`).
+
+### S7d — deviation
+
+The brief asked for a default argument on the new parameter "so other callers
+compile". There are no other callers: `ProcessOperationParts` is private to
+`TSchemeShard` and both call sites are in `IgniteOperation`. A default in the
+middle of the signature is not legal C++ either, so the parameter is required
+and both call sites were updated.
+
+### Tests
+
+`ut_path_footprint/ut_path_footprint.cpp` gained the write-set helpers
+(`SplitPathIds`, `PathIdOf` via `DescribePrivatePath`, `RequireWriteSetLine`,
+`AllWriteSetPathIds`) and a layer split in the log parser
+(`ParseFootprintLogLayer`, `ParseFootprintLog`, `ParseRequestFootprintLog`).
+The layer split is required, not cosmetic: without it the request-layer line
+for a rejected `CreateTable` would be the first match in
+`RejectedCreateTableStillProducesFootprint` and would report the default
+`StatusSuccess`.
+
+- `CreateTableWithIntermediateDirs` extended: every part carries
+  `originalTxIndex 0`; exactly one request footprint, `partId# <request>`,
+  `CreateTable.Name` / `LeafUnderWorkingDir` / `relToDb a/b/Table`; the MkDir
+  write sets cover `/MyRoot`, `/MyRoot/a`, `/MyRoot/a/b` exactly;
+  the CreateTable part is `writeSet# 0, incomplete# 1` and the new table id is
+  absent from the request's write set.
+- `RejectedCreateTableStillProducesFootprint` extended: empty write set, no
+  publications, `incomplete# 0`.
+- `DropIndexedTableWriteSetCoversTheCascade` (new): the cascade case.
+- `TwoTransactionsGetDistinctOriginalTxIndexes` (new): a hand-built two-
+  transaction `TEvModifySchemeTransaction`; two request footprints with
+  indexes 0 and 1, and the generated `MkDir` for `second` plus the `MkDir` for
+  `nested` both pointing back at index 1.
+
+### Test results
+
+| target | summary |
+|---|---|
+| `ydb/core/tx/schemeshard/ut_path_footprint` | `{"exit_code": 0, "tests": {"OK": 43}}` |
+| `ydb/core/tx/schemeshard/ut_base -F '*TSchemeShardTest*'` | `{"exit_code": 0, "tests": {"OK": 171}}` |
+| `ydb/core/tx/schemeshard/ut_cdc_stream` | `{"exit_code": 0, "tests": {"OK": 44}}` |
+
+The `ut_path_footprint` run at the S7c commit alone was
+`{"exit_code": 0, "tests": {"OK": 42}}`.
+
+### Diffstat vs `main`, pre-existing files only
+
+```
+ schemeshard__operation.cpp                  |  79 +++++++++++--
+ schemeshard__operation.h                    |  14 +++
+ schemeshard__operation_memory_changes.cpp   |  65 +++++++++++
+ schemeshard__operation_memory_changes.h     | 122 +++++++++++++++++----
+ schemeshard__operation_side_effects.cpp     |  15 +++
+ schemeshard__operation_side_effects.h       |   7 ++
+ schemeshard_impl.h                          |   3 +
+ 7 files changed, 273 insertions(+), 32 deletions(-)
+```
+
+96 of the 122 lines in the memory-changes header are the mechanical
+`TStack` -> `TUndoStack` rename plus the new type and mark struct; no existing
+statement changed behaviour.
