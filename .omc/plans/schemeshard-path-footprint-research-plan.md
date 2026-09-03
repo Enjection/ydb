@@ -428,5 +428,6 @@ round 1.
 | S7k | rewire `ExtractChangingPaths` onto the extractor (audit output changes for 8 buggy families) | report §6.3 | feat, separate decision |
 | S7l | proto annotations | §8.9 | deferred: proto surface decision, relinks ~660 modules |
 | S7m | `CanonicalizeToPaths` must return/update the footprint so `RelocatePaths` sees the canonicalized WorkingDir (defect found by S7g) | findings s7-round2 §S7g | fix |
+| S8 | read-set coverage gate in `ut_helpers`, `TTestEnvOptions::AssertReadSetCoverage` default on for every schemeshard suite; broad suite run, violations fixed in the extractor or allowlisted with a cited Propose line | §8.4, user request 2026-09-03 | test/feat |
 
 Status 2026-09-03: S7a-S7j done and pushed (see draft PR Enjection/ydb#32); S7g done (zero divergences on the request-named subset; §4 classes untested by construction); S7m+S7k in progress; S7l deferred. Executed order differed from the table: S7f before S7e so the rewriter was written once on the enum.
