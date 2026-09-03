@@ -86,5 +86,27 @@
   "measurement_provenance": "VERIFIED POST-FIX. All results measured against schemeshard_path_footprint.cpp md5 190f840105f9efa291bfca4c2895418c (913 lines) and ut_path_footprint.cpp md5 1048ae79992ad586b508f86ac413159f (936 lines), hash-gated before and after each run. ut_path_footprint 31 OK, ut_auditsettings 5 OK, six schemeshard suites 561 OK (same as uninstrumented main). Coverage: 430 of 462 non-noise oracle path shapes covered, 32 gaps in 3 of 67 part op types, all structural (8 implicit child, 24 runtime-derived). Pre-fix measurement (399 covered, 62 gaps, 10 op types) preserved in findings/s5-raw/coverage.v1-prefix.json.",
   "reverify_command": "hya make -T --build=relwithdebinfo -j128 -ttt ydb/core/tx/schemeshard/ut_path_footprint then re-run findings/s5-raw/compare_coverage.py against a fresh six-suite harvest",
   "process_notes": "The prototype did not compile when first handed over (unbraced case label at schemeshard_path_footprint.cpp:509) and the tree was edited four times after being declared frozen, twice mid-measurement. Numbers are trustworthy only because every run was hash-gated. See findings/s5-verification.md section 5.",
-  "result": "report.md; branch feat/schemeshard-path-footprint (uncommitted): 23 added lines in 3 existing files + schemeshard_path_footprint.{h,cpp} + ut_path_footprint (32 tests)"
+  "result": "report.md; branch feat/schemeshard-path-footprint (uncommitted): 23 added lines in 3 existing files + schemeshard_path_footprint.{h,cpp} + ut_path_footprint (32 tests)",
+  "round2": {
+    "status": "complete",
+    "date": "2026-09-03",
+    "stages_done": [
+      "S7a",
+      "S7b",
+      "S7c",
+      "S7d",
+      "S7f",
+      "S7e",
+      "S7i",
+      "S7j",
+      "S7h",
+      "S7g",
+      "S7m",
+      "S7k"
+    ],
+    "deferred": [
+      "S7l"
+    ],
+    "pr": "https://github.com/Enjection/ydb/pull/32"
+  }
 }
