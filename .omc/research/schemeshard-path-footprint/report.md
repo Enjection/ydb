@@ -418,3 +418,41 @@ ut_path_footprint  {"type": "summary", "ts": 1788397161.842, "exit_code": 0, "te
 ```
 
 See also `thoughts-replay-completeness.md` (2026-09-03): path completeness vs replay completeness, 7 known one-line field misses, enforcement loop, relocation design.
+
+## 9. Round 2 (2026-09-03): plan §8 executed as code
+
+Branch `feat/schemeshard-path-footprint`, draft PR Enjection/ydb#32. Per-stage
+details with file:line, deviations and test lines: `findings/s7-round2.md`;
+design notes: `findings/s7-design-notes.md`, `findings/s7-design-notes-2.md`.
+
+| stage | commit | outcome |
+|---|---|---|
+| S7a 7 missing path fields | `558efc6d6ee` | copy sources, `CopySequence.CopyFrom`, `DefaultFromSequence`, replication local targets (never `SrcPath`), backup dst paths |
+| S7b descriptor-walk gate | `057ca390e9e` | every path-like string field must be known, not-a-path, or listed; 7 left `Unclassified` and printed |
+| S7c write set | `b855fe53f00` | `TMemoryChanges` stacks made iterable; per-part `WriteSet`, `Published`, `WriteSetMayBeIncomplete` |
+| S7d H1 join | `e713ee51807` | `OriginalTxIndex` on parts, `TOperation::RequestFootprints` |
+| S7f O(1) identities | `11571267072`, `e9010471189` | `EPathField` (144), X-macro table, `TStringBuf` values, no allocation in extraction |
+| S7e canonicalize/relocate | `96aa3c022fe` | `CanonicalizeToPaths` (7 id fields → 6 name forms, ids cleared), `RelocatePaths` (42-row setter table), `StripSourceLocalPreconditions` |
+| S7i observer | `bc83a9c48ad` | `IPathFootprintObserver` via TAppData/TTestEnv; computation gated; log at DEBUG |
+| S7j inactive moves | `0f3d692d12e` | `ResolveWithInactive(opId)` for Move* destinations |
+| S7h read set | `a8340bfbf25` | `TPath` resolution observer, per-part `ReadSet`; coverage assertion: zero violations |
+| S7g replay test | `218487d1847` | two real databases in one runtime; canonicalize+relocate+replay; masked describe trees equal; zero divergences on the request-named subset |
+| S7m contract fix | `e1052ae143f` | `CanonicalizeToPaths` patches the footprint it is given |
+| S7k audit rewire | `588dc033306` | `ExtractChangingPaths` = 20-line filter over `ExtractPathRefs`; 12 families corrected, 18 byte-identical; separate commit, droppable |
+| S7l proto annotations | deferred | proto-surface decision, ~660-module relink |
+
+Diff vs `main` inside `ydb/`: 14 pre-existing files, +418/−456 (−456 is the
+old audit switch); 5 new files, 6.3k lines of which 3.7k are tests.
+
+Tests on the final tree: `ut_path_footprint` 80, `ut_auditsettings` 5, plus
+`ut_cdc_stream`, `ut_move`, `ut_base` `TSchemeShardTest` regression (see the
+last line of this section).
+
+Known follow-ups after round 2:
+- `ydb/tests/functional/audit/canondata` will change for the resource-pool
+  family (tenant init creates the default pool); regenerate with the `-Z`
+  canonical-data workflow before a release branch (needs sandbox access).
+- The replay experiment covers only the request-named subset; the §4 classes of
+  `thoughts-replay-completeness.md` remain untested by construction and need a
+  completion filter (Done-time) to be measured.
+- S7l (annotations) if the team wants classification enforced at the proto.

@@ -1113,3 +1113,205 @@ sizes are still unquantified.
 - Extending the experiment into the §4 classes needs a completion filter (record
   at Propose, publish at Done) first; §8.7's "accepted ≠ committed" is not
   exercised here because every request in the sequence completes.
+
+---
+
+## S7m — the canonicalize/relocate contract
+
+Commit `e1052ae143f` `fix: canonicalized requests carry an updated footprint for relocation`.
+
+### The defect, restated
+
+S7g found it: `CanonicalizeToPaths` writes a working dir derived from the
+entry's `AbsPath`, `RelocatePaths` rewrites `TPathFootprint::WorkingDirCanon`,
+and the footprint between them still described the request **as submitted**. A
+by-id request normally carries no `WorkingDir` at all — `Propose()` ignores it —
+so `WorkingDirCanon` was not under the old database, the working-dir rewrite was
+skipped, and the dir canonicalization had just invented (pointing at the source
+database) survived into the replayed request.
+
+### API change
+
+```cpp
+-TCanonicalizeResult CanonicalizeToPaths(TModifyScheme& tx, const TPathFootprint& fp);
++TCanonicalizeResult CanonicalizeToPaths(TModifyScheme& tx, TPathFootprint& fp);
+```
+
+The footprint is now patched in place to describe the rewritten request, which
+is exactly what `RelocatePaths` needs:
+
+| field | new value |
+|---|---|
+| `WorkingDir`, `WorkingDirCanon` | the parent directory cut out of the entry's `AbsPath`; canonical already, so both forms are the same string |
+| `WorkingDirRelToDb` | that dir relative to the entry's own database |
+| `DatabasePathId` | the entry's `DatabasePathId`, not the one the submitted working dir resolved to |
+| every entry's `RelPathToWorkingDir` | recomputed against the new working dir |
+| the rewritten entry's `Ref` | `Field` → the name form (`Drop_Name`, `AlterTable_Name`, `AlterPersQueueGroup_Name`, `AlterBlockStoreVolume_Name`, `AlterReplication_Name`, `SplitMergeTablePartitions_TablePath`), `FieldPath` re-rendered, `Kind` → `LeafUnderWorkingDir` (`Absolute` for SplitMerge), `Value` → the leaf (the absolute path for SplitMerge), `OwnerId`/`LocalPathId` cleared |
+
+`SplitMergeTablePartitions` still does not touch the working dir: its
+`TablePath` is absolute.
+
+Retargeting the entry is not cosmetic. Without the `Field` rewrite the setter
+table would still be asked for `SplitMergeTablePartitions.TableLocalId`, which
+has no setter, so a canonicalized SplitMerge would land in `Skipped` and never
+be relocated. With it, `RelocatePaths` writes the new `TablePath`.
+
+Two supporting helpers in the .cpp: `DatabasePathOfEntry` (recovers the database
+path as `AbsPath` minus `RelPathToDatabase`; empty when the two do not line up,
+which is what a footprint records for an unresolved database) and
+`MoveFootprintWorkingDir`.
+
+Documented precondition, not enforced: canonicalization moves the request's
+working dir, so a request that also carried a working-dir-relative field would
+change meaning. No operation combines a by-id field with one — `AlterTable`'s
+`DefaultFromSequence` hangs off the altered table, not off the working dir — so
+there is a header comment rather than a check.
+
+`RelocatePaths` gained a doc paragraph: `fp` must be the footprint of `tx` as it
+stands now; after `CanonicalizeToPaths` pass the footprint it patched, after any
+other edit re-resolve.
+
+### Tests
+
+`ut_path_footprint`: **72 OK** (71 before).
+
+- New pure test `CanonicalizeThenRelocateWithoutAWorkingDir`: a by-id
+  `DropTable` with an empty `WorkingDir`, canonicalized and then relocated with
+  the same footprint, ends with `WorkingDir` = `/MyRoot2/x/db2/dir` and
+  `Drop.Name` = `T`. Before the fix the working dir stayed at `/MyRoot/db1/dir`.
+- `CanonicalizeDropTableById` and `CanonicalizeSplitMergeKeepsTheAbsoluteTablePath`
+  now also assert the patched footprint (working dir, entry field, kind, value,
+  `RelPathToWorkingDir`).
+- `RelocateSkipsAByIdRequest` drops its `FakeResolve` re-resolution and reuses
+  the patched footprint.
+- `ut_replay.cpp`: the workaround is gone. Step 11 sends the by-id drop **with
+  no working dir at all**, which is how such a request normally arrives, and the
+  report now asserts `Skipped` empty for every step including that one — the
+  entry is no longer `ById` by the time relocation walks it. 11/11 still
+  accepted on both databases, trees still byte-identical under masking.
+- `CanonicalizeThenRelocateNeedsTheWorkingDir` became
+  `CanonicalizeInventsTheWorkingDirRelocationMoves`: both probes (no working
+  dir, and a working dir the client sent) land in dbB.
+
+---
+
+## S7k — the audit log's paths come from the extractor
+
+Commit `588dc033306` `feat: audit log paths come from the path footprint extractor`.
+
+### What was implemented
+
+`JoinPathRef(workingDir, ref, joined)` in `schemeshard_path_footprint.{h,cpp}`:
+one ref joined into a path string out of the request alone, mirroring
+`ResolvePathFootprint`'s kind switch minus `TPath`. `joined` holds the strings
+already produced for earlier refs, which is how a `LeafUnderSibling` whose base
+is an anchor (a by-id base, or a split child) resolves. `ById` and `Implicit`
+return empty.
+
+One deliberate difference from `NKikimr::JoinPath`: an empty leaf yields the
+directory itself rather than a trailing slash. That keeps `CreateFullBackupOp`
+(a `WorkingDirItself` ref with an empty value) printing its working dir exactly
+as before, and it is what turns the id-bypass bug into an omitted field rather
+than `"/MyRoot/"`.
+
+`ExtractChangingPaths` shrank from 415 lines and 136 arms to a 20-line filter
+keeping refs whose role is `Target` or `Source`. Three includes the switch
+needed (`base/path.h`, `index_builder.pb.h`, `subdomains.pb.h`) went with it.
+
+One exception survives: `ESchemeOpAlterLogin` returns `{WorkingDir}`. It
+resolves no `TPath`, so the extractor emits nothing for it, but the record has
+always shown the working dir and for a login operation that is the whole of what
+it touches. Dropping it would have been a silent regression in the one family
+whose records nobody else emits.
+
+### ById: not resolved, and why
+
+The notes offered threading `TOperation::RequestFootprints` into
+`AuditLogModifySchemeTransaction`. Not done, because of what S7i created:
+footprints are computed **only** when an `IPathFootprintObserver` is installed or
+`FLAT_TX_SCHEMESHARD` admits DEBUG. An audit consumer reading them would get
+resolved paths in one configuration and nothing in another — a worse contract
+than consistently omitting the field. K3's other two reasons stand:
+`Self->Operations[txId]` may already be erased by `Complete`, and by-id requests
+are roughly 1 in 400 (S3 §4). The code says so in a comment.
+
+### Audit output, old → new
+
+Everything below is client-submittable. Derived `*Impl`/`*AtTable` parts are
+unreachable from `AuditLogModifySchemeTransaction`, which iterates the client's
+transactions; several of them do gain their stream leaves, which nothing reads.
+
+**Corrected (the buggy families).**
+
+| family | old | new |
+|---|---|---|
+| `CreateResourcePool`, `AlterResourcePool` | `MyResourcePool` | `/MyRoot/.metadata/workload_manager/pools/MyResourcePool` |
+| `DropResourcePool` | `MyResourcePool` | same, absolute |
+| `CreateStreamingQuery`, `AlterStreamingQuery` | `MyStreamingQuery` | `/MyRoot/MyStreamingQuery` |
+| `DropStreamingQuery` | `MyStreamingQuery` | `/MyRoot/MyStreamingQuery` |
+| `TruncateTable` | `Table` | `/MyRoot/Table` |
+| `SplitMergeTablePartitions` by `TablePath` | `/MyRoot//MyRoot/Table` | `/MyRoot/Table` |
+| `AlterSequence` | *(no field)* | `/MyRoot/seq` |
+| `AlterReplication`, `AlterTransfer` by name | *(no field)* | `/MyRoot/repl` |
+| `AlterExternalTable` | *(no field)* | `/MyRoot/et` |
+| `AlterExternalDataSource` | *(no field)* | `/MyRoot/ds` |
+| `CreateColumnTable` | `/MyRoot/` — it read `AlterColumnTable.Name` | `/MyRoot/ct` |
+| `AlterColumnTable` without the `AlterColumnTable` submessage | `/MyRoot/` | `/MyRoot/` + `AlterTable.Name` |
+| the id bypass: `Drop.Id` (~22 op types), `AlterTable.PathId`/`Id_Deprecated`, `AlterPersQueueGroup.PathId`, `AlterBlockStoreVolume.PathId`, `AlterReplication.PathId`, `SplitMerge.TableLocalId` | `/MyRoot/` | *(field omitted)* |
+| any `PathUnderWorkingDir` field whose value is absolute (`AlterUserAttributes.PathName`, `DropIndex.TableName`, `ChangePathState.Path`, `TruncateTable.TableName`, the CDC `TableName`s, `IncrementalRestoreLockTargets` paths) | `/MyRoot//abs/path` | `/abs/path` |
+
+**Added (families that were not buggy, but that name a path the old switch
+dropped).** These follow from the `Target || Source` filter the design note
+recommended. The alternative, `Target` only, would have *removed*
+`MoveTable.SrcPath`, `RotateCdcStream.OldStreamName` and
+`RestoreMultipleIncrementalBackups.SrcTablePaths`, which today's output already
+carries — a bigger diff than these four additions.
+
+| family | old | new |
+|---|---|---|
+| `CreateTable` with `CopyFromTable` | `/MyRoot/dst` | `/MyRoot/dst`, `/MyRoot/src` |
+| `CreateConsistentCopyTables` | `dst` per item | `src`, `dst` per item |
+| `CreateContinuousBackup` with an explicit `StreamName` | `/MyRoot/T` | `/MyRoot/T`, `/MyRoot/T/S` |
+| `AlterContinuousBackup` with `TakeIncrementalBackup` | `/MyRoot/T` | `/MyRoot/T`, `/MyRoot/bak`, `/MyRoot/T/S` |
+
+Without an explicit stream name the continuous-backup families are unchanged:
+the schemeshard generates the name from the clock, so the request does not spell
+it out and there is nothing to report.
+
+**Verified byte-identical**, asserted one by one in the new suite: `MkDir`,
+`CreateTable`, `DropTable`/`AlterTable`/`ModifyACL` by name, `CreateSubDomain`,
+`AlterUserAttributes` (relative), `MoveTable`, `MoveIndex`, `DropIndex`,
+`CreateCdcStream`, `DropCdcStream` (several streams), `RotateCdcStream`,
+`CreateIndexBuild`, `CreateIndexedTable`, `AlterLogin`, `CreateFullBackupOp`,
+`IncrementalRestoreLockTargets`, `DropContinuousBackup`. No dedupe was added:
+the old implementation had none, and the new one produces no duplicate a family
+did not already produce.
+
+### Tests
+
+- New pure suite `TSchemeShardAuditLogPaths` in `ut_path_footprint.cpp`
+  (8 tests, ~50 assertions), driven through `MakeAuditLogFragment(tx).Paths` so
+  it pins the public entry point rather than a file-static helper. No `TTestEnv`.
+- `ut_path_footprint`: **80 OK**. `ut_auditsettings`: **5 OK**, no golden
+  change, exactly as K2 predicted — it tests the `TAuditSettings` proto field and
+  never inspects an audit line.
+- One crash on the first run, and it was the test's fault, not the code's:
+  `DefineUserOperationName` aborts on an `ESchemeOpAlterLogin` whose `AlterLogin`
+  oneof is unset, so the AlterLogin case now sets `CreateGroup`.
+- No C++ suite asserts on `paths=`. `grep -rn '"paths"' ydb/ --include=*.cpp`
+  finds the emitter, this new suite, and `audit_log_service_ut.cpp`, which builds
+  its parts literally.
+
+### Left undone, deliberately
+
+`ydb/tests/functional/audit/canondata/result.json` references its audit blobs by
+`file://` sandbox URI, so regenerating it needs the canonical-data workflow
+(`ya make -Z`) and cannot be done from this tree. Two tests reference schemeshard
+`ModifyScheme` records: `test_canonical_records.test_create_drop_and_alter_database`
+(5 blobs) and `test_create_drop_and_alter_table` (3 blobs). The table test
+exercises `CreateTable`/`AlterTable`/`DropTable` by name and the topic test
+`CreatePersQueueGroup`/`AlterPersQueueGroup` by name, all in the unchanged set.
+The database test also captures tenant initialization, which creates the default
+resource pool, so its schemeshard blobs are expected to change exactly the way
+the resource-pool row above says. Regenerate them before this reaches a release
+branch.
