@@ -698,3 +698,233 @@ Regression: `ut_auditsettings`, **5 OK**.
 
 Behavior change: none. The two rewriters are new entry points; nothing on the
 Propose path calls them yet.
+
+---
+
+## S7i — observer channel, log demoted to DEBUG
+
+Commit `bc83a9c48ad` "feat: path footprint observer channel, log demoted to debug".
+
+### Seams chosen
+
+| seam | choice | why |
+|---|---|---|
+| production channel | `TAppData::PathFootprintObserver` (`ydb/core/base/appdata_fwd.h:213`), forward-declared beside `NSchemeShard::IOperationFactory` | the notes' §I1 answer. `TSchemeShard` has one two-argument constructor and `CreateFlatTxSchemeShard` forwards exactly those two, so there is no constructor seam; `TTestEnv::TSchemeShardFactory` would be test-only and gives production nothing. One raw pointer, non-const because an observer accumulates. No include added to `appdata_fwd.h`. |
+| test installation | `TTestEnvOptions::PathFootprintObserver`, published to every node's `TAppData` right after the `InitYdbDriver` block and before `BootSchemeShard` | mirrors the `YdbDriver` precedent at the same spot; per-node loop mirrors `SetupSchemeCache`. Bootstrap parts (the ~20 `ESchemeOpCreateSysView`) are therefore observed, which the tests filter exactly as they filtered them out of the log before. |
+| interface | `IPathFootprintObserver` in `schemeshard_path_footprint.h` with `OnRequestFootprint(TTxId, const TPathFootprint&)` and `OnPartFootprint(TTxId, const TPathFootprint&)` | `TTxId` is passed, not stored on `TPathFootprint`: the struct is per-part state, the tx id is context. |
+
+`IPathResolutionObserver` was declared in the same commit (used by S7h) with a
+`class TPath;` forward declaration, so the footprint header still does not pull
+`schemeshard_path.h`.
+
+### Gating and cost
+
+`ProcessOperationParts` and the `IgniteOperation` request loop both hoist
+
+```cpp
+auto* const footprintObserver = AppData()->PathFootprintObserver;
+const bool logFootprints = IS_CTX_LOG_PRIORITY_ENABLED(context.Ctx,
+    NActors::NLog::PRI_DEBUG, NKikimrServices::FLAT_TX_SCHEMESHARD, 0ull);
+```
+
+out of their loops. With neither, `ResolvePathFootprint` is not called, the
+`TMemoryChanges::Mark()` / `PublishedCount()` marks are not taken, and
+`TOperation::PathFootprints` / `RequestFootprints` stay empty. Cost in that
+configuration is one pointer load plus one `TSettings` lookup per request, not
+per part. All five log sites went `LOG_NOTICE_S` -> `LOG_DEBUG_S`.
+
+`schemeshard__operation.h` documents that both vectors are now conditional.
+No other consumer exists in the tree (`grep -rn 'PathFootprints|RequestFootprints'`
+finds only the hook, the header and this suite), so S7k must not assume they
+are populated — the notes' §K3 recommendation stands and is now enforced by
+construction.
+
+### Correction to the notes (§I5)
+
+The notes say `TTestEnv::SetupLogging` leaves `FLAT_TX_SCHEMESHARD` at
+`PRI_NOTICE` and raises it to DEBUG only when `ENABLE_SCHEMESHARD_LOG` is set.
+`ENABLE_SCHEMESHARD_LOG` is initialised to **`true`**
+(`ut_helpers/test_env.cpp:31`), so every schemeshard unit test already logs
+`FLAT_TX_SCHEMESHARD` at DEBUG. Consequences:
+
+- demoting the log does *not* silence the existing tests, and does not reduce
+  test-time footprint cost either — only production cost;
+- a test that wants the production default has to ask for it:
+  `runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_NOTICE)`
+  after `TTestEnv` construction. This cost one build cycle
+  (`NoObserverAndNoDebugLogMeansNoFootprint` failed on the first run).
+
+### Test migration
+
+`TLogRecordCollector` + `ParseFootprintLog` + `TFootprintLine` +
+`FindLine`/`RequireLine`/`AbsPaths`/`RequireLineByAbsPath`/`SplitPathIds`/
+`RequireWriteSetLine` are gone. Replaced by `TFootprintCollector`
+(a `TDeque` of `{TTxId, TPathFootprint}` per layer, deque so references stay
+valid) plus `Flatten` / `FindEntry` / `RequireEntry` / `RequireEntryByAbsPath` /
+`AbsPaths` / `RequirePart` / `AllWriteSetPathIds` over the structs. Assertions
+are now typed: `entry.Exists` is a `bool`, `PathId` a `TPathId`, `WriteSet` a
+`TVector<TPathId>` compared directly instead of through the log's
+`owner:local` joining.
+
+Also removed: `ParseFieldPath`, `ParseKind`, `FootprintFromLog`,
+`FillRawValuesFrom` (95 lines). The three propose-level rewrite tests
+(`CanonicalizedDropByIdEqualsTheByNameRequest`,
+`CanonicalizedAlterTableByPathIdIsAcceptedByName`,
+`RelocateDrivenByASchemeShardResolvedFootprint`) used to reconstruct a lossy
+`TPathFootprint` out of log text; they now take
+`collector.Requests[mark].Footprint` directly, which is the real one.
+
+`TLogRecordCollector` survives for two new tests that pin the other half:
+
+- `DebugLogStillRendersTheFootprint` — with DEBUG on, the part line, the
+  request line and the write-set line all still render, with the same field
+  grammar;
+- `NoObserverAndNoDebugLogMeansNoFootprint` — with the priority lowered to
+  NOTICE and no observer, no `PathFootprint` line is emitted at all.
+
+## S7j — ResolveWithInactive for the Move* family
+
+Commit `0f3d692d12e` "fix: footprint resolves move destinations with inactive-aware lookup".
+
+`ResolvePathFootprint(tx, ss, TOperationId opId = InvalidOperationId)`. The
+sentinel is `InvalidOperationId`, **not** `{}`: `TOperationId` is a
+`std::pair<TTxId, TSubTxId>` whose `explicit operator bool` makes a
+value-initialised `(0, 0)` truthy (notes §J3). The guard is `bool(opId)`.
+
+`ResolvesTargetWithInactive()` returns true for exactly
+`ESchemeOpMoveTable`, `ESchemeOpMoveTableIndex`, `ESchemeOpMoveSequence` — the
+three ops whose `Propose()` calls `TPath::ResolveWithInactive`.
+`ESchemeOpMoveIndex` is excluded (its paths are `LeafUnderSibling` under
+`MoveIndex.TablePath`, and it expands into `MoveTableIndex` parts that are
+covered). `ESchemeOpCreateColumnTable` is excluded per notes §J4: the
+operation's own `ResolveWithInactive` call in `read_only_copy_table.cpp:502`
+passes a bare leaf name, so its head-match can never fire — left alone, not
+fixed here.
+
+Only `Role == Target` refs of those ops take the new branch. Sources keep the
+plain resolver, which is what `move_table.cpp` / `move_sequence.cpp` do.
+`schemeshard__operation.cpp` passes `part->GetOperationId()`; the
+`IgniteOperation` request loop keeps the two-argument form.
+
+### Gap, stated honestly
+
+The new branch is exercised by `MoveIndexedTableResolvesEveryMoveDestination`
+(MoveTable + derived MoveTableIndex parts, plus the request-level footprint
+still on the plain resolver), but that test pins **no behaviour flip**: it
+proves the inactive-aware path is taken and returns the same correct answers.
+
+A request where the two resolvers actually disagree needs
+`TSchemeShard::AttachChild` to *reject* linking the new element into its
+parent's `Children` map, so that `TPath::Resolve` by name still finds the old
+element while `TPath::Init(TargetPathId)` finds the new one — plus the head
+operation's `TargetPathId` being exactly the destination's parent
+(`headPathNameParts.size() + 1 == pathParts.size()`,
+`schemeshard_path.cpp:1517`). Neither `TestMoveTable` nor a two-transaction
+`TEvModifySchemeTransaction` built from the existing helpers can produce that
+shape: a plain MkDir-then-move leaves the intermediate directory properly
+attached, so both resolvers agree. The change is monotone (falling through to
+`Resolve` is today's behaviour), so this is a correctness alignment with
+`Propose()` rather than a demonstrated bug fix. `ut_move` stays green.
+
+## S7h — read-set recorder
+
+Commit `a8340bfbf25` "feat: read-set recorder for path footprints behind an observer hook".
+
+### Seams chosen
+
+- `TSchemeShard::PathResolutionObserver` (`schemeshard_impl.h`, beside
+  `RootPathElements`, which is already in the public member block). Raw
+  pointer, not `std::function`: `TPath::Dive` runs ~87k times per six-suite
+  run and sits under everything `Propose()` does. Forward-declared
+  `class IPathResolutionObserver;` in `schemeshard_impl.h` rather than
+  including the footprint header there.
+- Choke points are exactly `TPath::Dive` and `TPath::Init`, as the notes
+  established. `Dive` had five returns, so it was split into a private
+  `DiveImpl` (the unchanged body, `return;` instead of `return *this;`) plus a
+  three-line `Dive` that calls it and notifies once. `Init` has two returns and
+  notifies at both, including the unknown-path-id one.
+- Hot-path cost: one `Y_UNLIKELY` load-and-branch off `SS`, which `Dive`
+  already dereferences. Null in production; armed only inside
+  `ProcessOperationParts`.
+
+### Deviation from the notes
+
+The notes proposed `IPathFootprintObserver::PathResolutionObserver()` returning
+a caller-supplied recorder. That was replaced by
+`virtual bool WantReadSet() const { return false; }`, and the hook owns a
+`TPathReadSetRecorder` bound to the current footprint's `ReadSet`. Reason: with
+a caller-supplied recorder the observer would need a second call to learn which
+part it is recording for; with the footprint-owned recorder the association is
+structural and the read set lands where every consumer already looks. One
+mechanism instead of two.
+
+### Arming
+
+`TPathReadSetRecorder recorder(footprint.ReadSet);` inside the `else` branch,
+installed only when `wantReadSet`, with a `Y_DEFER` that nulls the pointer
+whether `Propose()` returns or throws. It covers `part->Propose(...)` and
+nothing else — deliberately not the footprint's own `ResolvePathFootprint`
+above it, nor the `IgniteOperation` request loop, either of which would make
+the coverage assertion vacuous.
+
+### Collapse
+
+`TPathReadSetRecorder::OnPathResolved` keeps only the maximal path of a `Dive`
+chain: a name step whose path strictly extends the entry recorded immediately
+before it replaces that entry. One `TPath::Resolve("/MyRoot/a/b/T")` yields one
+read, not four. Id lookups never collapse into or out of a name chain.
+
+### Coverage predicate and result
+
+`ReadSetStaysInsideTheFootprint` drives the whole propose-level op mix in one
+run (multi-segment CreateTable, CreateIndexedTable, CreateCdcStream, MoveTable
+of an indexed table, DropTable, a rejected CreateTable) with the env bootstrap
+parts observed too, and asserts every recorded read is covered by:
+
+1. a path id in the part's `WriteSet` or `Published` (compared by id, since the
+   write set carries ids, not strings);
+2. an entry's `AbsPath`, or an ancestor of one (segment-wise prefix);
+3. inside the subtree anchored by an `Implicit` entry;
+4. `WorkingDirCanon` or an ancestor of it, which covers the root and the
+   domain path;
+5. the root or an empty path, which say nothing.
+
+**Zero violations on the first run.** No allowlist was needed and none was
+added. The test also asserts the recorder is not vacuous: the read set must
+mention `/MyRoot`, `/MyRoot/a/b/Table`,
+`/MyRoot/Indexed/byValue/indexImplTable` and `/MyRoot/a/b/Table/Stream` — the
+last two are paths no proto field of their requests names.
+
+`WantReadSet()` is false in the default `TFootprintCollector`, so only this one
+test pays the per-`Dive` virtual call; the rest of the suite is unaffected.
+
+### Diffstat vs main, pre-existing files only
+
+```
+ ydb/core/base/appdata_fwd.h                        |   4 +
+ ydb/core/tx/schemeshard/schemeshard__operation.cpp | 125 ++++++++++++++++---
+ ydb/core/tx/schemeshard/schemeshard__operation.h   |  19 +++
+ ydb/core/tx/schemeshard/schemeshard_impl.h         |  13 ++
+ ydb/core/tx/schemeshard/schemeshard_path.cpp       |  30 +++--
+ ydb/core/tx/schemeshard/schemeshard_path.h         |   3 +
+ ydb/core/tx/schemeshard/ut_helpers/test_env.cpp    |   8 ++
+ ydb/core/tx/schemeshard/ut_helpers/test_env.h      |   4 +
+ 8 files changed, 191 insertions(+), 15 deletions(-)
+```
+
+`schemeshard_path.cpp`'s 30 lines are almost entirely the `Dive`/`DiveImpl`
+split; the logic is byte-identical apart from `return *this;` -> `return;`.
+
+### Test summaries
+
+```
+ut_path_footprint                          {"type": "summary", "exit_code": 0, "tests": {"OK": 68}}
+ut_cdc_stream + ut_auditsettings + ut_move {"type": "summary", "exit_code": 0, "tests": {"OK": 90}}
+```
+
+`ut_path_footprint` went 64 -> 68 tests: `DebugLogStillRendersTheFootprint`,
+`NoObserverAndNoDebugLogMeansNoFootprint` (S7i),
+`MoveIndexedTableResolvesEveryMoveDestination` (S7j),
+`ReadSetStaysInsideTheFootprint` (S7h). `ya` emits only aggregate summaries
+when every suite passes, so there is no per-suite line to paste for the three
+regression suites; the run covered all three in one invocation.
