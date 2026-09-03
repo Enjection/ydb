@@ -583,6 +583,182 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
     // Every EOperationType must be handled. The switch in ExtractPathRefs has
     // no `default:`, so a new enum value is a -Wswitch compile error; this test
     // additionally pins which op types legitimately extract nothing.
+    // -- §8.3 fields: paths the request names that the shape audit missed --
+
+    Y_UNIT_TEST(CreateTableCopyFromTableIsAnAbsoluteSource) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateTable, "/MyRoot/dir");
+        tx.MutableCreateTable()->SetName("Dst");
+        tx.MutableCreateTable()->SetCopyFromTable("/MyRoot/other/Src");
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs),
+            (TVector<TString>{"CreateTable.Name", "CreateTable.CopyFromTable"}));
+        CheckRef(refs[1], "CreateTable.CopyFromTable", "/MyRoot/other/Src",
+            EPathRefKind::Absolute, EPathRefRole::Source);
+
+        // Without the field the op is a plain create and nothing extra appears.
+        tx.MutableCreateTable()->ClearCopyFromTable();
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(ExtractPathRefs(tx)),
+            (TVector<TString>{"CreateTable.Name"}));
+    }
+
+    Y_UNIT_TEST(CreateColumnTableCopyFromTableIsAnAbsoluteSource) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateColumnTable, "/MyRoot/dir");
+        tx.MutableCreateColumnTable()->SetName("Dst");
+        tx.MutableCreateColumnTable()->SetCopyFromTable("/MyRoot/store/Src");
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs),
+            (TVector<TString>{"CreateColumnTable.Name", "CreateColumnTable.CopyFromTable"}));
+        CheckRef(refs[1], "CreateColumnTable.CopyFromTable", "/MyRoot/store/Src",
+            EPathRefKind::Absolute, EPathRefRole::Source);
+    }
+
+    Y_UNIT_TEST(CopySequenceCopyFromIsAnAbsoluteSource) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateSequence, "/MyRoot/Dst");
+        tx.MutableSequence()->SetName("myseq");
+        tx.MutableCopySequence()->SetCopyFrom("/MyRoot/Src/myseq");
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs),
+            (TVector<TString>{"Sequence.Name", "CopySequence.CopyFrom"}));
+        CheckRef(refs[1], "CopySequence.CopyFrom", "/MyRoot/Src/myseq",
+            EPathRefKind::Absolute, EPathRefRole::Source);
+    }
+
+    Y_UNIT_TEST(AlterTableDefaultFromSequence) {
+        // Relative form: a leaf under the altered table itself.
+        auto byName = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTable, "/MyRoot");
+        byName.MutableAlterTable()->SetName("Table");
+        byName.MutableAlterTable()->AddColumns()->SetDefaultFromSequence("myseq");
+        auto refs = ExtractPathRefs(byName);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterTable.Name", "AlterTable.Columns[0].DefaultFromSequence"}));
+        CheckRef(refs[1], "AlterTable.Columns[0].DefaultFromSequence", "myseq",
+            EPathRefKind::LeafUnderSibling, EPathRefRole::Dependency);
+        // The base is the table entry, not a name string: the table may be
+        // addressed by path id, where there is no name to join.
+        UNIT_ASSERT_VALUES_EQUAL(refs[1].BasePath, "");
+        UNIT_ASSERT_VALUES_EQUAL(refs[1].AnchorIndex, 0);
+
+        // Absolute form: WorkingDir and the table are both out of the picture.
+        auto absolute = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTable, "/MyRoot");
+        absolute.MutableAlterTable()->SetName("Table");
+        absolute.MutableAlterTable()->AddColumns()->SetName("plain");
+        absolute.MutableAlterTable()->AddColumns()->SetDefaultFromSequence("/MyRoot/seq");
+        refs = ExtractPathRefs(absolute);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterTable.Name", "AlterTable.Columns[1].DefaultFromSequence"}));
+        CheckRef(refs[1], "AlterTable.Columns[1].DefaultFromSequence", "/MyRoot/seq",
+            EPathRefKind::Absolute, EPathRefRole::Dependency);
+
+        // By path id, the anchor still points at the table entry.
+        auto byId = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTable, "/MyRoot");
+        TPathId(1, 5).ToProto(byId.MutableAlterTable()->MutablePathId());
+        byId.MutableAlterTable()->AddColumns()->SetDefaultFromSequence("myseq");
+        refs = ExtractPathRefs(byId);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterTable.PathId", "AlterTable.Columns[0].DefaultFromSequence"}));
+        UNIT_ASSERT_VALUES_EQUAL(refs[1].AnchorIndex, 0);
+    }
+
+    Y_UNIT_TEST(TransferAndReplicationDestinationPaths) {
+        // Transfer: both destination fields are resolved by Propose.
+        auto transfer = MakeTx(NKikimrSchemeOp::ESchemeOpCreateTransfer, "/MyRoot");
+        transfer.MutableReplication()->SetName("transfer");
+        auto& target = *transfer.MutableReplication()->MutableConfig()
+            ->MutableTransferSpecific()->MutableTarget();
+        target.SetSrcPath("/RemoteRoot/topic");
+        target.SetDstPath("/MyRoot/Dst");
+        target.SetDirectoryPath("/MyRoot/dir");
+        auto refs = ExtractPathRefs(transfer);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "Replication.Name",
+            "Replication.Config.TransferSpecific.Target.DstPath",
+            "Replication.Config.TransferSpecific.Target.DirectoryPath"}));
+        CheckRef(refs[1], "Replication.Config.TransferSpecific.Target.DstPath",
+            "/MyRoot/Dst", EPathRefKind::Absolute, EPathRefRole::Dependency);
+        CheckRef(refs[2], "Replication.Config.TransferSpecific.Target.DirectoryPath",
+            "/MyRoot/dir", EPathRefKind::Absolute, EPathRefRole::Dependency);
+
+        // Replication: the repeated targets carry local destinations. SrcPath
+        // names an object on the *remote* cluster and must never be emitted.
+        auto replication = MakeTx(NKikimrSchemeOp::ESchemeOpCreateReplication, "/MyRoot");
+        replication.MutableReplication()->SetName("repl");
+        auto& specific = *replication.MutableReplication()->MutableConfig()->MutableSpecific();
+        auto& first = *specific.AddTargets();
+        first.SetSrcPath("/RemoteRoot/Table");
+        first.SetDstPath("/MyRoot/Replicated/Table");
+        auto& second = *specific.AddTargets();
+        second.SetSrcPath("/RemoteRoot/Other");
+        second.SetDstPath("/MyRoot/Replicated/Other");
+        refs = ExtractPathRefs(replication);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "Replication.Name",
+            "Replication.Config.Specific.Targets[0].DstPath",
+            "Replication.Config.Specific.Targets[1].DstPath"}));
+        CheckRef(refs[1], "Replication.Config.Specific.Targets[0].DstPath",
+            "/MyRoot/Replicated/Table", EPathRefKind::Absolute, EPathRefRole::Dependency);
+
+        // Alter carries the directory in its own submessage.
+        auto alter = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTransfer, "/MyRoot");
+        alter.MutableAlterReplication()->SetName("transfer");
+        alter.MutableAlterReplication()->MutableAlterTransfer()->SetDirectoryPath("/MyRoot/dir2");
+        refs = ExtractPathRefs(alter);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterReplication.Name", "AlterReplication.AlterTransfer.DirectoryPath"}));
+        CheckRef(refs[1], "AlterReplication.AlterTransfer.DirectoryPath",
+            "/MyRoot/dir2", EPathRefKind::Absolute, EPathRefRole::Dependency);
+    }
+
+    Y_UNIT_TEST(AlterPersQueueGroupOffloadDstPath) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterPersQueueGroup, "/MyRoot");
+        tx.MutableAlterPersQueueGroup()->SetName("Topic");
+        tx.MutableAlterPersQueueGroup()->MutablePQTabletConfig()->MutableOffloadConfig()
+            ->MutableIncrementalBackup()->SetDstPath("/MyRoot/backup/Table");
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterPersQueueGroup.Name",
+            "AlterPersQueueGroup.PQTabletConfig.OffloadConfig.IncrementalBackup.DstPath"}));
+        CheckRef(refs[1],
+            "AlterPersQueueGroup.PQTabletConfig.OffloadConfig.IncrementalBackup.DstPath",
+            "/MyRoot/backup/Table", EPathRefKind::Absolute, EPathRefRole::Dependency);
+
+        // The other offload strategy names no path.
+        tx.MutableAlterPersQueueGroup()->MutablePQTabletConfig()->MutableOffloadConfig()
+            ->MutableIncrementalRestore();
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(ExtractPathRefs(tx)),
+            (TVector<TString>{"AlterPersQueueGroup.Name"}));
+    }
+
+    Y_UNIT_TEST(AlterContinuousBackupTakeIncrementalBackup) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterContinuousBackup, "/MyRoot");
+        tx.MutableAlterContinuousBackup()->SetTableName("dir/Table");
+        auto& take = *tx.MutableAlterContinuousBackup()->MutableTakeIncrementalBackup();
+        take.SetDstPath("backups/Table_incr");
+        take.SetDstStreamPath("newStream");
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "AlterContinuousBackup.TableName",
+            "AlterContinuousBackup.TakeIncrementalBackup.DstPath",
+            "AlterContinuousBackup.TakeIncrementalBackup.DstStreamPath",
+            "AlterContinuousBackup.<incrementalBackupTable>"}));
+        // Both are Child(..., TSplitChildTag{}) under WorkingDir.
+        CheckRef(refs[0], "AlterContinuousBackup.TableName", "dir/Table",
+            EPathRefKind::PathUnderWorkingDirSplit, EPathRefRole::Target);
+        CheckRef(refs[1], "AlterContinuousBackup.TakeIncrementalBackup.DstPath",
+            "backups/Table_incr", EPathRefKind::PathUnderWorkingDirSplit, EPathRefRole::Target);
+        CheckRef(refs[2], "AlterContinuousBackup.TakeIncrementalBackup.DstStreamPath",
+            "newStream", EPathRefKind::LeafUnderSibling, EPathRefRole::Target);
+        UNIT_ASSERT_VALUES_EQUAL(refs[2].AnchorIndex, 0);
+        UNIT_ASSERT_VALUES_EQUAL(refs[3].AnchorIndex, 0);
+
+        // Stop names no destination at all.
+        auto stop = MakeTx(NKikimrSchemeOp::ESchemeOpAlterContinuousBackup, "/MyRoot");
+        stop.MutableAlterContinuousBackup()->SetTableName("Table");
+        stop.MutableAlterContinuousBackup()->MutableStop();
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(ExtractPathRefs(stop)), (TVector<TString>{
+            "AlterContinuousBackup.TableName",
+            "AlterContinuousBackup.<incrementalBackupTable>"}));
+    }
+
     Y_UNIT_TEST(EveryOperationTypeIsCovered) {
         const THashSet<TString> noPathOps = {
             "ESchemeOp_DEPRECATED_35",

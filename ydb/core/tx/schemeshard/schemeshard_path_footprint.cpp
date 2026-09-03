@@ -57,6 +57,14 @@ public:
         Add(std::move(field), std::move(value), EKind::LeafUnderSibling, role, std::move(base));
     }
 
+    // Shape 4/5 when the base cannot be written as a raw string: a leaf under
+    // the path of an already-emitted ref. Needed when the base field may be
+    // addressed by path id, or is itself resolved with TSplitChildTag.
+    void SiblingOf(TString field, TString value, int anchorIndex, ERole role = ERole::Target) {
+        Add(std::move(field), std::move(value), EKind::LeafUnderSibling, role, {});
+        Out.back().AnchorIndex = anchorIndex;
+    }
+
     // Shape 2: numeric-id addressing, bypasses WorkingDir/Name
     void ById(TString field, ui64 ownerId, ui64 localPathId, ERole role = ERole::Target) {
         TPathRef ref;
@@ -177,12 +185,57 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
             op.GetStreamDescription().GetName(), op.GetTableName(), ERole::Target);
     };
 
+    // Local paths carried by a replication/transfer description. SrcPath is a
+    // path on the *remote* cluster and is deliberately never emitted.
+    const auto replicationPaths = [&](const TString& prefix,
+            const NKikimrSchemeOp::TReplicationDescription& desc) {
+        const auto& config = desc.GetConfig();
+        if (config.HasTransferSpecific()) {
+            // TTransferStrategy::Validate resolves both of these absolutely
+            // (schemeshard__operation_create_replication.cpp:80,91).
+            const auto& target = config.GetTransferSpecific().GetTarget();
+            if (target.HasDstPath()) {
+                out.Abs(prefix + ".Config.TransferSpecific.Target.DstPath",
+                    target.GetDstPath(), ERole::Dependency);
+            }
+            if (target.HasDirectoryPath()) {
+                out.Abs(prefix + ".Config.TransferSpecific.Target.DirectoryPath",
+                    target.GetDirectoryPath(), ERole::Dependency);
+            }
+        }
+        // Plain (non-transfer) replication targets are NOT resolved by
+        // Propose -- TReplicationStrategy::Validate touches no TPath and the
+        // replication controller creates the destination later -- but DstPath
+        // is an absolute local path this operation intends to write to.
+        const auto& specific = config.GetSpecific();
+        for (size_t i = 0; i < specific.TargetsSize(); ++i) {
+            const auto& target = specific.GetTargets(i);
+            if (target.HasDstPath()) {
+                out.Abs(Indexed(prefix + ".Config.Specific.Targets", i, ".DstPath"),
+                    target.GetDstPath(), ERole::Dependency);
+            }
+        }
+        if (desc.HasAlterTransfer() && desc.GetAlterTransfer().HasDirectoryPath()) {
+            // schemeshard__operation_alter_replication.cpp:57, absolute.
+            out.Abs(prefix + ".AlterTransfer.DirectoryPath",
+                desc.GetAlterTransfer().GetDirectoryPath(), ERole::Dependency);
+        }
+    };
+
     switch (tx.GetOperationType()) {
     case NKikimrSchemeOp::ESchemeOpMkDir:
         out.Leaf("MkDir.Name", tx.GetMkDir().GetName());
         break;
     case NKikimrSchemeOp::ESchemeOpCreateTable:
         out.Leaf("CreateTable.Name", tx.GetCreateTable().GetName());
+        // A CreateTable that carries CopyFromTable is dispatched to the
+        // copy-table factory (schemeshard__operation.cpp), whose Propose
+        // resolves the source absolutely, without WorkingDir
+        // (schemeshard__operation_copy_table.cpp:568,978).
+        if (tx.GetCreateTable().HasCopyFromTable()) {
+            out.Abs("CreateTable.CopyFromTable",
+                tx.GetCreateTable().GetCopyFromTable(), ERole::Source);
+        }
         break;
     case NKikimrSchemeOp::ESchemeOpCreatePersQueueGroup:
         out.Leaf("CreatePersQueueGroup.Name", tx.GetCreatePersQueueGroup().GetName());
@@ -204,6 +257,23 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         } else {
             out.Leaf("AlterTable.Name", alter.GetName());
         }
+        const int alterTableIndex = out.Last();
+        // schemeshard__operation_alter_table.cpp:665: absolute when the value
+        // starts with a slash, otherwise a leaf under the altered table. The
+        // table may be addressed by id, so the base is that entry, not a name.
+        for (size_t i = 0; i < alter.ColumnsSize(); ++i) {
+            const auto& column = alter.GetColumns(i);
+            if (!column.HasDefaultFromSequence()) {
+                continue;
+            }
+            const TString field = Indexed("AlterTable.Columns", i, ".DefaultFromSequence");
+            const TString& value = column.GetDefaultFromSequence();
+            if (value.StartsWith('/')) {
+                out.Abs(field, value, ERole::Dependency);
+            } else {
+                out.SiblingOf(field, value, alterTableIndex, ERole::Dependency);
+            }
+        }
         break;
     }
     case NKikimrSchemeOp::ESchemeOpAlterPersQueueGroup: {
@@ -212,6 +282,13 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
             out.ById("AlterPersQueueGroup.PathId", 0, alter.GetPathId());
         } else {
             out.Leaf("AlterPersQueueGroup.Name", alter.GetName());
+        }
+        // schemeshard__operation_alter_pq.cpp:328 resolves the incremental
+        // backup destination absolutely while building the alter data.
+        const auto& offload = alter.GetPQTabletConfig().GetOffloadConfig();
+        if (offload.HasIncrementalBackup()) {
+            out.Abs("AlterPersQueueGroup.PQTabletConfig.OffloadConfig.IncrementalBackup.DstPath",
+                offload.GetIncrementalBackup().GetDstPath(), ERole::Dependency);
         }
         break;
     }
@@ -452,6 +529,13 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         // AlterColumnTable; olap/operations/create_table.cpp:570,643 resolves
         // WorkingDir.Child(CreateColumnTable.Name).
         out.Leaf("CreateColumnTable.Name", tx.GetCreateColumnTable().GetName());
+        // With CopyFromTable set the op is dispatched to TReadOnlyCopyColumnTable
+        // (schemeshard__operation.cpp:1433), whose Propose resolves the source
+        // absolutely (olap/operations/read_only_copy_table.cpp:401,425).
+        if (tx.GetCreateColumnTable().HasCopyFromTable()) {
+            out.Abs("CreateColumnTable.CopyFromTable",
+                tx.GetCreateColumnTable().GetCopyFromTable(), ERole::Source);
+        }
         break;
     case NKikimrSchemeOp::ESchemeOpAlterColumnTable:
         // olap/operations/alter_table.cpp:278 falls back to AlterTable.Name
@@ -585,6 +669,13 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
     case NKikimrSchemeOp::ESchemeOpAlterSequence:
         // Both resolve WorkingDir/Sequence.Name.
         out.Leaf("Sequence.Name", tx.GetSequence().GetName());
+        // A CreateSequence part emitted by CreateConsistentCopyTables carries
+        // the source sequence here; TCopySequence::Propose resolves it
+        // absolutely (schemeshard__operation_copy_sequence.cpp:579).
+        if (tx.HasCopySequence()) {
+            out.Abs("CopySequence.CopyFrom",
+                tx.GetCopySequence().GetCopyFrom(), ERole::Source);
+        }
         break;
     case NKikimrSchemeOp::ESchemeOpDropSequence:
         genericDrop();
@@ -592,6 +683,7 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
     case NKikimrSchemeOp::ESchemeOpCreateReplication:
     case NKikimrSchemeOp::ESchemeOpCreateTransfer:
         out.Leaf("Replication.Name", tx.GetReplication().GetName());
+        replicationPaths("Replication", tx.GetReplication());
         break;
     case NKikimrSchemeOp::ESchemeOpAlterReplication:
     case NKikimrSchemeOp::ESchemeOpAlterTransfer: {
@@ -602,6 +694,7 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         } else {
             out.Leaf("AlterReplication.Name", op.GetName());
         }
+        replicationPaths("AlterReplication", op);
         break;
     }
     case NKikimrSchemeOp::ESchemeOpDropReplication:
@@ -667,10 +760,28 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         out.Leaf("CreateContinuousBackup.TableName", tx.GetCreateContinuousBackup().GetTableName());
         out.Implicit("CreateContinuousBackup.<cdcStream>", out.Last());
         break;
-    case NKikimrSchemeOp::ESchemeOpAlterContinuousBackup:
-        out.Path("AlterContinuousBackup.TableName", tx.GetAlterContinuousBackup().GetTableName());
-        out.Implicit("AlterContinuousBackup.<incrementalBackupTable>", out.Last());
+    case NKikimrSchemeOp::ESchemeOpAlterContinuousBackup: {
+        const auto& op = tx.GetAlterContinuousBackup();
+        // :86 resolves the table with Child(TableName, TSplitChildTag{}), so a
+        // leading slash does not escape the working dir.
+        out.SplitChild("AlterContinuousBackup.TableName", op.GetTableName());
+        const int cbTableIndex = out.Last();
+        if (op.HasTakeIncrementalBackup()) {
+            const auto& take = op.GetTakeIncrementalBackup();
+            // :128 workingDirPath.Child(DstPath, TSplitChildTag{}).
+            out.SplitChild("AlterContinuousBackup.TakeIncrementalBackup.DstPath",
+                take.GetDstPath());
+            if (take.HasDstStreamPath()) {
+                // :161 the new stream is a leaf under the table. When the field
+                // is absent the name is generated from the current time, so
+                // there is nothing to report.
+                out.SiblingOf("AlterContinuousBackup.TakeIncrementalBackup.DstStreamPath",
+                    take.GetDstStreamPath(), cbTableIndex);
+            }
+        }
+        out.Implicit("AlterContinuousBackup.<incrementalBackupTable>", cbTableIndex);
         break;
+    }
     case NKikimrSchemeOp::ESchemeOpDropContinuousBackup:
         out.Leaf("DropContinuousBackup.TableName", tx.GetDropContinuousBackup().GetTableName());
         break;
@@ -884,7 +995,18 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
             }
             break;
         case EPathRefKind::LeafUnderSibling:
-            path = ResolveRelativeOrAbsolute(ss, footprint.WorkingDir, ref.BasePath).Child(ref.Value);
+            if (ref.BasePath.empty() && ref.AnchorIndex >= 0
+                    && size_t(ref.AnchorIndex) < footprint.Entries.size()) {
+                // The base is another entry of this same footprint, used when
+                // it cannot be written as a raw string (by-id addressing, or a
+                // split child). An unresolvable base leaves the path empty.
+                const TString& base = footprint.Entries[ref.AnchorIndex].AbsPath;
+                if (!base.empty()) {
+                    path = TPath::Resolve(base, ss).Child(ref.Value);
+                }
+            } else {
+                path = ResolveRelativeOrAbsolute(ss, footprint.WorkingDir, ref.BasePath).Child(ref.Value);
+            }
             break;
         case EPathRefKind::ById: {
             const TPathId pathId = ref.OwnerId

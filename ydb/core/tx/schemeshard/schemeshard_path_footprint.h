@@ -56,10 +56,12 @@ struct TPathRef {
     EPathRefRole Role = EPathRefRole::Target;
     // LeafUnderSibling only: the raw value of the sibling field Value hangs off.
     TString BasePath;
-    // Implicit only: index, within the same ExtractPathRefs result, of the ref
-    // whose resolved path is the anchor of the runtime-derived set (the path
-    // whose children the operation will actually touch). -1 when there is no
-    // anchor in the request at all.
+    // Index, within the same ExtractPathRefs result, of the ref this one hangs
+    // off; -1 when there is none. For Implicit it is the anchor of the
+    // runtime-derived set (the path whose children the operation will actually
+    // touch). For LeafUnderSibling it is the base, used instead of BasePath
+    // when the base cannot be written as a raw string (the base field is
+    // addressed by path id, or is itself resolved with TSplitChildTag).
     int AnchorIndex = -1;
 };
 
