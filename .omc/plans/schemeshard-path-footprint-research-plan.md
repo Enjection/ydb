@@ -405,3 +405,25 @@ through canonicalize+relocate into a second `TTestEnv` and diff
   keep the hand table and add a test asserting it equals the annotations.
 - Costs: `flat_scheme_op.proto` edits relink ~660 test modules (batch them);
   custom options need an extension number and a small `ss_annotations.proto`.
+
+## 9. Round 2 execution stages (from §8; one tree owner at a time, commit per stage)
+
+Branch `feat/schemeshard-path-footprint` on fork `enjection`. Every stage ends
+with `ut_path_footprint` green, a conventional commit, and a push. Sequential:
+the same file is touched by most stages and parallel editors collided in
+round 1.
+
+| id | stage | source | commits |
+|---|---|---|---|
+| S7a | add the 7 missing path fields + pure tests | §8.3 | feat |
+| S7b | descriptor-walk completeness test with not-a-path allowlist | §8.4 | test |
+| S7c | Propose-time write set from `TMemoryChanges` diff + `PublishPaths`, `WriteSetMayBeIncomplete` bit | §8.8 | feat |
+| S7d | H1 pass: footprint of each original request transaction with `OriginalTxIndex`, joined to parts | §8.6 | feat |
+| S7e | `CanonicalizeToPaths` (by-id → by-path, on a copy) and `RelocatePaths` (database relocation) + tests | §8.6 | feat |
+| S7f | O(1): `EPathField` enum, `TStringBuf` values, X-macro-driven extractor/rewriter/name table | §8.5 | refactor |
+| S7g | replay experiment as a test: env A ops → canonicalize+relocate → env B, diff `DescribePath` masked | §8.7 | test |
+| S7h | `TPath` read-set recorder behind a test hook + coverage assertion test | §8.4, §8.8 | feat/test |
+| S7i | observer callback as the production channel, log demoted to DEBUG, computation gated | report §6.2 | feat |
+| S7j | `ResolveWithInactive` for Move* via `part->GetOperationId()` | report §6.4 | fix |
+| S7k | rewire `ExtractChangingPaths` onto the extractor (audit output changes for 8 buggy families) | report §6.3 | feat, separate decision |
+| S7l | proto annotations | §8.9 | deferred: proto surface decision, relinks ~660 modules |
