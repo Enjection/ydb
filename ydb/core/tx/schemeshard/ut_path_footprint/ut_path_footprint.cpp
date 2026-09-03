@@ -27,10 +27,10 @@ NKikimrSchemeOp::TModifyScheme MakeTx(NKikimrSchemeOp::EOperationType type, cons
     return tx;
 }
 
-TVector<TString> FieldPaths(const TVector<TPathRef>& refs) {
+TVector<TString> FieldPaths(const TPathRefs& refs) {
     TVector<TString> result;
     for (const auto& ref : refs) {
-        result.push_back(ref.FieldPath);
+        result.push_back(FieldPath(ref));
     }
     return result;
 }
@@ -38,10 +38,11 @@ TVector<TString> FieldPaths(const TVector<TPathRef>& refs) {
 void CheckRef(const TPathRef& ref, TStringBuf fieldPath, TStringBuf value,
         EPathRefKind kind, EPathRefRole role)
 {
-    UNIT_ASSERT_VALUES_EQUAL_C(ref.FieldPath, TString(fieldPath), "field path");
-    UNIT_ASSERT_VALUES_EQUAL_C(ref.Value, TString(value), ref.FieldPath);
-    UNIT_ASSERT_VALUES_EQUAL_C(TString(PathRefKindName(ref.Kind)), TString(PathRefKindName(kind)), ref.FieldPath);
-    UNIT_ASSERT_VALUES_EQUAL_C(TString(PathRefRoleName(ref.Role)), TString(PathRefRoleName(role)), ref.FieldPath);
+    const TString rendered = FieldPath(ref);
+    UNIT_ASSERT_VALUES_EQUAL_C(rendered, TString(fieldPath), "field path");
+    UNIT_ASSERT_VALUES_EQUAL_C(TString(ref.Value), TString(value), rendered);
+    UNIT_ASSERT_VALUES_EQUAL_C(TString(PathRefKindName(ref.Kind)), TString(PathRefKindName(kind)), rendered);
+    UNIT_ASSERT_VALUES_EQUAL_C(TString(PathRefRoleName(ref.Role)), TString(PathRefRoleName(role)), rendered);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -269,13 +270,13 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         tx.MutableAlterTable()->SetId_Deprecated(7);
         auto refs = ExtractPathRefs(tx);
         UNIT_ASSERT_VALUES_EQUAL(refs.size(), 1u);
-        UNIT_ASSERT_VALUES_EQUAL(refs[0].FieldPath, "AlterTable.Id_Deprecated");
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(refs[0]), "AlterTable.Id_Deprecated");
         UNIT_ASSERT_VALUES_EQUAL(refs[0].LocalPathId, 7u);
 
         TPathId(1234, 9).ToProto(tx.MutableAlterTable()->MutablePathId());
         refs = ExtractPathRefs(tx);
         UNIT_ASSERT_VALUES_EQUAL(refs.size(), 1u);
-        UNIT_ASSERT_VALUES_EQUAL(refs[0].FieldPath, "AlterTable.PathId");
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(refs[0]), "AlterTable.PathId");
         UNIT_ASSERT_VALUES_EQUAL(refs[0].OwnerId, 1234u);
         UNIT_ASSERT_VALUES_EQUAL(refs[0].LocalPathId, 9u);
     }
@@ -641,7 +642,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         tx.MutableSplitMergeTablePartitions()->SetTableLocalId(3);
         refs = ExtractPathRefs(tx);
         UNIT_ASSERT_VALUES_EQUAL(refs.size(), 1u);
-        UNIT_ASSERT_VALUES_EQUAL(refs[0].FieldPath, "SplitMergeTablePartitions.TableLocalId");
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(refs[0]), "SplitMergeTablePartitions.TableLocalId");
         UNIT_ASSERT_VALUES_EQUAL(refs[0].OwnerId, 72057594046678944ull);
         UNIT_ASSERT_VALUES_EQUAL(refs[0].LocalPathId, 3u);
     }
@@ -918,7 +919,8 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
             for (const auto& ref : ExtractPathRefs(tx)) {
                 // The submessage this ref reads is the FieldPath's first
                 // segment: "AlterCdcStream.StreamName" -> "AlterCdcStream".
-                TString submessage = ref.FieldPath;
+                const TString refFieldPath = FieldPath(ref);
+                TString submessage = refFieldPath;
                 const size_t cut = submessage.find_first_of(".[");
                 if (cut != TString::npos) {
                     submessage = submessage.substr(0, cut);
@@ -932,12 +934,105 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
                 }
                 UNIT_ASSERT_C(intentional.contains(name + "/" + submessage),
                     name << " extracts from " << submessage
-                         << " (field path " << ref.FieldPath << "): a " << opVerb
+                         << " (field path " << refFieldPath << "): a " << opVerb
                          << "* operation reading an " << refVerb
                          << "* submessage is almost always a copy-paste bug."
                          << " If it is deliberate, add it to `intentional`.");
             }
         }
+    }
+
+    // The field table is the single source of truth for field identity: the
+    // enum, the rendered field paths and KnownPathFieldNames() all come from
+    // SCHEMESHARD_PATH_FIELDS. This pins the properties the rest of the suite
+    // and the descriptor walk rely on.
+    Y_UNIT_TEST(EveryPathFieldRendersAndIsListedOnce) {
+        const size_t count = static_cast<size_t>(EPathField::Count);
+        UNIT_ASSERT_C(count > 100, "the field table has only " << count << " rows");
+
+        THashSet<TString> templates;
+        THashSet<TString> protoNames;
+        size_t synthetic = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const auto field = static_cast<EPathField>(i);
+            const TString tmpl(PathFieldName(field));
+            UNIT_ASSERT_C(!tmpl.empty(), "field " << i << " has no field-path template");
+            // A template is the identity of a field path: two rows rendering
+            // the same string would be indistinguishable in a log line.
+            UNIT_ASSERT_C(templates.insert(tmpl).second,
+                "two path fields share the field-path template " << tmpl);
+
+            // Rendering substitutes every placeholder and leaves no brace.
+            TPathRef ref;
+            ref.Field = field;
+            ref.Index = 3;
+            ref.SubIndex = 7;
+            ref.MapKey = "someKey";
+            const TString rendered = FieldPath(ref);
+            UNIT_ASSERT_C(rendered.find('{') == TString::npos
+                    && rendered.find('}') == TString::npos,
+                "unexpanded placeholder in " << rendered);
+            if (tmpl.Contains("{i}")) {
+                UNIT_ASSERT_C(rendered.Contains("[3]"), rendered);
+            }
+            if (tmpl.Contains("{j}")) {
+                UNIT_ASSERT_C(rendered.Contains("[7]"), rendered);
+            }
+            if (tmpl.Contains("{key}")) {
+                UNIT_ASSERT_C(rendered.Contains("[someKey]"), rendered);
+            }
+            if (tmpl.find('{') == TString::npos) {
+                UNIT_ASSERT_VALUES_EQUAL(rendered, tmpl);
+            }
+
+            const TString proto(PathFieldProtoName(field));
+            if (proto.empty()) {
+                ++synthetic;
+            } else {
+                protoNames.insert(proto);
+            }
+        }
+        UNIT_ASSERT_C(synthetic > 0, "no synthetic (marker or id) field rows");
+
+        // KnownPathFieldNames() is exactly the non-empty proto column,
+        // deduplicated and sorted: the descriptor walk uses it as a set, and a
+        // duplicate would hide a second field behind the first.
+        const auto& known = KnownPathFieldNames();
+        THashSet<TString> knownSet;
+        for (const TStringBuf name : known) {
+            UNIT_ASSERT_C(!name.empty(), "KnownPathFieldNames() has an empty entry");
+            UNIT_ASSERT_C(knownSet.insert(TString(name)).second,
+                "KnownPathFieldNames() lists " << name << " twice");
+        }
+        UNIT_ASSERT_VALUES_EQUAL(known.size(), protoNames.size());
+        for (const auto& name : protoNames) {
+            UNIT_ASSERT_C(knownSet.contains(name),
+                name << " is in the field table but not in KnownPathFieldNames()");
+        }
+        UNIT_ASSERT_C(IsSorted(known.begin(), known.end()),
+            "KnownPathFieldNames() is not sorted");
+    }
+
+    // Extraction reads the request, it does not copy it: every value is a view
+    // into the TModifyScheme that was passed in. Only the resolve step, which
+    // has to outlive the request, materializes strings.
+    Y_UNIT_TEST(ExtractedValuesPointIntoTheRequest) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpMoveTable, "/MyRoot");
+        tx.MutableMoveTable()->SetSrcPath("/MyRoot/Src");
+        tx.MutableMoveTable()->SetDstPath("/MyRoot/Dst");
+
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(refs.size(), 3u);
+        UNIT_ASSERT_EQUAL(refs[0].Value.data(), tx.GetMoveTable().GetSrcPath().data());
+        UNIT_ASSERT_EQUAL(refs[1].Value.data(), tx.GetMoveTable().GetDstPath().data());
+
+        // A sibling base is a view too, when the request spells it out.
+        auto move = MakeTx(NKikimrSchemeOp::ESchemeOpMoveIndex, "/MyRoot");
+        move.MutableMoveIndex()->SetTablePath("/MyRoot/Table");
+        move.MutableMoveIndex()->SetSrcPath("oldIndex");
+        const auto moveRefs = ExtractPathRefs(move);
+        UNIT_ASSERT_EQUAL(moveRefs[1].Value.data(), move.GetMoveIndex().GetSrcPath().data());
+        UNIT_ASSERT_EQUAL(moveRefs[1].BasePath.data(), move.GetMoveIndex().GetTablePath().data());
     }
 }
 
