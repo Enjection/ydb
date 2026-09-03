@@ -104,6 +104,10 @@ enum class EPathRefRole {
         "NKikimrSchemeOp.TSplitMergeTablePartitions.TablePath", Absolute, Target)                   \
     X(Backup_TableName, "Backup.TableName", "NKikimrSchemeOp.TBackupTask.TableName",                \
         LeafUnderWorkingDir, Target)                                                                \
+    /* Both ops run TPath::TChecker::CanBackupTable, which walks the table's   */                    \
+    /* children to reject a table with global indexes (schemeshard_path.cpp:   */                    \
+    /* CanBackupTable). No proto field names those children.                   */                    \
+    X(Implicit_Backup_TableChildren, "Backup.<tableChildren>", "", Implicit, Dependency)            \
     X(SubDomain_Name, "SubDomain.Name", "NKikimrSubDomains.TSubDomainSettings.Name",                \
         LeafUnderWorkingDir, Target)                                                                \
     X(CreateRtmrVolume_Name, "CreateRtmrVolume.Name",                                               \
@@ -200,6 +204,7 @@ enum class EPathRefRole {
         "NKikimrSchemeOp.TFileStoreDescription.Name", LeafUnderWorkingDir, Target)                  \
     X(Restore_TableName, "Restore.TableName", "NKikimrSchemeOp.TRestoreTask.TableName",             \
         LeafUnderWorkingDir, Target)                                                                \
+    X(Implicit_Restore_TableChildren, "Restore.<tableChildren>", "", Implicit, Dependency)          \
     X(CreateColumnStore_Name, "CreateColumnStore.Name",                                             \
         "NKikimrSchemeOp.TColumnStoreDescription.Name", LeafUnderWorkingDir, Target)                \
     X(AlterColumnStore_Name, "AlterColumnStore.Name",                                               \
@@ -380,6 +385,13 @@ enum class EPathRefRole {
     /* CreateFullBackupOp: WorkingDir already points at the backup collection.  */                   \
     /* Reported as an entry, unlike the WorkingDir of every other request.      */                   \
     X(WorkingDirItself, "<WorkingDir>", "", PathUnderWorkingDir, Target)                             \
+    /* Removing a user or a group scans the whole database subtree for paths    */                   \
+    /* that sid owns or appears in the ACL of, and names the first one it finds  */                  \
+    /* in the error (schemeshard__operation_alter_login.cpp:300-313). The scan   */                  \
+    /* runs only under the EnableStrictAclCheck feature flag. AlterLogin's       */                  \
+    /* WorkingDir is required to equal the login audience, i.e. the database     */                  \
+    /* root, so the WorkingDirItself entry it is anchored on is that subtree.    */                  \
+    X(Implicit_AlterLogin_AclScan, "AlterLogin.<aclScanSubtree>", "", Implicit, Dependency)         \
     X(Implicit_CreateFullBackupOp_Entries, "CreateFullBackupOp.<collectionEntries>", "",            \
         Implicit, Dependency)                                                                       \
     X(RestoreBackupCollection_Name, "RestoreBackupCollection.Name",                                 \

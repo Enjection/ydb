@@ -477,6 +477,7 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
     }
     case NKikimrSchemeOp::ESchemeOpBackup:
         out.Add(F::Backup_TableName, tx.GetBackup().GetTableName());
+        out.Implicit(F::Implicit_Backup_TableChildren, out.Last());
         break;
     case NKikimrSchemeOp::ESchemeOpCreateSubDomain:
         out.Add(F::SubDomain_Name, tx.GetSubDomain().GetName());
@@ -686,6 +687,7 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         break;
     case NKikimrSchemeOp::ESchemeOpRestore:
         out.Add(F::Restore_TableName, tx.GetRestore().GetTableName());
+        out.Implicit(F::Implicit_Restore_TableChildren, out.Last());
         break;
     case NKikimrSchemeOp::ESchemeOpCreateColumnStore:
         out.Add(F::CreateColumnStore_Name, tx.GetCreateColumnStore().GetName());
@@ -729,7 +731,15 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         genericDrop();
         break;
     case NKikimrSchemeOp::ESchemeOpAlterLogin:
-        // Touches no TPath at all; only validates WorkingDir == Audience.
+        // Validates WorkingDir == LoginProvider.Audience and otherwise touches
+        // no named path. Removing a sid is the exception: CanRemoveSid walks
+        // ListSubTree(RootPathId()) looking for a path that sid owns or holds
+        // an ACL record on, and resolves the first hit to name it in the error.
+        // WorkingDir is that root, so the scan is its subtree.
+        if (tx.GetAlterLogin().HasRemoveUser() || tx.GetAlterLogin().HasRemoveGroup()) {
+            out.Add(F::WorkingDirItself, {});
+            out.Implicit(F::Implicit_AlterLogin_AclScan, out.Last());
+        }
         break;
     case NKikimrSchemeOp::ESchemeOpCreateCdcStream: {
         // WorkingDir + TableName (parent) + stream leaf.

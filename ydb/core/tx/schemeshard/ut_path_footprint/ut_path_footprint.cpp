@@ -797,6 +797,25 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         UNIT_ASSERT_VALUES_EQUAL(ExtractPathRefs(tx).size(), 0u);
     }
 
+    // Removing a sid is the one AlterLogin shape that reads paths: CanRemoveSid
+    // scans the database subtree for an owner or ACL record.
+    Y_UNIT_TEST(AlterLoginRemoveScansTheDatabaseSubtree) {
+        for (const bool group : {false, true}) {
+            auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterLogin, "/MyRoot");
+            if (group) {
+                tx.MutableAlterLogin()->MutableRemoveGroup()->SetGroup("g1");
+            } else {
+                tx.MutableAlterLogin()->MutableRemoveUser()->SetUser("user1");
+            }
+            const auto refs = ExtractPathRefs(tx);
+            UNIT_ASSERT_VALUES_EQUAL(refs.size(), 2u);
+            CheckRef(refs[0], "<WorkingDir>", "",
+                EPathRefKind::PathUnderWorkingDir, EPathRefRole::Target);
+            CheckRef(refs[1], "AlterLogin.<aclScanSubtree>", "",
+                EPathRefKind::Implicit, EPathRefRole::Dependency);
+        }
+    }
+
     Y_UNIT_TEST(CreateFullBackupOpTargetsWorkingDir) {
         auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateFullBackupOp,
             "/MyRoot/.backups/collections/coll");
