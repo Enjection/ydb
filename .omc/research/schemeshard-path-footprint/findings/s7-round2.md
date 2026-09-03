@@ -529,3 +529,172 @@ namespace scope.
 - `e901047118` test: pin the path field table and allocation-free extraction
 
 Behavior change: none.
+
+---
+
+## S7e — canonicalize by id → by name, and relocate a database
+
+Plan §8.6. Two pure rewriters over a `TModifyScheme` plus the `TPathFootprint`
+that `ResolvePathFootprint` produced *from that same request on the schemeshard
+that owns the paths*. Both are layer 3: no `TSchemeShard`, no actor runtime, no
+`TPath`. The footprint is the whole reason they can work without one — it has
+already turned every path id into a path string and every raw value into an
+absolute path.
+
+### API added (`schemeshard_path_footprint.h`)
+
+```cpp
+struct TCanonicalizeResult { bool Changed; TVector<EPathField> Untransformable; };
+TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme&, const TPathFootprint&);
+
+struct TRelocation { TString OldDatabasePath; TString NewDatabasePath; };
+struct TRelocateResult { bool Changed; TVector<EPathField> Skipped; };
+TRelocateResult RelocatePaths(NKikimrSchemeOp::TModifyScheme&, const TPathFootprint&,
+    const TRelocation&);
+
+bool CanRelocatePathField(EPathField);
+TVector<EPathField> StripSourceLocalPreconditions(NKikimrSchemeOp::TModifyScheme&);
+```
+
+Three supporting changes to existing declarations, all additive:
+
+- `TPathFootprint::WorkingDirCanon` — the resolved working dir, which is what
+  every `AbsPath` is built from. `ResolvePathFootprint` computed it at :936 and
+  threw it away; a prefix test against the raw `WorkingDir` silently fails on a
+  non-canonical client string, which is exactly the case relocation must get
+  right. One line to fill in, as S7e's design note recommended.
+- `TPathRefOwned::Index` — S7f dropped the repeated-field position after
+  rendering it into `FieldPath`, but a setter has to address the same element
+  again to write to it. `SubIndex`/`MapKey` are deliberately not kept: no field
+  carrying one of those is ever rewritten (they are all `LeafUnderSibling`
+  stream names).
+- one new field-table row, `ApplyIf_PathId`, marked in the table as not emitted
+  by the extractor. It exists so `StripSourceLocalPreconditions` can name what
+  it removed; `ApplyIf` is a precondition, not a path the operation touches.
+
+### Canonicalization
+
+All 7 id fields from the design note, 6 name forms, exactly as E1 specified.
+The id field is always cleared: in 6 of the 7 `Propose()` ternaries the id form
+wins, so writing a name beside a live `PathId` would change nothing.
+`AlterTable` clears both `PathId` and `Id_Deprecated` whichever one was
+extracted, because `alter_table.cpp:607` takes either over the name.
+`SplitMergeTablePartitions` keeps an absolute `TablePath` and leaves
+`WorkingDir` alone — `split_merge.cpp:849` never joins it. Transfer needs no
+rule of its own: it is `TAlterReplication` read by a different strategy.
+
+The working dir and leaf come from string surgery on the entry's canonical
+`AbsPath`, using `RelPathToParent` (which is `TPath::LeafName()`) as the split
+hint and a last-slash scan as the fallback. The design note suggested a second
+`TPath::Resolve().Parent()`, which would have dragged a `TSchemeShard*` into a
+pure function for no gain: `AbsPath` is already canonical.
+
+An id that did not resolve (`AbsPath` empty) is reported in `Untransformable`
+and nothing is written. Such a request is rejected by the source schemeshard
+anyway, and inventing a name would invent a target.
+
+### Relocation
+
+Rules per `EPathRefKind`, straight from E3:
+
+| kind | rewritten? |
+|---|---|
+| `Absolute` | always, when the resolved path is at or under the old database |
+| `PathUnderWorkingDir` | only when the *raw* value starts with `/` |
+| `LeafUnderWorkingDir`, `PathUnderWorkingDirSplit`, `LeafUnderSibling` | never — they hang off the working dir or a base field that moves on its own; rewriting both would double-apply the move |
+| `Implicit` | never — no field behind it |
+| `ById` | never; recorded in `Skipped`. Canonicalize first |
+
+Plus `WorkingDir := NewDb + "/" + <working dir relative to OldDb>`, done last
+so the per-entry decisions read the value the footprint was resolved against.
+
+Never touched, by construction rather than by a special case: replication
+`SrcPath` (a path on a remote cluster). The extractor never emits it, and the
+setter table has a row only for fields the extractor emits, so there is no way
+to write it. A test pins this with a transfer whose `SrcPath` looks exactly
+like a local path under the database being moved.
+
+### The setter table
+
+`SCHEMESHARD_PATH_FIELD_SETTERS(X)` in the `.cpp`, next to the code that uses
+it rather than in the header, because a row needs protobuf accessors the header
+deliberately does not reach for. **42 rows**: 31 `Absolute` fields, 10
+`PathUnderWorkingDir` fields, and `AlterTable.Columns[].DefaultFromSequence`,
+whose table default is `LeafUnderSibling` but which the extractor promotes to
+`Absolute` when its value starts with a slash. `WorkingDirItself` is exempt: it
+is synthetic, and the working-dir rewrite covers it. A row is a statement, not
+an expression, so the 9 indexed rows bail out through
+`SS_PATH_SETTER_GUARD_INDEX` on a footprint whose indexes no longer match the
+request.
+
+**Deviation from the brief: the setter does not key on `OperationType`.** The
+brief expected `(OperationType, field)` for the three fields whose kind depends
+on the operation carrying them. It is unnecessary: `AddAs` already recorded the
+*effective* kind in the ref, `Materialize` copies it into
+`TPathFootprintEntry::Ref::Kind`, and the rewriter switches on that. The op
+type only ever changed the kind, never which protobuf field to write.
+`RelocateFollowsThePerOperationKindOfTheSameField` pins this by running the
+same `DropCdcStream.TableName` through `ESchemeOpDropCdcStream` (rewritten) and
+`ESchemeOpDropCdcStreamAtTable` (left alone).
+
+Second deviation: the rewritten value is `NewDb + "/" + RelativeTo(AbsPath,
+OldDb)` rather than `NewDb + "/" + entry.RelPathToDatabase`. The two agree
+whenever `OldDatabasePath` is the entry's own database, and only the former is
+correct when a request names a path in another database.
+
+### `StripSourceLocalPreconditions`
+
+Clears `TModifyScheme.ApplyIf` and returns one `ApplyIf_PathId` per entry
+removed. Documented as **policy, not a semantic no-op**: the request loses its
+optimistic-concurrency check and may succeed where the original would have been
+rejected. `ApplyIf` has no name form (path id, path version, lock tx id), so it
+cannot be canonicalized, only stripped or re-derived against the target state.
+
+### Tests
+
+`ut_path_footprint`: **64 OK** (45 before, 19 added in a new
+`TSchemeShardPathFootprintRewrite` suite).
+
+Pure (16). Every one builds its footprint by running the **real** extractor and
+faking only the resolution (`FakeResolve`, ~60 lines), so the fields, kinds and
+values under test are the production ones:
+
+- canonicalize `DropTable` by id, `AlterTable` by `PathId` (both id forms
+  cleared, columns untouched), `SplitMerge` by owner/local id (absolute
+  `TablePath`, `WorkingDir` untouched);
+- an unresolved id yields `Untransformable == {Drop_Id}` and a byte-identical
+  proto; a by-name request is left alone;
+- relocate `MoveTable` (both paths + working dir), `CreateTable` (working dir
+  only), `CreateConsistentCopyTables` (4 paths across 2 items),
+  `AlterUserAttributes` (absolute rewritten, relative not), a request outside
+  the old database (nothing changes), a by-id request (`Skipped`, then
+  relocatable after canonicalization), a transfer `SrcPath` (never), a split
+  child with a leading slash (never), the same field under two op types;
+- `EveryRelocatableFieldHasASetter` walks all 145 enumerators and asserts the
+  setter table is exactly the relocatable ones, in both directions;
+- `StripApplyIf`.
+
+Propose-level (3), against a real schemeshard in a `TTestEnv`, with the request
+footprint read back out of the log the hook emits (`FootprintFromLog`, plus
+`FillRawValuesFrom` for the raw values the log does not carry):
+
+- `CanonicalizedDropByIdEqualsTheByNameRequest` — a by-id `DropTable` is run
+  through the schemeshard, its request footprint captured, a copy canonicalized,
+  and the result compared byte for byte against the by-name request the ut
+  helper builds for the same table. That is the proof that canonicalization
+  matches `Propose()` semantics on real state, not just on a hand-built
+  footprint.
+- `CanonicalizedAlterTableByPathIdIsAcceptedByName` — same for `AlterTable` by
+  `PathId`, and the canonicalized form is then **sent** and accepted, with the
+  describe showing both columns.
+- `RelocateDrivenByASchemeShardResolvedFootprint` — `MoveTable` relocated using
+  the schemeshard-resolved footprint.
+
+Regression: `ut_auditsettings`, **5 OK**.
+
+### Commit
+
+- `96aa3c022f` `feat: canonicalize by-id requests to paths and relocate footprint paths`
+
+Behavior change: none. The two rewriters are new entry points; nothing on the
+Propose path calls them yet.
