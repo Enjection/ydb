@@ -240,11 +240,20 @@ public:
     }
 };
 
+// Same accumulation the shared gate does: a part may legitimately read a path an
+// earlier part of the same transaction named (TPath::ResolveWithInactive).
 void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
     TVector<TString> violations;
+    THashMap<ui64, TVector<TString>> byTx;
     for (const auto& observed : parts) {
-        for (const TString& violation : ReadSetViolations(observed.Footprint)) {
+        TVector<TString>& earlier = byTx[ui64(observed.TxId)];
+        for (const TString& violation : ReadSetViolations(observed.Footprint, earlier)) {
             violations.push_back(violation);
+        }
+        for (const auto& entry : observed.Footprint.Entries) {
+            if (!entry.AbsPath.empty()) {
+                earlier.push_back(entry.AbsPath);
+            }
         }
     }
     if (violations.empty()) {
@@ -652,9 +661,13 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         auto alter = MakeTx(NKikimrSchemeOp::ESchemeOpAlterColumnTable, "/MyRoot");
         alter.MutableAlterColumnTable()->SetName("ColumnTable");
         const auto alterRefs = ExtractPathRefs(alter);
-        UNIT_ASSERT_VALUES_EQUAL(alterRefs.size(), 1u);
+        // The name, plus the Implicit marker for the tier references the alter
+        // drops (olap/operations/alter/common/update.cpp:20).
+        UNIT_ASSERT_VALUES_EQUAL(alterRefs.size(), 2u);
         CheckRef(alterRefs[0], "AlterColumnTable.Name", "ColumnTable",
             EPathRefKind::LeafUnderWorkingDir, EPathRefRole::Target);
+        CheckRef(alterRefs[1], "AlterColumnTable.<droppedTierStorages>", "",
+            EPathRefKind::Implicit, EPathRefRole::Dependency);
 
         // olap/operations/alter_table.cpp:278: without AlterColumnTable the
         // name comes from AlterTable.Name.
@@ -1883,8 +1896,12 @@ namespace {
 
 // Substrings that make a string field look like it could carry a path.
 // Case-sensitive, matched against the protobuf field name.
+// "Storage" is here because the read-set gate found a real path field the other
+// seven miss: TTTLSettings.TEvictionToExternalStorageSettings.Storage names the
+// external data source a TTL tier evicts to, and CreateColumnTable's Propose
+// resolves it.
 const TVector<TStringBuf> PathLikeSubstrings = {
-    "Path", "Name", "Dir", "Table", "From", "Src", "Dst", "Prefix",
+    "Path", "Name", "Dir", "Table", "From", "Src", "Dst", "Prefix", "Storage",
 };
 
 bool LooksLikeAPathField(const google::protobuf::FieldDescriptor* field) {
@@ -2098,6 +2115,18 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintProtoCoverage) {
         // Propose reads them at all.
         "NKikimrSchemeOp.TPersQueueGroupAllocate.Name",
         "NKikimrSchemeOp.TPersQueueGroupDeallocate.Name",
+        // Storage identifiers, not scheme-tree paths. Reached only because
+        // "Storage" was added to PathLikeSubstrings for the one field that is
+        // a path (TEvictionToExternalStorageSettings.Storage). A storage pool
+        // kind names a BlobStorage pool, a StorageId names a column-shard
+        // storage class, and StorageServerHost is a network host.
+        "NKikimrBlobDepot.TChannelProfile.StoragePoolKind",
+        "NKikimrClient.TTestShardControlRequest.TCmdInitialize.StorageServerHost",
+        "NKikimrSchemeOp.TOlapColumnDescription.StorageId",
+        "NKikimrSchemeOp.TOlapColumnDiff.StorageId",
+        "NKikimrSchemeOp.TOlapIndexDescription.StorageId",
+        "NKikimrSchemeOp.TOlapIndexRequested.StorageId",
+        "NKikimrStoragePool.TChannelBind.StoragePoolKind",
     };
 
     Y_UNIT_TEST(EveryPathLikeFieldIsClassified) {

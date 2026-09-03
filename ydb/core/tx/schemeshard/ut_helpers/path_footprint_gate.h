@@ -7,6 +7,8 @@
 #include <util/generic/vector.h>
 #include <util/system/mutex.h>
 
+#include <utility>
+
 namespace NSchemeShardUT_Private {
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -36,11 +38,19 @@ bool IsAtOrUnderPath(TStringBuf path, TStringBuf prefix);
 //   5. the root, or a walk that resolved nothing, which say nothing about
 //      scope;
 //   6. covered by a documented allowlist entry (see the .cpp).
+//   7. an entry path declared by an *earlier* part of the same transaction,
+//      or an ancestor of one. TPath::ResolveWithInactive walks the target of
+//      every earlier sub-operation of the transaction, so a Move part reads
+//      its siblings' destinations; those are named by the request, just not by
+//      this part. `earlierInTx` carries those paths; pass an empty span to
+//      check one footprint in isolation.
 bool IsReadCovered(const NKikimr::NSchemeShard::TPathFootprint& footprint,
-    const NKikimr::NSchemeShard::TPathRead& read);
+    const NKikimr::NSchemeShard::TPathRead& read,
+    const TVector<TString>& earlierInTx = {});
 
 // One rendered line per uncovered read of this footprint. Empty when clean.
-TVector<TString> ReadSetViolations(const NKikimr::NSchemeShard::TPathFootprint& footprint);
+TVector<TString> ReadSetViolations(const NKikimr::NSchemeShard::TPathFootprint& footprint,
+    const TVector<TString>& earlierInTx = {});
 
 // Set YDB_SCHEMESHARD_READSET_GATE=0 to turn the gate off process-wide.
 bool ReadSetGateEnabledInEnv();
@@ -71,9 +81,19 @@ public:
     static constexpr size_t MaxViolations = 32;
 
 private:
+    // Entry paths declared so far by the request footprint and the earlier
+    // parts of one transaction. Bounded: only the few most recent transactions
+    // are kept, which is all ResolveWithInactive can reach.
+    TVector<TString>& TxPathsFor(NKikimr::NSchemeShard::TTxId txId);
+
+    static constexpr size_t MaxTrackedTransactions = 8;
+
     IPathFootprintObserver* const Next = nullptr;
     mutable TMutex Lock;
     TVector<TString> Collected;
+    // Guarded by Lock, like Collected: parts of one transaction all arrive on
+    // one tablet thread, but several tablets share one gate.
+    TVector<std::pair<NKikimr::NSchemeShard::TTxId, TVector<TString>>> TxPaths;
 };
 
 }

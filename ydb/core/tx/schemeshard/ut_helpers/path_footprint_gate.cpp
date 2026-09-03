@@ -32,9 +32,29 @@ struct TAllowedRead {
     const char* Why;
 };
 
-// std::array, not a C array: a zero-length C array is not valid C++, and the
-// list is meant to stay empty.
-constexpr std::array<TAllowedRead, 0> ALLOWED_READS{};
+// Keep this list as short as the truth allows: each entry is a read the
+// footprint genuinely cannot describe.
+bool IsBackupCollectionsDir(const TPathFootprint&, const TPathRead& read) {
+    return read.AbsPath.EndsWith("/.backups/collections");
+}
+
+constexpr std::array<TAllowedRead, 4> ALLOWED_READS{{
+    // Every backup-collection Propose resolves the domain's fixed
+    // ".backups/collections" directory to check that the collection lands
+    // there (schemeshard__backup_collection_common.cpp:59, :81). It is derived
+    // from the domain path, so no proto field of the request names it. A
+    // well-formed request's Name entry sits under that directory, which covers
+    // the read by rule 2; this entry only fires for a request whose Name points
+    // elsewhere and which the same Propose then rejects.
+    {NKikimrSchemeOp::ESchemeOpCreateBackupCollection, &IsBackupCollectionsDir,
+        "the fixed <domain>/.backups/collections directory"},
+    {NKikimrSchemeOp::ESchemeOpDropBackupCollection, &IsBackupCollectionsDir,
+        "the fixed <domain>/.backups/collections directory"},
+    {NKikimrSchemeOp::ESchemeOpAlterBackupCollection, &IsBackupCollectionsDir,
+        "the fixed <domain>/.backups/collections directory"},
+    {NKikimrSchemeOp::ESchemeOpBackupBackupCollection, &IsBackupCollectionsDir,
+        "the fixed <domain>/.backups/collections directory"},
+}};
 
 bool IsAllowlisted(const TPathFootprint& footprint, const TPathRead& read) {
     for (const auto& allowed : ALLOWED_READS) {
@@ -75,7 +95,8 @@ bool IsAtOrUnderPath(TStringBuf path, TStringBuf prefix) {
     return path.size() == prefix.size() || path[prefix.size()] == '/';
 }
 
-bool IsReadCovered(const TPathFootprint& footprint, const TPathRead& read) {
+bool IsReadCovered(const TPathFootprint& footprint, const TPathRead& read,
+        const TVector<TString>& earlierInTx) {
     if (read.AbsPath.empty() || read.AbsPath == "/") {
         // A walk that resolved nothing, or the root, says nothing about scope.
         return true;
@@ -106,13 +127,25 @@ bool IsReadCovered(const TPathFootprint& footprint, const TPathRead& read) {
     if (IsAtOrUnderPath(footprint.WorkingDirCanon, read.AbsPath)) {
         return true;
     }
+    // 7. A path an earlier part of the same transaction declared, or an
+    //    ancestor of one. TPath::ResolveWithInactive (schemeshard_path.cpp:
+    //    1500-1530) calls TPath::Init on the TargetPathId of every earlier
+    //    sub-operation of this transaction, so a Move* part reads the
+    //    destinations its sibling parts created. The request names them; this
+    //    part does not.
+    for (const TString& earlier : earlierInTx) {
+        if (IsAtOrUnderPath(earlier, read.AbsPath)) {
+            return true;
+        }
+    }
     return IsAllowlisted(footprint, read);
 }
 
-TVector<TString> ReadSetViolations(const TPathFootprint& footprint) {
+TVector<TString> ReadSetViolations(const TPathFootprint& footprint,
+        const TVector<TString>& earlierInTx) {
     TVector<TString> violations;
     for (const auto& read : footprint.ReadSet) {
-        if (IsReadCovered(footprint, read)) {
+        if (IsReadCovered(footprint, read, earlierInTx)) {
             continue;
         }
         violations.push_back(TStringBuilder()
@@ -131,9 +164,31 @@ bool ReadSetGateEnabledInEnv() {
     return value != "0";
 }
 
+TVector<TString>& TReadSetGate::TxPathsFor(TTxId txId) {
+    for (auto& [id, paths] : TxPaths) {
+        if (id == txId) {
+            return paths;
+        }
+    }
+    if (TxPaths.size() >= MaxTrackedTransactions) {
+        TxPaths.erase(TxPaths.begin());
+    }
+    TxPaths.emplace_back(txId, TVector<TString>());
+    return TxPaths.back().second;
+}
+
 void TReadSetGate::OnRequestFootprint(TTxId txId, const TPathFootprint& footprint) {
     // The request layer is resolved before any part runs, so it carries no
-    // read set. Nothing to check; just forward.
+    // read set. Its entries do count towards what the transaction named.
+    {
+        TGuard<TMutex> guard(Lock);
+        TVector<TString>& paths = TxPathsFor(txId);
+        for (const auto& entry : footprint.Entries) {
+            if (!entry.AbsPath.empty()) {
+                paths.push_back(entry.AbsPath);
+            }
+        }
+    }
     if (Next) {
         Next->OnRequestFootprint(txId, footprint);
     }
@@ -141,15 +196,24 @@ void TReadSetGate::OnRequestFootprint(TTxId txId, const TPathFootprint& footprin
 
 void TReadSetGate::OnPartFootprint(TTxId txId, const TPathFootprint& footprint) {
     // Checked here, per part, so the offending part is named even when a later
-    // part of the same request is clean.
-    for (const TString& violation : ReadSetViolations(footprint)) {
+    // part of the same request is clean. Only paths named *before* this part
+    // count, which is exactly what ResolveWithInactive can reach.
+    {
         TGuard<TMutex> guard(Lock);
-        if (Collected.size() >= MaxViolations) {
-            break;
+        TVector<TString>& paths = TxPathsFor(txId);
+        for (const TString& violation : ReadSetViolations(footprint, paths)) {
+            if (Collected.size() >= MaxViolations) {
+                break;
+            }
+            const TString line = TStringBuilder() << "txId " << ui64(txId) << ": " << violation;
+            if (Find(Collected, line) == Collected.end()) {
+                Collected.push_back(line);
+            }
         }
-        const TString line = TStringBuilder() << "txId " << ui64(txId) << ": " << violation;
-        if (Find(Collected, line) == Collected.end()) {
-            Collected.push_back(line);
+        for (const auto& entry : footprint.Entries) {
+            if (!entry.AbsPath.empty()) {
+                paths.push_back(entry.AbsPath);
+            }
         }
     }
     if (Next) {

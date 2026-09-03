@@ -210,8 +210,25 @@ enum class EPathRefRole {
         "NKikimrSchemeOp.TColumnTableDescription.Name", LeafUnderWorkingDir, Target)                \
     X(CreateColumnTable_CopyFromTable, "CreateColumnTable.CopyFromTable",                           \
         "NKikimrSchemeOp.TColumnTableDescription.CopyFromTable", Absolute, Source)                  \
+    /* Every TTL tier that evicts to external storage names an external data     */                  \
+    /* source by absolute path. Propose resolves it and persists a reference     */                  \
+    /* both ways (olap/operations/create_table.cpp:820,                          */                  \
+    /* olap/operations/alter/common/update.cpp:20,26). The proto field is called */                  \
+    /* Storage, so the descriptor walk's name heuristics never see it.           */                  \
+    X(CreateColumnTable_TierStorage,                                                                \
+        "CreateColumnTable.TtlSettings.Enabled.Tiers[{i}].EvictToExternalStorage.Storage",          \
+        "NKikimrSchemeOp.TTTLSettings.TEvictionToExternalStorageSettings.Storage",                  \
+        Absolute, Dependency)                                                                       \
     X(AlterColumnTable_Name, "AlterColumnTable.Name",                                               \
         "NKikimrSchemeOp.TAlterColumnTable.Name", LeafUnderWorkingDir, Target)                      \
+    X(AlterColumnTable_TierStorage,                                                                 \
+        "AlterColumnTable.AlterTtlSettings.Enabled.Tiers[{i}].EvictToExternalStorage.Storage",      \
+        "NKikimrSchemeOp.TTTLSettings.TEvictionToExternalStorageSettings.Storage",                  \
+        Absolute, Dependency)                                                                       \
+    /* The tiers the table used *before* the alter are read from stored state to */                  \
+    /* drop their references; no proto field of the request names them.          */                  \
+    X(Implicit_AlterColumnTable_DroppedTiers, "AlterColumnTable.<droppedTierStorages>", "",         \
+        Implicit, Dependency)                                                                       \
     /* CDC streams. The AtTable and Impl parts read the same submessage with a  */                   \
     /* different resolution rule, and override the defaults below.              */                   \
     X(CreateCdcStream_TableName, "CreateCdcStream.TableName",                                       \
@@ -337,15 +354,19 @@ enum class EPathRefRole {
     X(RestoreMultipleIncrementalBackups_DstTablePath,                                               \
         "RestoreMultipleIncrementalBackups.DstTablePath",                                           \
         "NKikimrSchemeOp.TRestoreMultipleIncrementalBackups.DstTablePath", Absolute, Target)        \
+    /* Create/Drop resolve the name through ResolveBackupCollectionPaths, which */                  \
+    /* splits it: an absolute name is resolved as such, a relative one becomes   */                  \
+    /* WorkingDir.Child(name) (schemeshard__backup_collection_common.cpp:76-82). */                  \
+    /* The other backup-collection ops JoinPath instead, so they stay leaves.    */                  \
     X(CreateBackupCollection_Name, "CreateBackupCollection.Name",                                   \
-        "NKikimrSchemeOp.TBackupCollectionDescription.Name", LeafUnderWorkingDir, Target)           \
+        "NKikimrSchemeOp.TBackupCollectionDescription.Name", PathUnderWorkingDir, Target)           \
     X(CreateBackupCollection_Entry_Path,                                                            \
         "CreateBackupCollection.ExplicitEntryList.Entries[{i}].Path",                               \
         "NKikimrSchemeOp.TBackupCollectionDescription.TBackupEntry.Path", Absolute, Dependency)     \
     X(AlterBackupCollection_Name, "AlterBackupCollection.Name",                                     \
         "NKikimrSchemeOp.TBackupCollectionDescription.Name", LeafUnderWorkingDir, Target)           \
     X(DropBackupCollection_Name, "DropBackupCollection.Name",                                       \
-        "NKikimrSchemeOp.TBackupCollectionDescription.Name", LeafUnderWorkingDir, Target)           \
+        "NKikimrSchemeOp.TBackupCollectionDescription.Name", PathUnderWorkingDir, Target)           \
     X(Implicit_DropBackupCollection_Entries, "DropBackupCollection.<collectionEntries>", "",        \
         Implicit, Dependency)                                                                       \
     X(BackupBackupCollection_Name, "BackupBackupCollection.Name",                                   \

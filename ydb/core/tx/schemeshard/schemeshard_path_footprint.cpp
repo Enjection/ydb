@@ -334,6 +334,23 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         }
     };
 
+    // Every TTL tier that evicts to external storage names an external data
+    // source by absolute path; Propose resolves each one and persists a
+    // reference (olap/operations/create_table.cpp:820). The proto field is
+    // "Storage", which no name heuristic would guess is a path.
+    const auto emitTierStorages = [&](F field, const NKikimrSchemeOp::TColumnDataLifeCycle& ttl) {
+        if (!ttl.HasEnabled()) {
+            return;
+        }
+        const auto& tiers = ttl.GetEnabled().GetTiers();
+        for (int i = 0; i < tiers.size(); ++i) {
+            if (tiers[i].HasEvictToExternalStorage()) {
+                out.Add(field, tiers[i].GetEvictToExternalStorage().GetStorage(),
+                    TAt{.Index = ui32(i)});
+            }
+        }
+    };
+
     // Local paths carried by a replication/transfer description. SrcPath is a
     // path on the *remote* cluster and is deliberately never emitted. The four
     // field ids differ between Replication and AlterReplication, which is the
@@ -692,12 +709,18 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
             out.Add(F::CreateColumnTable_CopyFromTable,
                 tx.GetCreateColumnTable().GetCopyFromTable());
         }
+        emitTierStorages(F::CreateColumnTable_TierStorage,
+            tx.GetCreateColumnTable().GetTtlSettings());
         break;
     case NKikimrSchemeOp::ESchemeOpAlterColumnTable:
         // olap/operations/alter_table.cpp:278 falls back to AlterTable.Name
         // when the AlterColumnTable submessage is absent.
         if (tx.HasAlterColumnTable()) {
             out.Add(F::AlterColumnTable_Name, tx.GetAlterColumnTable().GetName());
+            const int alterColumnTableIndex = out.Last();
+            emitTierStorages(F::AlterColumnTable_TierStorage,
+                tx.GetAlterColumnTable().GetAlterTtlSettings());
+            out.Implicit(F::Implicit_AlterColumnTable_DroppedTiers, alterColumnTableIndex);
         } else {
             out.Add(F::AlterTable_Name, tx.GetAlterTable().GetName());
         }
@@ -1482,6 +1505,20 @@ bool SplitParentLeaf(TStringBuf abs, TStringBuf leafHint, TString& parent, TStri
         tx.MutableCancelIndexBuild()->SetTablePath(value);)                                     \
     X(CreateColumnTable_CopyFromTable,                                                         \
         tx.MutableCreateColumnTable()->SetCopyFromTable(value);)                                \
+    X(CreateColumnTable_TierStorage,                                                           \
+        SS_PATH_SETTER_GUARD_INDEX(                                                            \
+            tx.GetCreateColumnTable().GetTtlSettings().GetEnabled().TiersSize())               \
+        tx.MutableCreateColumnTable()->MutableTtlSettings()->MutableEnabled()                   \
+            ->MutableTiers(index)->MutableEvictToExternalStorage()->SetStorage(value);)         \
+    X(AlterColumnTable_TierStorage,                                                            \
+        SS_PATH_SETTER_GUARD_INDEX(                                                            \
+            tx.GetAlterColumnTable().GetAlterTtlSettings().GetEnabled().TiersSize())           \
+        tx.MutableAlterColumnTable()->MutableAlterTtlSettings()->MutableEnabled()               \
+            ->MutableTiers(index)->MutableEvictToExternalStorage()->SetStorage(value);)         \
+    X(CreateBackupCollection_Name,                                                             \
+        tx.MutableCreateBackupCollection()->SetName(value);)                                    \
+    X(DropBackupCollection_Name,                                                               \
+        tx.MutableDropBackupCollection()->SetName(value);)                                      \
     X(CreateCdcStream_TableName,                                                               \
         tx.MutableCreateCdcStream()->SetTableName(value);)                                      \
     X(AlterCdcStream_TableName,                                                                \
