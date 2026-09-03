@@ -76,11 +76,19 @@ struct TFootprintLine {
     }
 };
 
-TVector<TFootprintLine> ParseFootprintLog(const TVector<TString>& records, size_t from = 0) {
+// The hook logs two layers with the same field grammar: "PathFootprint" for
+// the derived parts and "PathFootprint request" for the client transactions
+// they descend from. Every parse asks for exactly one of them.
+TVector<TFootprintLine> ParseFootprintLogLayer(const TVector<TString>& records, size_t from,
+        bool requestLayer)
+{
     TVector<TFootprintLine> result;
     for (size_t i = from; i < records.size(); ++i) {
         const TStringBuf line = records[i];
         if (line.find("PathFootprint") == TStringBuf::npos) {
+            continue;
+        }
+        if ((line.find("PathFootprint request") != TStringBuf::npos) != requestLayer) {
             continue;
         }
         TFootprintLine parsed;
@@ -104,6 +112,14 @@ TVector<TFootprintLine> ParseFootprintLog(const TVector<TString>& records, size_
         }
     }
     return result;
+}
+
+TVector<TFootprintLine> ParseFootprintLog(const TVector<TString>& records, size_t from = 0) {
+    return ParseFootprintLogLayer(records, from, /* requestLayer = */ false);
+}
+
+TVector<TFootprintLine> ParseRequestFootprintLog(const TVector<TString>& records, size_t from = 0) {
+    return ParseFootprintLogLayer(records, from, /* requestLayer = */ true);
 }
 
 const TFootprintLine* FindLine(const TVector<TFootprintLine>& lines,
@@ -966,7 +982,26 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         UNIT_ASSERT_VALUES_EQUAL(table.Get("workingDirRelToDb"), "a/b");
         UNIT_ASSERT_VALUES_EQUAL(table.Get("proposeStatus"), "StatusAccepted");
 
+        // All three parts descend from the single client transaction.
         const auto ownLines = ParseFootprintLog(log, mark);
+        for (const auto& line : ownLines) {
+            UNIT_ASSERT_VALUES_EQUAL_C(line.Get("originalTxIndex"), "0",
+                line.Get("partOpType") << " / " << line.Get("fieldPath"));
+        }
+
+        // ... and there is exactly one request footprint, describing the
+        // request as the client wrote it: one multi-segment leaf name, not the
+        // three derived parts.
+        const auto requestLines = ParseRequestFootprintLog(log, mark);
+        UNIT_ASSERT_VALUES_EQUAL(requestLines.size(), 1u);
+        const auto& request = requestLines[0];
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("partId"), "<request>");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("originalTxIndex"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("partOpType"), "ESchemeOpCreateTable");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("fieldPath"), "CreateTable.Name");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("kind"), "LeafUnderWorkingDir");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("relToDb"), "a/b/Table");
+        UNIT_ASSERT_VALUES_EQUAL(request.Get("workingDir"), "/MyRoot");
 
         // The MkDir parts go through TMemoryChanges, so their write set is
         // exact: each new directory plus the parent whose child list changed.
@@ -1319,6 +1354,52 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
             UNIT_ASSERT_C(Find(written, pathId) != written.end(),
                 "write set has no " << name << " (" << pathId << ")");
         }
+    }
+
+    // Two transactions in one request: every part carries the index of the
+    // client transaction it descends from, and each gets its own request
+    // footprint.
+    Y_UNIT_TEST(TwoTransactionsGetDistinctOriginalTxIndexes) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        const size_t mark = log.size();
+        ++txId;
+        {
+            auto* request = new TEvTx(txId, TTestTxConfig::SchemeShard);
+            for (const TString& name : {TString("first"), TString("second/nested")}) {
+                auto& tx = *request->Record.AddTransaction();
+                tx.SetOperationType(NKikimrSchemeOp::ESchemeOpMkDir);
+                tx.SetWorkingDir("/MyRoot");
+                tx.MutableMkDir()->SetName(name);
+            }
+            AsyncSend(runtime, TTestTxConfig::SchemeShard, request);
+            TestModificationResults(runtime, txId, {{NKikimrScheme::StatusAccepted}});
+        }
+        env.TestWaitNotification(runtime, txId);
+
+        const auto requestLines = ParseRequestFootprintLog(log, mark);
+        UNIT_ASSERT_VALUES_EQUAL(requestLines.size(), 2u);
+        UNIT_ASSERT_VALUES_EQUAL(requestLines[0].Get("originalTxIndex"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(requestLines[0].Get("absPath"), "/MyRoot/first");
+        UNIT_ASSERT_VALUES_EQUAL(requestLines[1].Get("originalTxIndex"), "1");
+        UNIT_ASSERT_VALUES_EQUAL(requestLines[1].Get("absPath"), "/MyRoot/second/nested");
+
+        // The second transaction fans out into a generated MkDir for "second"
+        // plus the MkDir for "nested"; all of them point back at index 1.
+        const auto lines = ParseFootprintLog(log, mark);
+        THashMap<TString, TString> originByAbsPath;
+        for (const auto& line : lines) {
+            if (line.Get("fieldPath") == "MkDir.Name") {
+                originByAbsPath[line.Get("absPath")] = line.Get("originalTxIndex");
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/first"], "0");
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/second"], "1");
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/second/nested"], "1");
     }
 }
 

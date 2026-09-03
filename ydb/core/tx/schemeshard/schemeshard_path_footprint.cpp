@@ -152,11 +152,18 @@ TString JoinPathIds(const TVector<TPathId>& pathIds) {
     return joined;
 }
 
-TStringBuilder FormatPathFootprintPrefix(const TPathFootprint& footprint, ui64 txId) {
+TStringBuilder FormatPathFootprintPrefix(const TPathFootprint& footprint, ui64 txId,
+        TStringBuf prefix) {
     TStringBuilder line;
-    line << "PathFootprint"
+    line << prefix
          << " txId# " << txId
-         << ", partId# " << ui32(footprint.PartId)
+         << ", partId# ";
+    if (footprint.PartId == InvalidSubTxId) {
+        line << "<request>";
+    } else {
+        line << ui32(footprint.PartId);
+    }
+    line << ", originalTxIndex# " << footprint.OriginalTxIndex
          << ", partOpType# " << NKikimrSchemeOp::EOperationType_Name(footprint.PartOpType)
          << ", proposeStatus# " << NKikimrScheme::EStatus_Name(footprint.ProposeStatus)
          << ", writeSet# " << footprint.WriteSet.size()
@@ -168,15 +175,15 @@ TStringBuilder FormatPathFootprintPrefix(const TPathFootprint& footprint, ui64 t
 }  // namespace
 
 TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId) {
-    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId);
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId, "PathFootprint");
     return line << ", fieldPath# <writeSet>"
                 << ", writeSetPaths# " << JoinPathIds(footprint.WriteSet)
                 << ", publishedPaths# " << JoinPathIds(footprint.Published);
 }
 
 TString FormatPathFootprintLine(const TPathFootprint& footprint,
-        const TPathFootprintEntry* entry, ui64 txId) {
-    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId);
+        const TPathFootprintEntry* entry, ui64 txId, TStringBuf prefix) {
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId, prefix);
     line << ", workingDir# " << footprint.WorkingDir
          << ", workingDirRelToDb# " << footprint.WorkingDirRelToDb;
     if (!entry) {

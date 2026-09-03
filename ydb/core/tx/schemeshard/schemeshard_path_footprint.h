@@ -98,6 +98,11 @@ struct TPathFootprint {
     NKikimrSchemeOp::EOperationType PartOpType = NKikimrSchemeOp::EOperationType::ESchemeOp_DEPRECATED_35;
     NKikimrScheme::EStatus ProposeStatus = NKikimrScheme::StatusSuccess;
     TSubTxId PartId = InvalidSubTxId;
+    // Index into TEvModifySchemeTransaction.Transaction of the request
+    // transaction this footprint belongs to. Max<ui32>() when unknown. A
+    // footprint of the request transaction itself keeps PartId invalid, which
+    // is how the two layers are told apart in the log.
+    ui32 OriginalTxIndex = Max<ui32>();
 
     // The in-memory writes this part's Propose() made, taken as the diff of
     // the TMemoryChanges undo log across the call: grab order, deduplicated.
@@ -121,10 +126,13 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
 TStringBuf PathRefKindName(EPathRefKind kind);
 TStringBuf PathRefRoleName(EPathRefRole role);
 
-// One-line, greppable rendering of a single footprint entry. Prefix is
-// "PathFootprint". Used as the observation channel by tests.
+// One-line, greppable rendering of a single footprint entry. The default
+// prefix is "PathFootprint"; the request layer passes "PathFootprint request"
+// so the two layers can be told apart in the log. Used as the observation
+// channel by tests.
 TString FormatPathFootprintLine(const TPathFootprint& footprint,
-    const TPathFootprintEntry* entry, ui64 txId);
+    const TPathFootprintEntry* entry, ui64 txId,
+    TStringBuf prefix = "PathFootprint");
 
 // The same prefix, one extra line per footprint, listing the write set and the
 // publications as "owner:local" ids. Kept out of the per-entry line because it

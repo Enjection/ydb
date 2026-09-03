@@ -498,6 +498,9 @@ public:
         const TTxId& txId,
         const NKikimrScheme::TEvModifySchemeTransaction& record,
         bool prevProposeUndoSafe,
+        // Index into TEvModifySchemeTransaction.Transaction of the request
+        // transaction every part in `parts` descends from.
+        ui32 originalTxIndex,
         TOperation::TPtr& operation,
         THolder<TProposeResponse>& response,
         TOperationContext& context);
