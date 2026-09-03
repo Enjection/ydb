@@ -18,6 +18,10 @@ struct TOperation: TSimpleRefCount<TOperation> {
     // Per-part "path footprint" recorded at Propose time (in-memory only,
     // never persisted). Includes parts that were rejected. Each entry points
     // back into RequestFootprints through TPathFootprint::OriginalTxIndex.
+    //
+    // Both vectors below stay empty unless something asked for the footprints:
+    // an IPathFootprintObserver on TAppData, or FLAT_TX_SCHEMESHARD logging at
+    // DEBUG. Neither is on in a default production node.
     TVector<TPathFootprint> PathFootprints;
 
     // One footprint per transaction of the client request, indexed by
@@ -25,7 +29,8 @@ struct TOperation: TSimpleRefCount<TOperation> {
     // constructed. This is the layer a request rewrite works against;
     // PathFootprints is the derived per-part view of the same request.
     // Empty for requests that IgniteOperation rejects before it gets there
-    // (duplicate txId, quota failure, rewrite failure).
+    // (duplicate txId, quota failure, rewrite failure), and whenever nothing
+    // asked for the footprints at all.
     TVector<TPathFootprint> RequestFootprints;
 
     THashSet<TActorId> Subscribers;

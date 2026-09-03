@@ -771,6 +771,14 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
         runtime.GetAppData().YdbDriver = YdbDriver.Get();
     }
 
+    // Before BootSchemeShard, so the footprints of the bootstrap parts (the
+    // system view directory and its ~20 CreateSysView parts) are observed too.
+    if (opts.PathFootprintObserver_) {
+        for (ui32 node = 0; node < runtime.GetNodeCount(); ++node) {
+            runtime.GetAppData(node).PathFootprintObserver = opts.PathFootprintObserver_;
+        }
+    }
+
     // Create Observer to catch an event of system views update finished.
     // For more info, see comments in ydb/core/testlib/test_client.cpp
     if (app.FeatureFlags.GetEnableRealSystemViewPaths()) {

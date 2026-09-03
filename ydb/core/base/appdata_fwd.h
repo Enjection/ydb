@@ -169,6 +169,7 @@ namespace NPQ {
 
 namespace NSchemeShard {
     class IOperationFactory;
+    class IPathFootprintObserver;
 }
 
 namespace NReplication::NService {
@@ -209,6 +210,9 @@ struct TAppData {
     const TFormatFactory* FormatFactory = nullptr;
     const NSQS::IEventsWriterFactory* SqsEventsWriterFactory = nullptr;
     const NSchemeShard::IOperationFactory *SchemeOperationFactory = nullptr;
+    // Observation channel for schemeshard path footprints. Non-const because an
+    // observer accumulates. Null in production unless something installs one.
+    NSchemeShard::IPathFootprintObserver *PathFootprintObserver = nullptr;
     const NYamlConfig::IConfigSwissKnife *ConfigSwissKnife = nullptr;
 
     NSQS::IAuthFactory* SqsAuthFactory = nullptr;

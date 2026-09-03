@@ -13,6 +13,7 @@
 #include <ydb/core/tx/schemeshard/schemeshard_export.h>
 #include <ydb/core/tx/schemeshard/schemeshard_identificators.h>
 #include <ydb/core/tx/schemeshard/schemeshard_import.h>
+#include <ydb/core/tx/schemeshard/schemeshard_path_footprint.h>
 
 #include <ydb/library/ydb_issue/proto/issue_id.pb.h>
 
@@ -96,6 +97,9 @@ namespace NSchemeShardUT_Private {
         OPTION(bool, EnableDataShardSplitKeySelection, false);
         OPTION(bool, EnableDataShardSplitHistogramOmission, false);
         OPTION(bool, DisableFileStoreSSDSystemSpaceAccounting, false);
+        // Published to TAppData before the schemeshard boots, so bootstrap
+        // parts (the system views) are observed too.
+        OPTION(NKikimr::NSchemeShard::IPathFootprintObserver*, PathFootprintObserver, nullptr);
 
         #undef OPTION
     };
