@@ -6,7 +6,9 @@
 #include <library/cpp/logger/backend.h>
 #include <library/cpp/logger/record.h>
 
+#include <util/generic/algorithm.h>
 #include <util/generic/hash.h>
+#include <util/generic/hash_set.h>
 #include <util/string/split.h>
 
 using namespace NKikimr;
@@ -137,6 +139,52 @@ TVector<TString> AbsPaths(const TVector<TFootprintLine>& lines,
     for (const auto& line : lines) {
         if (line.Get("partOpType") == opType && line.Get("fieldPath") == fieldPath) {
             result.push_back(line.Get("absPath"));
+        }
+    }
+    Sort(result);
+    return result;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Write set / publication helpers. Every part emits exactly one extra line
+// with fieldPath "<writeSet>" carrying "owner:local" ids.
+
+TVector<TString> SplitPathIds(const TString& joined) {
+    TVector<TString> result;
+    StringSplitter(joined).Split(',').SkipEmpty().Collect(&result);
+    Sort(result);
+    return result;
+}
+
+// "owner:local" of an existing path, in the same form the log uses. Private
+// paths (index impl tables, cdc stream pq groups) need the private describe.
+TString PathIdOf(TTestActorRuntime& runtime, const TString& path) {
+    const auto& self = DescribePrivatePath(runtime, path).GetPathDescription().GetSelf();
+    return TStringBuilder() << self.GetSchemeshardId() << ":" << self.GetPathId();
+}
+
+const TFootprintLine& RequireWriteSetLine(const TVector<TFootprintLine>& lines, TStringBuf opType) {
+    for (const auto& line : lines) {
+        if (line.Get("partOpType") == opType && line.Get("fieldPath") == "<writeSet>") {
+            return line;
+        }
+    }
+    UNIT_FAIL("no PathFootprint write set line for " << opType);
+    return lines.front();
+}
+
+// Union of every part's write set, which is what a whole request wrote.
+TVector<TString> AllWriteSetPathIds(const TVector<TFootprintLine>& lines) {
+    THashSet<TString> seen;
+    TVector<TString> result;
+    for (const auto& line : lines) {
+        if (line.Get("fieldPath") != "<writeSet>") {
+            continue;
+        }
+        for (const TString& id : SplitPathIds(line.Get("writeSetPaths"))) {
+            if (seen.insert(id).second) {
+                result.push_back(id);
+            }
         }
     }
     Sort(result);
@@ -886,6 +934,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         TTestEnv env(runtime);
         ui64 txId = 100;
 
+        const size_t mark = log.size();
         TestCreateTable(runtime, ++txId, "/MyRoot", R"(
             Name: "a/b/Table"
             Columns { Name: "key" Type: "Uint64" }
@@ -916,6 +965,33 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         UNIT_ASSERT_VALUES_EQUAL(table.Get("relToParent"), "Table");
         UNIT_ASSERT_VALUES_EQUAL(table.Get("workingDirRelToDb"), "a/b");
         UNIT_ASSERT_VALUES_EQUAL(table.Get("proposeStatus"), "StatusAccepted");
+
+        const auto ownLines = ParseFootprintLog(log, mark);
+
+        // The MkDir parts go through TMemoryChanges, so their write set is
+        // exact: each new directory plus the parent whose child list changed.
+        const TVector<TString> written = AllWriteSetPathIds(ownLines);
+        for (const TString& path : {TString("/MyRoot"), TString("/MyRoot/a"), TString("/MyRoot/a/b")}) {
+            const TString pathId = PathIdOf(runtime, path);
+            UNIT_ASSERT_C(Find(written, pathId) != written.end(),
+                "write set has no " << path << " (" << pathId << ")");
+        }
+
+        // TCreateTable::Propose writes straight through context.GetDB()
+        // instead of recording TMemoryChanges, so its own write set is empty
+        // and the part is flagged as a lower bound. The new table id is
+        // therefore *not* in the write set above.
+        const auto& createWriteSet = RequireWriteSetLine(ownLines, "ESchemeOpCreateTable");
+        UNIT_ASSERT_VALUES_EQUAL(createWriteSet.Get("writeSet"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(createWriteSet.Get("incomplete"), "1");
+        UNIT_ASSERT_VALUES_EQUAL(
+            Find(written, PathIdOf(runtime, "/MyRoot/a/b/Table")) == written.end(), true);
+
+        // The MkDir parts ran before any direct db write, so they are exact.
+        const auto& mkdirWriteSet = RequireWriteSetLine(ownLines, "ESchemeOpMkDir");
+        UNIT_ASSERT_VALUES_EQUAL(mkdirWriteSet.Get("incomplete"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(SplitPathIds(mkdirWriteSet.Get("writeSetPaths")).size(), 2u);
+        UNIT_ASSERT(mkdirWriteSet.Get("published") != "0");
     }
 
     Y_UNIT_TEST(CreateIndexedTable) {
@@ -1191,6 +1267,58 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         UNIT_ASSERT_VALUES_EQUAL(table.Get("proposeStatus"), "StatusPathDoesNotExist");
         // Best effort even though nothing under the working dir resolves.
         UNIT_ASSERT_VALUES_EQUAL(table.Get("relToDb"), "NoSuchDir/Table");
+
+        // A part that fails its checks never gets as far as writing anything.
+        const auto& writeSet = RequireWriteSetLine(lines, "ESchemeOpCreateTable");
+        UNIT_ASSERT_VALUES_EQUAL(writeSet.Get("writeSet"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(writeSet.Get("published"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(writeSet.Get("incomplete"), "0");
+        UNIT_ASSERT_VALUES_EQUAL(AllWriteSetPathIds(lines), (TVector<TString>{}));
+    }
+
+    // Dropping an indexed table names only the table, but the operation
+    // touches the index and its impl table too. Those cascaded paths appear in
+    // the write set although no proto field of the request mentions them.
+    Y_UNIT_TEST(DropIndexedTableWriteSetCoversTheCascade) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Table"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const TString table = PathIdOf(runtime, "/MyRoot/Table");
+        const TString index = PathIdOf(runtime, "/MyRoot/Table/byValue");
+        const TString implTable = PathIdOf(runtime, "/MyRoot/Table/byValue/indexImplTable");
+
+        const size_t mark = log.size();
+        TestDropTable(runtime, ++txId, "/MyRoot", "Table");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto lines = ParseFootprintLog(log, mark);
+        const TVector<TString> written = AllWriteSetPathIds(lines);
+        for (const auto& [name, pathId] : TVector<std::pair<TString, TString>>{
+                {"/MyRoot", PathIdOf(runtime, "/MyRoot")},
+                {"/MyRoot/Table", table},
+                {"/MyRoot/Table/byValue", index},
+                {"/MyRoot/Table/byValue/indexImplTable", implTable}})
+        {
+            UNIT_ASSERT_C(Find(written, pathId) != written.end(),
+                "write set has no " << name << " (" << pathId << ")");
+        }
     }
 }
 

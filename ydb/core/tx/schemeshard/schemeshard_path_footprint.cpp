@@ -137,15 +137,47 @@ TStringBuf PathRefRoleName(EPathRefRole role) {
     return "Unknown";
 }
 
-TString FormatPathFootprintLine(const TPathFootprint& footprint,
-        const TPathFootprintEntry* entry, ui64 txId) {
+namespace {
+
+// Compact, separator-free rendering: TPathId::Out() emits ", " inside itself,
+// which the log line format cannot carry.
+TString JoinPathIds(const TVector<TPathId>& pathIds) {
+    TStringBuilder joined;
+    for (size_t i = 0; i < pathIds.size(); ++i) {
+        if (i) {
+            joined << ',';
+        }
+        joined << pathIds[i].OwnerId << ':' << pathIds[i].LocalPathId;
+    }
+    return joined;
+}
+
+TStringBuilder FormatPathFootprintPrefix(const TPathFootprint& footprint, ui64 txId) {
     TStringBuilder line;
     line << "PathFootprint"
          << " txId# " << txId
          << ", partId# " << ui32(footprint.PartId)
          << ", partOpType# " << NKikimrSchemeOp::EOperationType_Name(footprint.PartOpType)
          << ", proposeStatus# " << NKikimrScheme::EStatus_Name(footprint.ProposeStatus)
-         << ", workingDir# " << footprint.WorkingDir
+         << ", writeSet# " << footprint.WriteSet.size()
+         << ", published# " << footprint.Published.size()
+         << ", incomplete# " << (footprint.WriteSetMayBeIncomplete ? 1 : 0);
+    return line;
+}
+
+}  // namespace
+
+TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId) {
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId);
+    return line << ", fieldPath# <writeSet>"
+                << ", writeSetPaths# " << JoinPathIds(footprint.WriteSet)
+                << ", publishedPaths# " << JoinPathIds(footprint.Published);
+}
+
+TString FormatPathFootprintLine(const TPathFootprint& footprint,
+        const TPathFootprintEntry* entry, ui64 txId) {
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId);
+    line << ", workingDir# " << footprint.WorkingDir
          << ", workingDirRelToDb# " << footprint.WorkingDirRelToDb;
     if (!entry) {
         return line << ", fieldPath# <none>";

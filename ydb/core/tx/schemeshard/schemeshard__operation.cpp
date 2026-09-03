@@ -115,6 +115,10 @@ bool TSchemeShard::ProcessOperationParts(
         // Propose() may mutate schemeshard state, recorded (and logged) after
         // Propose() so that rejected parts are covered too.
         auto footprint = ResolvePathFootprint(part->GetTransaction(), context.SS);
+        // Marks taken here, collected after Propose(): what the part wrote in
+        // memory and what it asked SchemeBoard to publish is the diff.
+        const auto memChangesMark = context.MemChanges.Mark();
+        const size_t publishedMark = context.OnComplete.PublishedCount(txId);
 
         TString errStr;
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
@@ -128,6 +132,13 @@ bool TSchemeShard::ProcessOperationParts(
 
         footprint.ProposeStatus = response->Record.GetStatus();
         footprint.PartId = part->GetOperationId().GetSubTxId();
+        context.MemChanges.CollectPathIdsSince(memChangesMark, footprint.WriteSet);
+        context.OnComplete.CollectPublishedSince(txId, publishedMark, footprint.Published);
+        // IsUndoChangesSafe() is monotone within one request, so this covers
+        // both "this part went direct to the db" and "an earlier one did".
+        footprint.WriteSetMayBeIncomplete = !context.IsUndoChangesSafe();
+        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+            FormatPathFootprintWriteSetLine(footprint, ui64(txId)));
         if (footprint.Entries.empty()) {
             LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 FormatPathFootprintLine(footprint, nullptr, ui64(txId)));

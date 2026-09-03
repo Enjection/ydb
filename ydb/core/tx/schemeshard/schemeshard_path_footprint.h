@@ -98,6 +98,21 @@ struct TPathFootprint {
     NKikimrSchemeOp::EOperationType PartOpType = NKikimrSchemeOp::EOperationType::ESchemeOp_DEPRECATED_35;
     NKikimrScheme::EStatus ProposeStatus = NKikimrScheme::StatusSuccess;
     TSubTxId PartId = InvalidSubTxId;
+
+    // The in-memory writes this part's Propose() made, taken as the diff of
+    // the TMemoryChanges undo log across the call: grab order, deduplicated.
+    // Cascades (subtree drops, index and cdc children, moved subtrees) show up
+    // here even though no proto field of the request names them.
+    TVector<TPathId> WriteSet;
+    // The paths this part asked SchemeBoard to republish. Versions are not
+    // recorded: they are computed later, at ApplyOnExecute time, and a further
+    // part of the same request may still bump them.
+    TVector<TPathId> Published;
+    // The operation wrote through TOperationContext::GetDB() rather than
+    // through TMemoryChanges, so WriteSet is a lower bound. Cumulative for the
+    // whole request: TOperationContext::DirectAccessGranted is never reset, so
+    // once one part goes direct every later part is flagged too.
+    bool WriteSetMayBeIncomplete = false;
 };
 
 // Layer 2: normalization through TPath only. Never aborts on bad input.
@@ -110,5 +125,10 @@ TStringBuf PathRefRoleName(EPathRefRole role);
 // "PathFootprint". Used as the observation channel by tests.
 TString FormatPathFootprintLine(const TPathFootprint& footprint,
     const TPathFootprintEntry* entry, ui64 txId);
+
+// The same prefix, one extra line per footprint, listing the write set and the
+// publications as "owner:local" ids. Kept out of the per-entry line because it
+// belongs to the part, not to any one field.
+TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId);
 
 }  // namespace NKikimr::NSchemeShard
