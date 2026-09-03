@@ -1,5 +1,7 @@
 #include "schemeshard__operation.h"
 
+#include <util/generic/scope.h>
+
 #include "schemeshard__dispatch_op.h"
 #include "schemeshard__operation_db_changes.h"
 #include "schemeshard__operation_memory_changes.h"
@@ -119,6 +121,7 @@ bool TSchemeShard::ProcessOperationParts(
     const bool logFootprints = IS_CTX_LOG_PRIORITY_ENABLED(context.Ctx,
         NActors::NLog::PRI_DEBUG, NKikimrServices::FLAT_TX_SCHEMESHARD, 0ull);
     const bool wantFootprints = footprintObserver || logFootprints;
+    const bool wantReadSet = footprintObserver && footprintObserver->WantReadSet();
 
     for (auto& part : parts) {
         // Path footprint: computed from the part's own TModifyScheme *before*
@@ -142,6 +145,17 @@ bool TSchemeShard::ProcessOperationParts(
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
             response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
         } else {
+            // The read-set recorder covers Propose() and nothing else: not the
+            // footprint's own resolutions above, which would make any coverage
+            // check over the read set vacuous. Disarmed by the guard even if
+            // Propose() throws.
+            TPathReadSetRecorder recorder(footprint.ReadSet);
+            if (wantReadSet) {
+                context.SS->PathResolutionObserver = &recorder;
+            }
+            Y_DEFER {
+                context.SS->PathResolutionObserver = nullptr;
+            };
             response = part->Propose(owner, context);
         }
 

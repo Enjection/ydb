@@ -504,6 +504,18 @@ struct TPathFootprintEntry {
     TPathId DatabasePathId;
 };
 
+// One path resolution performed while an IPathResolutionObserver was armed.
+struct TPathRead {
+    // The path as it stood after the step, canonical.
+    TString AbsPath;
+    // Valid only when Resolved: the element the walk landed on.
+    TPathId PathId;
+    bool Resolved = false;
+    // True when the walk started from a path id (TPath::Init) rather than from
+    // a name (TPath::Dive).
+    bool ByPathId = false;
+};
+
 struct TPathFootprint {
     // The request's WorkingDir exactly as the client spelled it.
     TString WorkingDir;
@@ -539,6 +551,14 @@ struct TPathFootprint {
     // whole request: TOperationContext::DirectAccessGranted is never reset, so
     // once one part goes direct every later part is flagged too.
     bool WriteSetMayBeIncomplete = false;
+
+    // Every path this part's Propose() resolved, in resolution order, with the
+    // per-segment steps of one walk collapsed into their maximal path. Filled
+    // only when the installed IPathFootprintObserver asked for it: recording
+    // costs a virtual call per TPath::Dive, so it is off by default and never
+    // armed in production. The footprint's own resolutions are not in here —
+    // the recorder is armed around Propose() and nothing else.
+    TVector<TPathRead> ReadSet;
 };
 
 // Layer 2: normalization through TPath only. Never aborts on bad input.
@@ -597,10 +617,26 @@ public:
     // part's Propose() returned. Covers rejected parts.
     virtual void OnPartFootprint(TTxId txId, const TPathFootprint& footprint) = 0;
 
-    // Non-null to also record every TPath resolution each part's Propose()
-    // performs. The recorder is installed around the Propose() call only, so
-    // it never sees the footprint's own resolutions.
-    virtual IPathResolutionObserver* PathResolutionObserver() { return nullptr; }
+    // True to also fill TPathFootprint::ReadSet with every path each part's
+    // Propose() resolved. Off by default: it puts a virtual call on
+    // TPath::Dive for the duration of Propose().
+    virtual bool WantReadSet() const { return false; }
+};
+
+// Fills a TPathFootprint::ReadSet. Collapses one walk into one entry: a step
+// that extends the path recorded immediately before it replaces that entry, so
+// TPath::Resolve("/MyRoot/a/b/T") contributes one read, not four. Ancestors are
+// still covered, because a longer path implies every prefix of it was walked.
+class TPathReadSetRecorder final: public IPathResolutionObserver {
+public:
+    explicit TPathReadSetRecorder(TVector<TPathRead>& sink)
+        : Sink(sink)
+    {}
+
+    void OnPathResolved(const TPath& path, bool byPathId) override;
+
+private:
+    TVector<TPathRead>& Sink;
 };
 
 TStringBuf PathRefKindName(EPathRefKind kind);

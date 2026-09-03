@@ -223,6 +223,100 @@ private:
 };
 
 ////////////////////////////////////////////////////////////////////////////////
+// Read-set coverage (research plan §8.4). Every path a part's Propose()
+// resolves must be something the footprint already accounts for: an entry, an
+// ancestor of an entry, something inside a declared Implicit subtree, the
+// working dir or one of its ancestors, or a path the part demonstrably wrote.
+// A new resolution site that reads a path none of those cover fails this test.
+
+class TReadSetCollector: public TFootprintCollector {
+public:
+    bool WantReadSet() const override {
+        return true;
+    }
+};
+
+// Is `path` the same path as `prefix`, or a path under it? Segment-wise, so
+// "/MyRoot/Tab" is not under "/MyRoot/Table".
+bool IsAtOrUnderPath(TStringBuf path, TStringBuf prefix) {
+    if (path.empty() || prefix.empty()) {
+        return false;
+    }
+    if (prefix == "/") {
+        return true;
+    }
+    if (!path.StartsWith(prefix)) {
+        return false;
+    }
+    return path.size() == prefix.size() || path[prefix.size()] == '/';
+}
+
+bool IsReadCovered(const TPathFootprint& fp, const TPathRead& read) {
+    if (read.AbsPath.empty() || read.AbsPath == "/") {
+        // A walk that resolved nothing, or the root, says nothing about scope.
+        return true;
+    }
+    // 1. Something the part actually wrote or republished. Compared by path id
+    //    because the write set carries ids, not strings.
+    if (read.Resolved) {
+        if (Find(fp.WriteSet, read.PathId) != fp.WriteSet.end()
+                || Find(fp.Published, read.PathId) != fp.Published.end()) {
+            return true;
+        }
+    }
+    for (const auto& entry : fp.Entries) {
+        if (entry.AbsPath.empty()) {
+            continue;
+        }
+        // 2. An entry, or an ancestor of one: resolving /a/b/c walks /a and /a/b.
+        if (IsAtOrUnderPath(entry.AbsPath, read.AbsPath)) {
+            return true;
+        }
+        // 3. Inside a subtree the footprint declared runtime-derived.
+        if (entry.Ref.Kind == EPathRefKind::Implicit
+                && IsAtOrUnderPath(read.AbsPath, entry.AbsPath)) {
+            return true;
+        }
+    }
+    // 4. The working dir or an ancestor of it, which every check chain walks.
+    if (IsAtOrUnderPath(fp.WorkingDirCanon, read.AbsPath)) {
+        return true;
+    }
+    return false;
+}
+
+TVector<TString> ReadSetViolations(const TDeque<TObservedFootprint>& parts) {
+    TVector<TString> violations;
+    for (const auto& observed : parts) {
+        const TPathFootprint& fp = observed.Footprint;
+        for (const auto& read : fp.ReadSet) {
+            if (IsReadCovered(fp, read)) {
+                continue;
+            }
+            violations.push_back(TStringBuilder()
+                << NKikimrSchemeOp::EOperationType_Name(fp.PartOpType)
+                << " (workingDir " << fp.WorkingDirCanon << ")"
+                << " read " << read.AbsPath
+                << (read.Resolved ? " [resolved]" : " [unresolved]")
+                << (read.ByPathId ? " [byPathId]" : ""));
+        }
+    }
+    return violations;
+}
+
+void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
+    const TVector<TString> violations = ReadSetViolations(parts);
+    if (violations.empty()) {
+        return;
+    }
+    TStringBuilder dump;
+    for (const auto& violation : violations) {
+        dump << "\n  " << violation;
+    }
+    UNIT_FAIL("read set escapes the footprint:" << dump);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Rewrite helpers.
 //
 // The layer-3 rewriters take a footprint that ResolvePathFootprint produced on
@@ -1699,6 +1793,92 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         for (const auto& [name, pathId] : expected) {
             UNIT_ASSERT_C(Contains(written, pathId), "write set has no " << name);
         }
+    }
+
+    // The read set the recorder collects while each part proposes must stay
+    // inside what the footprint already describes. This is the gate that makes
+    // a new path resolution inside some Propose() visible: if it reads a path
+    // that is neither an entry, an ancestor of one, inside a declared Implicit
+    // subtree, the working dir chain, nor something the part wrote, the
+    // footprint is understating that operation and this test says so.
+    Y_UNIT_TEST(ReadSetStaysInsideTheFootprint) {
+        TReadSetCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions()
+            .EnableProtoSourceIdInfo(true)
+            .PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        // Every op shape the propose-level suite above drives, in one run: the
+        // env bootstrap parts (the system views) are in the collector too.
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "a/b/Table"
+            Columns { Name: "key" Type: "Uint64" }
+            Columns { Name: "value" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Indexed"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreateCdcStream(runtime, ++txId, "/MyRoot/a/b", R"(
+            TableName: "Table"
+            StreamDescription {
+              Name: "Stream"
+              Mode: ECdcStreamModeKeysOnly
+              Format: ECdcStreamFormatProto
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestMoveTable(runtime, ++txId, "/MyRoot/Indexed", "/MyRoot/Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        TestDropTable(runtime, ++txId, "/MyRoot", "Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        // A rejected part records a read set too, and must stay in bounds.
+        TestCreateTable(runtime, ++txId, "/MyRoot/NoSuchDir", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )", {NKikimrScheme::StatusPathDoesNotExist});
+
+        // Not vacuous: the recorder must have seen the paths the operations
+        // above obviously walk, including ones no single proto field names.
+        THashSet<TString> read;
+        for (const auto& observed : collector.Parts) {
+            for (const auto& entry : observed.Footprint.ReadSet) {
+                read.insert(entry.AbsPath);
+            }
+        }
+        for (const TString& expected : {
+                TString("/MyRoot"),
+                TString("/MyRoot/a/b/Table"),
+                TString("/MyRoot/Indexed/byValue/indexImplTable"),
+                TString("/MyRoot/a/b/Table/Stream")})
+        {
+            if (!read.contains(expected)) {
+                TVector<TString> sorted(read.begin(), read.end());
+                Sort(sorted);
+                UNIT_FAIL("read set never mentions " << expected << ", has:\n  "
+                    << JoinSeq("\n  ", sorted));
+            }
+        }
+
+        RequireReadSetCoverage(collector.Parts);
     }
 
     // Two transactions in one request: every part carries the index of the

@@ -1285,6 +1285,27 @@ TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TS
     return footprint;
 }
 
+void TPathReadSetRecorder::OnPathResolved(const TPath& path, bool byPathId) {
+    TPathRead read;
+    read.AbsPath = path.PathString();
+    read.Resolved = path.IsResolved();
+    read.ByPathId = byPathId;
+    if (read.Resolved) {
+        read.PathId = path.Base()->PathId;
+    }
+    // One TPath::Resolve is a chain of Dive calls, each one segment longer than
+    // the last. Keep only the longest: the shorter prefixes carry no
+    // information the longest one does not.
+    if (!Sink.empty() && !byPathId && !Sink.back().ByPathId
+            && read.AbsPath.size() > Sink.back().AbsPath.size()
+            && read.AbsPath.StartsWith(Sink.back().AbsPath))
+    {
+        Sink.back() = std::move(read);
+        return;
+    }
+    Sink.push_back(std::move(read));
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Layer 3: rewriting a request.
 

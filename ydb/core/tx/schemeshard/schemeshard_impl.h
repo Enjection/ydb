@@ -101,6 +101,10 @@ struct TIndexBuildInfo;
 struct TSetColumnConstraintOperationInfo;
 struct TIndexBuildShardStatus;
 
+// Forward declaration for the TPath resolution observation seam
+// (schemeshard_path_footprint.h)
+class IPathResolutionObserver;
+
 class TSchemeShard
     : public TActor<TSchemeShard>
     , public NTabletFlatExecutor::TTabletExecutedFlat
@@ -279,6 +283,12 @@ public:
     TSubDomainsLinks SubDomainsLinks;
 
     TVector<TString> RootPathElements;
+
+    // Observation seam for TPath resolutions, armed only around a single
+    // sub-operation's Propose(). Null in production and null again the moment
+    // that Propose() returns; it is tested on the hot path of TPath::Dive, so
+    // it stays a raw pointer.
+    IPathResolutionObserver* PathResolutionObserver = nullptr;
 
     ui64 MaxIncompatibleChange = 0;
     THashMap<TPathId, TPathElement::TPtr> PathsById;
