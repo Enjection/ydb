@@ -1083,6 +1083,64 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
 
 namespace {
 
+// NKikimr::JoinPath always inserts the separator, so joining an empty leaf
+// yields a trailing slash. An empty leaf here means "the directory itself":
+// that is what a PathUnderWorkingDir/Absolute ref with no value stands for
+// (CreateFullBackupOp's working dir), and TPath::Child would not add a segment
+// for it either.
+TString JoinLeafUnder(TStringBuf dir, TStringBuf leaf) {
+    if (leaf.empty()) {
+        return TString(dir);
+    }
+    if (dir.empty()) {
+        return TString(leaf);
+    }
+    return TStringBuilder() << dir << '/' << leaf;
+}
+
+// The string form of ResolveRelativeOrAbsolute: a base that starts with a
+// slash is already absolute, anything else hangs off the working dir.
+TString JoinRelativeOrAbsolute(TStringBuf workingDir, TStringBuf value) {
+    if (value.StartsWith('/')) {
+        return TString(value);
+    }
+    return JoinLeafUnder(workingDir, value);
+}
+
+}  // namespace
+
+TString JoinPathRef(TStringBuf workingDir, const TPathRef& ref, const TVector<TString>& joined) {
+    switch (ref.Kind) {
+    case EPathRefKind::LeafUnderWorkingDir:
+        return JoinLeafUnder(workingDir, ref.Value);
+    case EPathRefKind::PathUnderWorkingDir:
+        return JoinRelativeOrAbsolute(workingDir, ref.Value);
+    case EPathRefKind::PathUnderWorkingDirSplit:
+        // TPath::Child(value, TSplitChildTag{}) dives the value one segment at
+        // a time under the working dir, so a leading slash does not escape it.
+        return JoinLeafUnder(workingDir,
+            ref.Value.StartsWith('/') ? ref.Value.substr(1) : ref.Value);
+    case EPathRefKind::Absolute:
+        // Propose() resolves these on their own; the working dir is never
+        // joined in. An empty value stands for the working dir itself.
+        return ref.Value.empty() ? TString(workingDir) : TString(ref.Value);
+    case EPathRefKind::LeafUnderSibling: {
+        const TString base = ref.BasePath.empty() && ref.AnchorIndex >= 0
+                && size_t(ref.AnchorIndex) < joined.size()
+            ? joined[ref.AnchorIndex]
+            : JoinRelativeOrAbsolute(workingDir, ref.BasePath);
+        return base.empty() ? TString() : JoinLeafUnder(base, ref.Value);
+    }
+    case EPathRefKind::ById:
+    case EPathRefKind::Implicit:
+        // A path id and a runtime-derived set both need schemeshard state.
+        return TString();
+    }
+    return TString();
+}
+
+namespace {
+
 // Mirrors what Propose() does for a relative-or-absolute path field.
 TPath ResolveRelativeOrAbsolute(TSchemeShard* ss, const TString& workingDir, const TString& value) {
     if (value.StartsWith('/')) {

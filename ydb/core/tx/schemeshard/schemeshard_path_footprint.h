@@ -465,6 +465,21 @@ struct TPathRefs {
 // nothing per string: every value is a view into tx or into the result itself.
 TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx);
 
+// One ref joined into a path string, out of the request alone. Mirrors the
+// kind switch of ResolvePathFootprint without TPath: no schemeshard state, no
+// canonization, no existence check, so the result is what the request asks for
+// rather than what the tree holds.
+//
+// `joined` holds the strings already produced for the refs before this one, in
+// extraction order. A LeafUnderSibling whose base is another entry rather than
+// a raw value (an anchor) reads its base from there, so pass the vector you are
+// filling and append in order.
+//
+// Empty for ById and for Implicit: neither can be answered without schemeshard
+// state. Empty too for a sibling leaf whose base is empty.
+TString JoinPathRef(TStringBuf workingDir, const TPathRef& ref,
+    const TVector<TString>& joined = {});
+
 // Every protobuf field ExtractPathRefs reads as a path, fully qualified, e.g.
 // "NKikimrSchemeOp.TMove.SrcPath". Generated from SCHEMESHARD_PATH_FIELDS,
 // deduplicated and sorted. Consumed by the descriptor-walk completeness test,
