@@ -225,88 +225,28 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 // Read-set coverage (research plan §8.4). Every path a part's Propose()
-// resolves must be something the footprint already accounts for: an entry, an
-// ancestor of an entry, something inside a declared Implicit subtree, the
-// working dir or one of its ancestors, or a path the part demonstrably wrote.
-// A new resolution site that reads a path none of those cover fails this test.
+// resolves must be something the footprint already accounts for. The predicate
+// and its allowlist live in ut_helpers/path_footprint_gate.h, because TTestEnv
+// installs the same gate for every SchemeShard suite by default; this suite
+// pins it directly on a run whose op mix it controls.
 
 class TReadSetCollector: public TFootprintCollector {
 public:
+    // Redundant while the default TTestEnv gate is installed in front (the
+    // schemeshard asks the gate, not this collector), but it keeps the test
+    // self-sufficient under YDB_SCHEMESHARD_READSET_GATE=0.
     bool WantReadSet() const override {
         return true;
     }
 };
 
-// Is `path` the same path as `prefix`, or a path under it? Segment-wise, so
-// "/MyRoot/Tab" is not under "/MyRoot/Table".
-bool IsAtOrUnderPath(TStringBuf path, TStringBuf prefix) {
-    if (path.empty() || prefix.empty()) {
-        return false;
-    }
-    if (prefix == "/") {
-        return true;
-    }
-    if (!path.StartsWith(prefix)) {
-        return false;
-    }
-    return path.size() == prefix.size() || path[prefix.size()] == '/';
-}
-
-bool IsReadCovered(const TPathFootprint& fp, const TPathRead& read) {
-    if (read.AbsPath.empty() || read.AbsPath == "/") {
-        // A walk that resolved nothing, or the root, says nothing about scope.
-        return true;
-    }
-    // 1. Something the part actually wrote or republished. Compared by path id
-    //    because the write set carries ids, not strings.
-    if (read.Resolved) {
-        if (Find(fp.WriteSet, read.PathId) != fp.WriteSet.end()
-                || Find(fp.Published, read.PathId) != fp.Published.end()) {
-            return true;
-        }
-    }
-    for (const auto& entry : fp.Entries) {
-        if (entry.AbsPath.empty()) {
-            continue;
-        }
-        // 2. An entry, or an ancestor of one: resolving /a/b/c walks /a and /a/b.
-        if (IsAtOrUnderPath(entry.AbsPath, read.AbsPath)) {
-            return true;
-        }
-        // 3. Inside a subtree the footprint declared runtime-derived.
-        if (entry.Ref.Kind == EPathRefKind::Implicit
-                && IsAtOrUnderPath(read.AbsPath, entry.AbsPath)) {
-            return true;
-        }
-    }
-    // 4. The working dir or an ancestor of it, which every check chain walks.
-    if (IsAtOrUnderPath(fp.WorkingDirCanon, read.AbsPath)) {
-        return true;
-    }
-    return false;
-}
-
-TVector<TString> ReadSetViolations(const TDeque<TObservedFootprint>& parts) {
+void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
     TVector<TString> violations;
     for (const auto& observed : parts) {
-        const TPathFootprint& fp = observed.Footprint;
-        for (const auto& read : fp.ReadSet) {
-            if (IsReadCovered(fp, read)) {
-                continue;
-            }
-            violations.push_back(TStringBuilder()
-                << NKikimrSchemeOp::EOperationType_Name(fp.PartOpType)
-                << " (workingDir " << fp.WorkingDirCanon << ")"
-                << " read " << read.AbsPath
-                << (read.Resolved ? " [resolved]" : " [unresolved]")
-                << (read.ByPathId ? " [byPathId]" : ""));
+        for (const TString& violation : ReadSetViolations(observed.Footprint)) {
+            violations.push_back(violation);
         }
     }
-    return violations;
-}
-
-void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
-    const TVector<TString> violations = ReadSetViolations(parts);
     if (violations.empty()) {
         return;
     }
@@ -1400,7 +1340,9 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         TVector<TString> log;
         TTestBasicRuntime runtime;
         runtime.SetLogBackend(new TLogRecordCollector(&log));
-        TTestEnv env(runtime);
+        // The default read-set gate is itself an observer, so it has to be off
+        // for this test to mean what its name says.
+        TTestEnv env(runtime, TTestEnvOptions().AssertReadSetCoverage(false));
         runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_NOTICE);
         ui64 txId = 100;
 

@@ -773,9 +773,22 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
 
     // Before BootSchemeShard, so the footprints of the bootstrap parts (the
     // system view directory and its ~20 CreateSysView parts) are observed too.
-    if (opts.PathFootprintObserver_) {
-        for (ui32 node = 0; node < runtime.GetNodeCount(); ++node) {
-            runtime.GetAppData(node).PathFootprintObserver = opts.PathFootprintObserver_;
+    //
+    // The read-set gate goes in front of whatever the test asked for: it
+    // checks each part footprint and then forwards the call unchanged, so a
+    // test with its own observer sees exactly what it saw before, plus the
+    // read sets it may not have asked for.
+    {
+        NKikimr::NSchemeShard::IPathFootprintObserver* observer = opts.PathFootprintObserver_;
+        if (opts.AssertReadSetCoverage_ && ReadSetGateEnabledInEnv()) {
+            ReadSetGate = MakeHolder<TReadSetGate>(observer);
+            observer = ReadSetGate.Get();
+        }
+        if (observer) {
+            ObservedRuntime = &runtime;
+            for (ui32 node = 0; node < runtime.GetNodeCount(); ++node) {
+                runtime.GetAppData(node).PathFootprintObserver = observer;
+            }
         }
     }
 
@@ -824,6 +837,45 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     CreateFakeMetering(runtime);
 
     SetSplitMergePartCountLimit(&runtime, -1);
+}
+
+NSchemeShardUT_Private::TTestEnv::~TTestEnv() {
+    // The runtime outlives every TTestEnv (tests declare it first), and it
+    // keeps draining actors after this point. Unpublish before the gate dies.
+    if (ObservedRuntime) {
+        for (ui32 node = 0; node < ObservedRuntime->GetNodeCount(); ++node) {
+            ObservedRuntime->GetAppData(node).PathFootprintObserver = nullptr;
+        }
+        ObservedRuntime = nullptr;
+    }
+
+    if (!ReadSetGate) {
+        return;
+    }
+    const TVector<TString> violations = ReadSetGate->Violations();
+    if (violations.empty()) {
+        return;
+    }
+    // UNIT_FAIL_NONFATAL records the failure and returns; UNIT_FAIL throws,
+    // and a throw out of a destructor terminates the whole test binary. Both
+    // need the unittest thread and a running test case, which is where a
+    // stack-allocated TTestEnv is destroyed; a TTestEnv that outlives its test
+    // case would abort inside RaiseError, so bail out instead.
+    if (!::NUnitTest::NPrivate::GetCurrentTest()) {
+        Cerr << "read set escapes the path footprint, outside a test case:" << Endl;
+        for (const TString& violation : violations) {
+            Cerr << "  " << violation << Endl;
+        }
+        return;
+    }
+    TStringBuilder dump;
+    for (const TString& violation : violations) {
+        dump << "\n  " << violation;
+    }
+    UNIT_FAIL_NONFATAL("read set escapes the path footprint:" << dump
+        << "\n  (a Propose() resolved a path its TPathFootprint does not cover;"
+           " fix the extractor, widen the predicate, or set"
+           " TTestEnvOptions().AssertReadSetCoverage(false))");
 }
 
 NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime &runtime, ui32 nchannels, bool enablePipeRetries,
