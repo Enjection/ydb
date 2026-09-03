@@ -111,6 +111,11 @@ bool TSchemeShard::ProcessOperationParts(
     }
 
     for (auto& part : parts) {
+        // Path footprint: computed from the part's own TModifyScheme *before*
+        // Propose() may mutate schemeshard state, recorded (and logged) after
+        // Propose() so that rejected parts are covered too.
+        auto footprint = ResolvePathFootprint(part->GetTransaction(), context.SS);
+
         TString errStr;
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
@@ -120,6 +125,18 @@ bool TSchemeShard::ProcessOperationParts(
         }
 
         Y_ABORT_UNLESS(response);
+
+        footprint.ProposeStatus = response->Record.GetStatus();
+        footprint.PartId = part->GetOperationId().GetSubTxId();
+        if (footprint.Entries.empty()) {
+            LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                FormatPathFootprintLine(footprint, nullptr, ui64(txId)));
+        }
+        for (const auto& entry : footprint.Entries) {
+            LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                FormatPathFootprintLine(footprint, &entry, ui64(txId)));
+        }
+        operation->PathFootprints.push_back(std::move(footprint));
 
         LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "IgniteOperation"

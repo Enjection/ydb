@@ -1,6 +1,7 @@
 #pragma once
 
 #include "schemeshard__operation_part.h"
+#include "schemeshard_path_footprint.h"
 #include "schemeshard_tx_infly.h"
 
 #include <util/generic/set.h>
@@ -13,6 +14,10 @@ struct TOperation: TSimpleRefCount<TOperation> {
     const TTxId TxId;
     ui32 PreparedParts = 0;
     TVector<ISubOperation::TPtr> Parts;
+
+    // Per-part "path footprint" recorded at Propose time (in-memory only,
+    // never persisted). Includes parts that were rejected.
+    TVector<TPathFootprint> PathFootprints;
 
     THashSet<TActorId> Subscribers;
     THashSet<TTxId> DependentOperations;
