@@ -928,3 +928,188 @@ ut_cdc_stream + ut_auditsettings + ut_move {"type": "summary", "exit_code": 0, "
 `ReadSetStaysInsideTheFootprint` (S7h). `ya` emits only aggregate summaries
 when every suite passes, so there is no per-suite line to paste for the three
 regression suites; the run covered all three in one invocation.
+
+## S7g — replay experiment as a test
+
+Commit `218487d1847` "test: replay relocated scheme requests into a second
+database and diff describe trees". New file
+`ydb/core/tx/schemeshard/ut_path_footprint/ut_replay.cpp` (~690 lines), added to
+the ut's `SRCS`. **No production code changed.** `ut_path_footprint`: **71 OK**
+(68 before, 3 added).
+
+### Setup: one runtime, two real subdomains
+
+The design note's G1/G2 recommendation held without modification. One
+`TTestBasicRuntime`, one `TTestEnv`, one schemeshard;
+`/MyRoot/dbA` and `/MyRoot/dir/dbB` created with `TestCreateSubDomain` and
+`StoragePools { Name: "pool-1" Kind: "pool-kind-1" }` — the pool `TTestEnv`
+registers by default (`DefaultPoolKinds`, `tablet_helpers.cpp:657`). Both
+subdomains name the same pool and the schemeshard accepts that. dbB is nested
+one directory deeper on purpose: relocation then *adds* a segment, so a
+suffix-only rewrite would be caught.
+
+`SendAndWait` is three lines over `AsyncSend` + `GrabEdgeEvent`, returning the
+status instead of asserting it — the experiment has to be able to *record*
+"accepted on A, rejected on B". The observer is a request-only
+`IPathFootprintObserver` (`OnPartFootprint` ignored): part footprints describe
+operations the schemeshard derived for itself, and replaying those would double
+apply, per §8.7.
+
+### The sequence and the per-request result
+
+Every request is hand-built in the test, applied to dbA, then a copy is put
+through `StripSourceLocalPreconditions` → `CanonicalizeToPaths` →
+`RelocatePaths({"/MyRoot/dbA", "/MyRoot/dir/dbB"})` driven by *the footprint the
+schemeshard resolved for that very request*, and sent to dbB.
+
+| # | request | status A | status B | changed | untransformable | skipped |
+|---|---|---|---|---|---|---|
+| 1 | `MkDir dir` | Accepted | Accepted | yes | - | - |
+| 2 | `MkDir a/b` | Accepted | Accepted | yes | - | - |
+| 3 | `CreateTable t` | Accepted | Accepted | yes | - | - |
+| 4 | `AlterTable t` add column | Accepted | Accepted | yes | - | - |
+| 5 | `CreateIndexedTable it` (+`by_value`) | Accepted | Accepted | yes | - | - |
+| 6 | `CreateCdcStream Stream` on `t` | Accepted | Accepted | yes | - | - |
+| 7 | `CreateTable copy CopyFromTable <db>/dir/t` | Accepted | Accepted | yes | - | - |
+| 8 | `MoveTable copy -> moved` | Accepted | Accepted | yes | - | - |
+| 9 | `DropTable moved` by name | Accepted | Accepted | yes | - | - |
+| 10 | `CreateTable tmp` | Accepted | Accepted | yes | - | - |
+| 11 | `DropTable tmp` by id | Accepted | Accepted | yes | - | `Drop.Id` |
+
+11/11 accepted on both sides. Nothing untransformable. The single `Skipped`
+entry is not a failure: `RelocatePaths` walks the footprint of the *original*
+request, so it still sees the `ById` ref that `CanonicalizeToPaths` has just
+removed from the proto, and reports it. The test asserts exactly that shape
+(`Drop.Id` for the by-id step, empty for the other ten) rather than asserting
+`Skipped` empty.
+
+`CopyFromTable` from a table that already carries a cdc stream (step 7 after
+step 6, as G7 prescribed) was accepted on both sides and produced identical
+trees — the anticipated copy-semantics divergence did not materialise.
+
+### Finding: the two rewriters do not compose over one footprint
+
+**This cost a build cycle and is the one non-obvious result.** The first run
+failed on step 11 with `StatusPathDoesNotExist` on B. Cause:
+
+- `CanonicalizeToPaths` turns `Drop.Id` into `WorkingDir` + `Drop.Name`,
+  deriving the working dir from the entry's `AbsPath`;
+- `RelocatePaths` rewrites the working dir from `TPathFootprint::WorkingDirCanon`
+  (`schemeshard_path_footprint.cpp:1651`), which still describes the request
+  **as submitted**;
+- a by-id request typically carries no `WorkingDir` at all, so `WorkingDirCanon`
+  is not under the old database, the rewrite is skipped, and the working dir
+  canonicalization just invented — pointing at **dbA** — survives into the
+  replayed request. The schemeshard then re-drops in the source database.
+
+The pure S7e test `RelocateSkipsAByIdRequest` does not hit this because it
+re-runs `FakeResolve` on the canonicalized request before relocating. That
+re-resolution is a real requirement of the API, not test scaffolding.
+
+Two ways out for a consumer, both now pinned by
+`CanonicalizeThenRelocateNeedsTheWorkingDir` (propose-level, two tables, one
+probe each):
+
+1. re-resolve the footprint of the canonicalized request on the source
+   schemeshard before relocating (correct, costs a second `ResolvePathFootprint`);
+2. make sure the by-id request carries a working dir under the database being
+   moved (what the experiment does; a by-id `Propose()` ignores it, so setting
+   it is free).
+
+Classification against §4 of `thoughts-replay-completeness.md`: this is not one
+of the seven classes. It is a **defect in the layer-3 API contract**, and the
+cheapest fix is a doc line on `RelocatePaths` plus, optionally, having
+`CanonicalizeToPaths` return the working dir it wrote so a caller can patch the
+footprint. Recommend adding it to §9 as S7m.
+
+### Masking and the tree diff
+
+No recursive-describe helper exists in the tree, as the notes said, so the test
+has one (~25 lines) using `TDescribeOptionsBuilder().SetShowPrivateTable(true)`.
+Two corrections to G5/G6 found empirically:
+
+- **`GetChildren()` is empty for a table.** A table's describe sets
+  `ChildrenExist: true` but returns no `Children`; its indexes and cdc streams
+  are only listed inside `TTableDescription.TableIndexes` / `.CdcStreams`. Walking
+  `Children` alone visited **5** paths and missed every derived path the
+  experiment exists to check. `ChildNames()` unions the three sources.
+- Children are sorted by name before recursing *and* the `Children` repeated
+  field is sorted in place, because `TPathElement` insertion order differs
+  between the two trees.
+
+Masking is one recursive reflection pass over `google::protobuf::Message` keyed
+on `field->full_name()` (~50 lines), plus a prefix rewrite of every `TYPE_STRING`
+value from `<database path>` to `<db>` (so `TTableDescription.Path`,
+`TEvDescribeSchemeResult.Path` and friends are normalised rather than dropped).
+`MaskedFieldsExist` walks the descriptor graph from `TEvDescribeSchemeResult` and
+fails if any masked key is unreachable, so a renamed field cannot silently stop
+being masked.
+
+Masked (all target-decided, none named by any request):
+
+- `TEvDescribeSchemeResult`: `PathId`, `PathOwnerId`, `DEPRECATED_PathOwner`,
+  `LastExistedPrefixPathId`;
+- `TDirEntry`: `PathId`, `SchemeshardId`, `CreateTxId`, `CreateStep`,
+  `ParentPathId`, `PathVersion`, `Version`, `ACL`, `EffectiveACL`
+  (`EffectiveACL` inherits from the domain, so it differs by construction);
+- `TPathDescription`: `TablePartitions`, `TableStats`, `TabletMetrics`,
+  `TablePartitionStats`, `TablePartitionMetrics`, `AbandonedTenantsSchemeShards`,
+  `BackupProgress`, `LastBackupResult`, `DomainDescription`;
+- `TTableDescription`: `Id_Deprecated`, `PathId`, `TableSchemaVersion`,
+  `CoordinatedSchemaVersion`, `PartitionConfig`, `UniformPartitionsCount`,
+  `SplitBoundary`, `PartitionRangeBegin/End`;
+- `TIndexDescription`: `LocalPathId`, `PathOwnerId`, `SchemaVersion`, `DataSize`;
+  `TCdcStreamDescription`: `PathId`, `SchemaVersion`;
+  `TSequenceDescription.PathId`;
+- `TPersQueueGroupDescription`: `PathId`, `Partitions`, `BalancerTabletID`,
+  `AlterVersion`, `NextPartitionId`, `PQTabletConfig` (the topic config carries
+  the owning path ids, the database path and the per-partition tablet map).
+
+Plus one explicit exception: the **root node's `Self.Name`** is cleared. The two
+databases are deliberately named differently and the replay is not supposed to
+reproduce the database's own name.
+
+Deviation from G6: `TTableDescription.Path` and `KeyColumnIds` are **not**
+masked. `Path` is normalised by the prefix rewrite instead, and `KeyColumnIds`
+turned out identical in both trees, so it stays as a real assertion.
+
+### Result
+
+After the walk fix, the two trees are **byte-identical under masking** at all
+ten paths:
+
+```
+<db>
+<db>/a
+<db>/a/b
+<db>/dir
+<db>/dir/it
+<db>/dir/it/by_value
+<db>/dir/it/by_value/indexImplTable
+<db>/dir/t
+<db>/dir/t/Stream
+<db>/dir/t/Stream/streamImpl
+```
+
+The path list is asserted verbatim, so a future change that stops reaching
+`indexImplTable` or `streamImpl` fails rather than silently shrinking the diff.
+
+**Zero divergences to bucket into the §4 classes.** That is a real but narrow
+result: the sequence was chosen (per §8.7 and G7) to avoid every known
+non-determinism — no `BackupBackupCollection` (`TargetDir` stamped with `Now()`),
+no continuous backup (timestamped stream names), no index build (data-dependent),
+no split/merge (internal), no ACLs, no principals, no data. What the experiment
+establishes is the *positive* half of the §8.7 claim: for requests outside those
+classes, canonicalize + relocate + replay does reproduce the same logical tree,
+including the derived children (index impl table, cdc stream PQ group) that no
+request ever names. The §4 classes remain untested by construction, and their
+sizes are still unquantified.
+
+### Follow-ups
+
+- **S7m (new)**: fix the canonicalize→relocate composition, either by
+  documenting the re-resolution requirement on `RelocatePaths` or by having
+  `CanonicalizeToPaths` report the working dir it wrote.
+- Extending the experiment into the §4 classes needs a completion filter (record
+  at Propose, publish at Done) first; §8.7's "accepted ≠ committed" is not
+  exercised here because every request in the sequence completes.
