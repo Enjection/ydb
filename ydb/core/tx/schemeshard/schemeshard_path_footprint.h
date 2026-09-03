@@ -7,6 +7,7 @@
 #include <ydb/core/tx/schemeshard/schemeshard_identificators.h>
 
 #include <util/generic/string.h>
+#include <util/generic/strbuf.h>
 #include <util/generic/vector.h>
 
 namespace NKikimr::NSchemeShard {
@@ -67,6 +68,13 @@ struct TPathRef {
 
 // Layer 1: pure, state-free extraction. Covers every EOperationType.
 TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx);
+
+// Every protobuf field ExtractPathRefs reads as a path, fully qualified, e.g.
+// "NKikimrSchemeOp.TMove.SrcPath". Hand-maintained beside the ExtractPathRefs
+// switch: the two must always move together. Consumed by the descriptor-walk
+// completeness test, which fails when a path-like field of TModifyScheme is
+// neither listed here nor explicitly classified as not-a-path.
+const TVector<TStringBuf>& KnownPathFieldNames();
 
 struct TPathFootprintEntry {
     TPathRef Ref;

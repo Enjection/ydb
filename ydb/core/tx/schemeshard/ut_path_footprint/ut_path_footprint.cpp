@@ -1,6 +1,8 @@
 #include <ydb/core/tx/schemeshard/schemeshard_path_footprint.h>
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
 
+#include <google/protobuf/descriptor.h>
+
 #include <library/cpp/logger/backend.h>
 #include <library/cpp/logger/record.h>
 
@@ -759,6 +761,28 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
             "AlterContinuousBackup.<incrementalBackupTable>"}));
     }
 
+    Y_UNIT_TEST(CreateContinuousBackupStreamName) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateContinuousBackup, "/MyRoot");
+        tx.MutableCreateContinuousBackup()->SetTableName("Table");
+        tx.MutableCreateContinuousBackup()->MutableContinuousBackupDescription()
+            ->SetStreamName("stream");
+        auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "CreateContinuousBackup.TableName",
+            "CreateContinuousBackup.ContinuousBackupDescription.StreamName",
+            "CreateContinuousBackup.<cdcStream>"}));
+        CheckRef(refs[1], "CreateContinuousBackup.ContinuousBackupDescription.StreamName",
+            "stream", EPathRefKind::LeafUnderSibling, EPathRefRole::Target);
+        UNIT_ASSERT_VALUES_EQUAL(refs[1].AnchorIndex, 0);
+
+        // Without the field the stream name is generated from the current time,
+        // so only the Implicit marker stands for it.
+        tx.MutableCreateContinuousBackup()->MutableContinuousBackupDescription()
+            ->ClearStreamName();
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(ExtractPathRefs(tx)), (TVector<TString>{
+            "CreateContinuousBackup.TableName", "CreateContinuousBackup.<cdcStream>"}));
+    }
+
     Y_UNIT_TEST(EveryOperationTypeIsCovered) {
         const THashSet<TString> noPathOps = {
             "ESchemeOp_DEPRECATED_35",
@@ -1167,5 +1191,282 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
         UNIT_ASSERT_VALUES_EQUAL(table.Get("proposeStatus"), "StatusPathDoesNotExist");
         // Best effort even though nothing under the working dir resolves.
         UNIT_ASSERT_VALUES_EQUAL(table.Get("relToDb"), "NoSuchDir/Table");
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Descriptor-walk completeness (research plan §8.4). Turns "the extractor knows
+// every path field" from a snapshot into an invariant: a new path-like string
+// field anywhere under TModifyScheme fails this test until it is either read by
+// the extractor or explicitly classified here.
+
+namespace {
+
+// Substrings that make a string field look like it could carry a path.
+// Case-sensitive, matched against the protobuf field name.
+const TVector<TStringBuf> PathLikeSubstrings = {
+    "Path", "Name", "Dir", "Table", "From", "Src", "Dst", "Prefix",
+};
+
+bool LooksLikeAPathField(const google::protobuf::FieldDescriptor* field) {
+    if (field->type() != google::protobuf::FieldDescriptor::TYPE_STRING) {
+        return false;  // bytes, ints and messages are out of scope
+    }
+    const TStringBuf name(field->name());
+    for (const auto& needle : PathLikeSubstrings) {
+        if (name.find(needle) != TStringBuf::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Packages that are walked into but never classified: they describe transport
+// types, actor ids and public-API values, none of which SchemeShard resolves as
+// a path in its own tree. Anything a SchemeShard operation resolves lives in
+// NKikimrSchemeOp or in one of the component packages it embeds (NKikimrPQ,
+// NKikimrSubDomains, NKikimrReplication, NKikimrIndexBuilder, ...), all of
+// which are classified below.
+bool IsSkippedPackage(TStringBuf package) {
+    static const THashSet<TString> skipped = {
+        "Ydb",
+        "Ydb.Table",
+        "Ydb.Topic",
+        "NKikimrProto",
+        "NActorsProto",
+        "google.protobuf",
+        "NYql",
+        "NYql.NProto",
+    };
+    if (skipped.contains(TString(package))) {
+        return true;
+    }
+    // Any Ydb.* public API subpackage.
+    return package.StartsWith("Ydb.");
+}
+
+void CollectPathLikeFields(const google::protobuf::Descriptor* descriptor,
+        THashSet<TString>& visited, TVector<TString>& out)
+{
+    if (!descriptor || !visited.insert(TString(descriptor->full_name())).second) {
+        return;
+    }
+    const bool classify = !IsSkippedPackage(descriptor->file()->package());
+    for (int i = 0; i < descriptor->field_count(); ++i) {
+        const auto* field = descriptor->field(i);
+        if (classify && LooksLikeAPathField(field)) {
+            out.push_back(TString(field->full_name()));
+        }
+        if (field->type() == google::protobuf::FieldDescriptor::TYPE_MESSAGE
+                || field->type() == google::protobuf::FieldDescriptor::TYPE_GROUP) {
+            // Map fields are ordinary repeated messages here: recursing into
+            // the synthesized entry type reaches the map's value message.
+            CollectPathLikeFields(field->message_type(), visited, out);
+        }
+    }
+}
+
+TString Dump(const TVector<TString>& names) {
+    TStringBuilder out;
+    for (const auto& name : names) {
+        out << "\n        \"" << name << "\",";
+    }
+    return out;
+}
+
+}  // namespace
+
+Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintProtoCoverage) {
+
+    // The base path of every request. It is reported as TPathFootprint::
+    // WorkingDir and WorkingDirRelToDb, not as an entry in the ref list.
+    const THashSet<TString> ReportedOutsideTheRefList = {
+        "NKikimrSchemeOp.TModifyScheme.WorkingDir",
+    };
+
+    // Path-like string fields under TModifyScheme that are not paths in this
+    // scheme tree. Each was classified by reading the field's use; the grouping
+    // comment says why.
+    const THashSet<TString> NotAPath = {
+        // Column, family and key names inside a table or column-table schema.
+        "NKikimrIndexBuilder.TColumnBuildSetting.ColumnName",
+        "NKikimrPQ.TPQTabletConfig.TKeyComponentSchema.Name",
+        "NKikimrSchemeOp.TColumnDataLifeCycle.TTtl.ColumnName",
+        "NKikimrSchemeOp.TColumnDescription.FamilyName",
+        "NKikimrSchemeOp.TColumnDescription.Name",
+        "NKikimrSchemeOp.TColumnTableSchema.KeyColumnNames",
+        "NKikimrSchemeOp.TDefaultExpressionColumnDescription.DependencyColumnNames",
+        "NKikimrSchemeOp.TFamilyDescription.Name",
+        "NKikimrSchemeOp.TIndexAlteringConfig.DataColumnNames",
+        "NKikimrSchemeOp.TIndexAlteringConfig.KeyColumnNames",
+        "NKikimrSchemeOp.TIndexCreationConfig.DataColumnNames",
+        "NKikimrSchemeOp.TIndexCreationConfig.KeyColumnNames",
+        "NKikimrSchemeOp.TIndexDataExtractor.TSubColumn.SubColumnName",
+        "NKikimrSchemeOp.TIndexDescription.DataColumnNames",
+        "NKikimrSchemeOp.TIndexDescription.KeyColumnNames",
+        "NKikimrSchemeOp.TMultiColumnStatisticsDescription.ColumnNames",
+        "NKikimrSchemeOp.TOlapColumnDescription.ColumnFamilyName",
+        "NKikimrSchemeOp.TOlapColumnDescription.Name",
+        "NKikimrSchemeOp.TOlapColumnDiff.ColumnFamilyName",
+        "NKikimrSchemeOp.TOlapColumnDiff.Name",
+        "NKikimrSchemeOp.TRequestedBloomFilter.ColumnNames",
+        "NKikimrSchemeOp.TRequestedBloomNGrammFilter.ColumnName",
+        "NKikimrSchemeOp.TRequestedCountMinSketch.ColumnNames",
+        "NKikimrSchemeOp.TRequestedMaxIndex.ColumnName",
+        "NKikimrSchemeOp.TRequestedMinMaxIndex.ColumnName",
+        "NKikimrSchemeOp.TTTLSettings.TEnabled.ColumnName",
+        "NKikimrSchemeOp.TTableDescription.KeyColumnNames",
+        // Objects named inside a column table (presets, olap indexes, statistics).
+        // They live in the table's schema, not as children in the scheme tree.
+        "NKikimrSchemeOp.TAlterColumnTable.AlterSchemaPresetName",
+        "NKikimrSchemeOp.TAlterColumnTable.RESERVED_AlterTtlSettingsPresetName",
+        "NKikimrSchemeOp.TAlterColumnTableSchemaPreset.Name",
+        "NKikimrSchemeOp.TAlterColumnTableTtlSettingsPreset.Name",
+        "NKikimrSchemeOp.TColumnTableDescription.SchemaPresetName",
+        "NKikimrSchemeOp.TColumnTableSchemaPreset.Name",
+        "NKikimrSchemeOp.TColumnTableTtlSettingsPreset.Name",
+        "NKikimrSchemeOp.TIndexDescription.Name",
+        "NKikimrSchemeOp.TMultiColumnStatisticsDescription.Name",
+        "NKikimrSchemeOp.TOlapIndexDescription.Name",
+        "NKikimrSchemeOp.TOlapIndexRequested.Name",
+        "NKikimrSchemeOp.TOlapMoveIndex.DestinationName",
+        "NKikimrSchemeOp.TOlapMoveIndex.SourceName",
+        "NKikimrSchemeOp.TRemoveColumnTableSchemaPreset.Name",
+        "NKikimrSchemeOp.TRemoveColumnTableTtlSettingsPreset.Name",
+        // Registered C++ class, policy and logic names looked up in a factory.
+        "NKikimrArrowAccessorProto.TConstructor.ClassName",
+        "NKikimrArrowAccessorProto.TDataExtractor.ClassName",
+        "NKikimrArrowAccessorProto.TRequestedConstructor.ClassName",
+        "NKikimrSchemeOp.TColumnTableRequestedOptions.ScanReaderPolicyName",
+        "NKikimrSchemeOp.TColumnTableSchemeOptions.ScanReaderPolicyName",
+        "NKikimrSchemeOp.TCompactionLevelConstructorContainer.ClassName",
+        "NKikimrSchemeOp.TCompactionLevelConstructorContainer.DefaultSelectorName",
+        "NKikimrSchemeOp.TCompactionPlannerConstructorContainer.ClassName",
+        "NKikimrSchemeOp.TCompactionPlannerConstructorContainer.TSOptimizer.LogicName",
+        "NKikimrSchemeOp.TCompactionSelectorConstructorContainer.ClassName",
+        "NKikimrSchemeOp.TCompactionSelectorConstructorContainer.Name",
+        "NKikimrSchemeOp.TIndexDataExtractor.ClassName",
+        "NKikimrSchemeOp.TMetadataManagerConstructorContainer.ClassName",
+        "NKikimrSchemeOp.TOlapColumn.TSerializer.ClassName",
+        "NKikimrSchemeOp.TOlapIndexDescription.ClassName",
+        "NKikimrSchemeOp.TOlapIndexRequested.ClassName",
+        "NKikimrSchemeOp.TPartitionConfig.NamedCompactionPolicy",
+        "NKikimrSchemeOp.TSkipIndexBitSetStorage.ClassName",
+        // Storage pools and channel profiles: BS group selectors, not scheme paths.
+        "NKikimrBlobDepot.TBlobDepotConfig.Name",
+        "NKikimrBlobDepot.TChannelProfile.StoragePoolName",
+        "NKikimrBlockStore.TVolumeConfig.StoragePoolName",
+        "NKikimrStoragePool.TChannelBind.StoragePoolName",
+        "NKikimrStoragePool.TStoragePool.Name",
+        // Credentials and secret references. A secret is resolved by the secrets
+        // subsystem by name, not as a TPath by any of these operations.
+        "NKikimrReplication.TOAuthToken.TokenSecretName",
+        "NKikimrReplication.TStaticCredentials.PasswordSecretName",
+        "NKikimrSchemeOp.TAws.AwsAccessKeyIdSecretName",
+        "NKikimrSchemeOp.TAws.AwsSecretAccessKeySecretName",
+        "NKikimrSchemeOp.TBasic.PasswordSecretName",
+        "NKikimrSchemeOp.TIamImpersonate.InitialTokenSecretName",
+        "NKikimrSchemeOp.TMdbBasic.PasswordSecretName",
+        "NKikimrSchemeOp.TMdbBasic.ServiceAccountSecretName",
+        "NKikimrSchemeOp.TSecretSchemaOp.ValueParamName",
+        "NKikimrSchemeOp.TServiceAccountAuth.SecretName",
+        "NKikimrSchemeOp.TToken.TokenSecretName",
+        // Locations outside this scheme tree: the remote replication cluster, a
+        // filesystem or YT export target, an SQS queue.
+        "NKikimrPQ.TPQTabletConfig.SqsAccountName",
+        "NKikimrPQ.TPQTabletConfig.SqsQueueName",
+        "NKikimrPQ.TPQTabletConfig.TConsumer.Name",
+        "NKikimrReplication.TReplicationConfig.TTargetSpecific.TTarget.SrcPath",
+        "NKikimrReplication.TReplicationConfig.TTargetSpecific.TTarget.SrcStreamName",
+        "NKikimrReplication.TReplicationConfig.TTransferSpecific.TTarget.ConsumerName",
+        "NKikimrReplication.TReplicationConfig.TTransferSpecific.TTarget.DstPathLambda",
+        "NKikimrReplication.TReplicationConfig.TTransferSpecific.TTarget.SrcPath",
+        "NKikimrSchemeOp.TFSSettings.BasePath",
+        "NKikimrSchemeOp.TFSSettings.Path",
+        "NKikimrSchemeOp.TYTSettings.TablePattern",
+        // Filled in by SchemeShard from an already resolved path, or returned by
+        // Describe. Never read from the request, so never a path to extract.
+        "NKikimrPQ.TPQTabletConfig.TopicName",
+        "NKikimrPQ.TPQTabletConfig.TopicPath",
+        "NKikimrPQ.TPQTabletConfig.YdbDatabasePath",
+        "NKikimrReplication.TReplicationLocationConfig.Path",
+        "NKikimrSchemeOp.TDirEntry.Name",
+        "NKikimrSchemeOp.TExternalTableReferences.TReference.Path",
+        "NKikimrSchemeOp.TSecretDescription.Name",
+        "NKikimrSchemeOp.TSolomonVolumeDescription.Name",
+        "NKikimrSchemeOp.TTableDescription.Path",
+        "NKikimrSchemeOp.TTestShardSetDescription.Name",
+        // Login objects and a character set: neither is addressed by path.
+        "NKikimrSchemeOp.TLoginRenameGroup.NewName",
+        "NKikimrSubDomains.TSchemeLimits.ExtraPathSymbolsAllowed",
+        "NLoginProto.TSid.Name",
+    };
+
+    // Real paths, or components of one, that no Propose() the extractor covers
+    // resolves, so it deliberately reports nothing for them. Tolerated, but
+    // printed on every run so the list stays under review.
+    const THashSet<TString> Unclassified = {
+        // Path components joined into the derived parts' own path fields, which the
+        // footprint does extract; the component itself is never resolved alone.
+        "NKikimrSchemeOp.TBackupBackupCollection.TargetDir",
+        "NKikimrSchemeOp.TBackupCollectionDescription.Prefix",
+        // Absolute paths that only later execution states resolve. The hook runs at
+        // Propose, so they are outside the footprint by construction (plan §8.2.4).
+        "NKikimrReplication.TReplicationConfig.TTargetEverything.DstPrefix",
+        "NKikimrSchemeOp.TIncrementalRestoreFinalize.BackupTablePaths",
+        "NKikimrSchemeOp.TIncrementalRestoreFinalize.TargetTablePaths",
+        // TModifyScheme submessages that no EOperationType dispatches to, so no
+        // Propose reads them at all.
+        "NKikimrSchemeOp.TPersQueueGroupAllocate.Name",
+        "NKikimrSchemeOp.TPersQueueGroupDeallocate.Name",
+    };
+
+    Y_UNIT_TEST(EveryPathLikeFieldIsClassified) {
+        THashSet<TString> visited;
+        TVector<TString> collected;
+        CollectPathLikeFields(NKikimrSchemeOp::TModifyScheme::descriptor(), visited, collected);
+        Sort(collected);
+        UNIT_ASSERT_C(collected.size() > 100,
+            "the descriptor walk found only " << collected.size() << " path-like fields");
+
+        const THashSet<TString> known(KnownPathFieldNames().begin(), KnownPathFieldNames().end());
+        const THashSet<TString> reachable(collected.begin(), collected.end());
+
+        // A typo or a renamed proto field would silently shrink the known set.
+        TVector<TString> stale;
+        for (const auto& name : known) {
+            if (!reachable.contains(name)) {
+                stale.push_back(name);
+            }
+        }
+        Sort(stale);
+        UNIT_ASSERT_C(stale.empty(),
+            "KnownPathFieldNames() lists fields the descriptor walk cannot reach"
+            " (renamed, misspelled, or no longer path-like):" << Dump(stale));
+
+        TVector<TString> unclassified;
+        TVector<TString> uncovered;
+        for (const auto& name : collected) {
+            if (known.contains(name) || NotAPath.contains(name)
+                    || ReportedOutsideTheRefList.contains(name)) {
+                continue;
+            }
+            if (Unclassified.contains(name)) {
+                unclassified.push_back(name);
+                continue;
+            }
+            uncovered.push_back(name);
+        }
+
+        if (!unclassified.empty()) {
+            Cerr << "PathFootprint: " << unclassified.size()
+                 << " tolerated unclassified path-like fields:" << Dump(unclassified) << Endl;
+        }
+
+        UNIT_ASSERT_C(uncovered.empty(), "" << uncovered.size()
+            << " path-like field(s) of TModifyScheme are neither read by"
+            " ExtractPathRefs nor classified in this test. Read each field's use,"
+            " then add it to the extractor, to NotAPath, or to Unclassified:"
+            << Dump(uncovered));
     }
 }

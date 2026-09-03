@@ -756,10 +756,21 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
     case NKikimrSchemeOp::ESchemeOpAlterView:
         // Unimplemented in the tree; no Propose() exists.
         break;
-    case NKikimrSchemeOp::ESchemeOpCreateContinuousBackup:
-        out.Leaf("CreateContinuousBackup.TableName", tx.GetCreateContinuousBackup().GetTableName());
-        out.Implicit("CreateContinuousBackup.<cdcStream>", out.Last());
+    case NKikimrSchemeOp::ESchemeOpCreateContinuousBackup: {
+        const auto& op = tx.GetCreateContinuousBackup();
+        out.Leaf("CreateContinuousBackup.TableName", op.GetTableName());
+        const int cbTableIndex = out.Last();
+        // NCdc::DoNewStreamPathChecks resolves tablePath.Child(streamName)
+        // (schemeshard__operation_create_continuous_backup.cpp:35). When the
+        // field is absent the name is generated from the current time, so
+        // there is nothing to report and the Implicit marker below stands in.
+        if (op.GetContinuousBackupDescription().HasStreamName()) {
+            out.SiblingOf("CreateContinuousBackup.ContinuousBackupDescription.StreamName",
+                op.GetContinuousBackupDescription().GetStreamName(), cbTableIndex);
+        }
+        out.Implicit("CreateContinuousBackup.<cdcStream>", cbTableIndex);
         break;
+    }
     case NKikimrSchemeOp::ESchemeOpAlterContinuousBackup: {
         const auto& op = tx.GetAlterContinuousBackup();
         // :86 resolves the table with Child(TableName, TSplitChildTag{}), so a
@@ -896,6 +907,104 @@ TVector<TPathRef> ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
     }
 
     return result;
+}
+
+// Keep this in sync with the switch above: every protobuf field it reads as a
+// path must appear here, fully qualified, and nothing else. The descriptor-walk
+// test in ut_path_footprint uses it to decide whether a path-like field of
+// TModifyScheme is covered, so a new case without a new entry fails that test.
+// Id-valued fields (TDrop.Id, TTableDescription.PathId, ...) are not listed:
+// the walk only classifies string fields.
+const TVector<TStringBuf>& KnownPathFieldNames() {
+    static const TVector<TStringBuf> names = {
+        "NKikimrSchemeOp.TAlterCdcStream.StreamName",
+        "NKikimrSchemeOp.TAlterCdcStream.TableName",
+        "NKikimrSchemeOp.TAlterColumnStore.Name",
+        "NKikimrSchemeOp.TAlterColumnTable.Name",
+        "NKikimrSchemeOp.TAlterContinuousBackup.TTakeIncrementalBackup.DstPath",
+        "NKikimrSchemeOp.TAlterContinuousBackup.TTakeIncrementalBackup.DstStreamPath",
+        "NKikimrSchemeOp.TAlterContinuousBackup.TableName",
+        "NKikimrSchemeOp.TAlterSolomonVolume.Name",
+        "NKikimrSchemeOp.TAlterUserAttributes.PathName",
+        "NKikimrSchemeOp.TBackupBackupCollection.Name",
+        "NKikimrSchemeOp.TBackupCollectionDescription.Name",
+        "NKikimrSchemeOp.TBackupCollectionDescription.TBackupEntry.Path",
+        "NKikimrSchemeOp.TBackupTask.TableName",
+        "NKikimrSchemeOp.TBlobDepotDescription.Name",
+        "NKikimrSchemeOp.TBlockStoreAssignOp.Name",
+        "NKikimrSchemeOp.TBlockStoreVolumeDescription.Name",
+        "NKikimrSchemeOp.TCdcStreamDescription.Name",
+        "NKikimrSchemeOp.TChangePathState.Path",
+        "NKikimrSchemeOp.TColumnDescription.DefaultFromSequence",
+        "NKikimrSchemeOp.TColumnStoreDescription.Name",
+        "NKikimrSchemeOp.TColumnTableDescription.CopyFromTable",
+        "NKikimrSchemeOp.TColumnTableDescription.Name",
+        "NKikimrSchemeOp.TContinuousBackupDescription.StreamName",
+        "NKikimrSchemeOp.TCopySequence.CopyFrom",
+        "NKikimrSchemeOp.TCopyTableConfig.DstPath",
+        "NKikimrSchemeOp.TCopyTableConfig.SrcPath",
+        "NKikimrSchemeOp.TCreateCdcStream.TableName",
+        "NKikimrSchemeOp.TCreateContinuousBackup.TableName",
+        "NKikimrSchemeOp.TCreateSolomonVolume.Name",
+        "NKikimrSchemeOp.TCreateTestShardSet.Name",
+        "NKikimrSchemeOp.TDrop.Name",
+        "NKikimrSchemeOp.TDropCdcStream.StreamName",
+        "NKikimrSchemeOp.TDropCdcStream.TableName",
+        "NKikimrSchemeOp.TDropContinuousBackup.TableName",
+        "NKikimrSchemeOp.TDropIndex.IndexName",
+        "NKikimrSchemeOp.TDropIndex.TableName",
+        "NKikimrSchemeOp.TExternalDataSourceDescription.Name",
+        "NKikimrSchemeOp.TExternalTableDescription.DataSourcePath",
+        "NKikimrSchemeOp.TExternalTableDescription.Name",
+        "NKikimrSchemeOp.TFileStoreDescription.Name",
+        "NKikimrSchemeOp.TFinalizeBuildIndexMainTable.TableName",
+        "NKikimrSchemeOp.TIncrementalRestoreLockTargets.DstPaths",
+        "NKikimrSchemeOp.TIncrementalRestoreLockTargets.SrcPaths",
+        "NKikimrSchemeOp.TIndexAlteringConfig.Name",
+        "NKikimrSchemeOp.TIndexBuildConfig.Table",
+        "NKikimrSchemeOp.TIndexBuildControl.IndexName",
+        "NKikimrSchemeOp.TIndexBuildControl.TablePath",
+        "NKikimrSchemeOp.TIndexCreationConfig.Name",
+        "NKikimrSchemeOp.TInitiateBuildIndexMainTable.TableName",
+        "NKikimrSchemeOp.TKesusDescription.Name",
+        "NKikimrSchemeOp.TLockConfig.Name",
+        "NKikimrSchemeOp.TModifyACL.Name",
+        "NKikimrSchemeOp.TMkDir.Name",
+        "NKikimrSchemeOp.TMove.DstPath",
+        "NKikimrSchemeOp.TMove.SrcPath",
+        "NKikimrSchemeOp.TMoveIndex.DstPath",
+        "NKikimrSchemeOp.TMoveIndex.SrcPath",
+        "NKikimrSchemeOp.TMoveIndex.TablePath",
+        "NKikimrSchemeOp.TPersQueueGroupDescription.Name",
+        "NKikimrSchemeOp.TPrepareIndexValidation.TableName",
+        "NKikimrSchemeOp.TReplicationDescription.Name",
+        "NKikimrSchemeOp.TReplicationDescription.TAlterTransfer.DirectoryPath",
+        "NKikimrSchemeOp.TResourcePoolDescription.Name",
+        "NKikimrSchemeOp.TRestoreMultipleIncrementalBackups.DstTablePath",
+        "NKikimrSchemeOp.TRestoreMultipleIncrementalBackups.SrcTablePaths",
+        "NKikimrSchemeOp.TRestoreTask.TableName",
+        "NKikimrSchemeOp.TRotateCdcStream.OldStreamName",
+        "NKikimrSchemeOp.TRotateCdcStream.TableName",
+        "NKikimrSchemeOp.TRtmrVolumeDescription.Name",
+        "NKikimrSchemeOp.TSecretSchemaOp.Name",
+        "NKikimrSchemeOp.TSequenceDescription.Name",
+        "NKikimrSchemeOp.TSplitMergeTablePartitions.TablePath",
+        "NKikimrSchemeOp.TStreamingQueryDescription.Name",
+        "NKikimrSchemeOp.TSysViewDescription.Name",
+        "NKikimrSchemeOp.TTableDescription.CopyFromTable",
+        "NKikimrSchemeOp.TTableDescription.Name",
+        "NKikimrSchemeOp.TTruncateTable.TableName",
+        "NKikimrSchemeOp.TUpgradeSubDomain.Name",
+        "NKikimrSchemeOp.TViewDescription.Name",
+        // Path-carrying fields owned by other packages.
+        "NKikimrIndexBuilder.TColumnBuildSettings.Table",
+        "NKikimrPQ.TOffloadConfig.TIncrementalBackup.DstPath",
+        "NKikimrReplication.TReplicationConfig.TTargetSpecific.TTarget.DstPath",
+        "NKikimrReplication.TReplicationConfig.TTransferSpecific.TTarget.DirectoryPath",
+        "NKikimrReplication.TReplicationConfig.TTransferSpecific.TTarget.DstPath",
+        "NKikimrSubDomains.TSubDomainSettings.Name",
+    };
+    return names;
 }
 
 namespace {
