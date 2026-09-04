@@ -1368,6 +1368,20 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
         const TTxTransaction& tx,
         TOperationContext& context) const
 {
+    // Per-op module dispatch: trait owns construction if it provides the method.
+    TVector<ISubOperation::TPtr> result;
+    const bool handled = DispatchOp(tx, [&](auto traits) {
+        using Traits = decltype(traits);
+        if constexpr (requires { Traits::MakeOperationParts(op, tx, context); }) {
+            result = Traits::MakeOperationParts(op, tx, context);
+            return true;
+        }
+        return false;
+    });
+    if (handled) {
+        return result;
+    }
+
     const auto& opType = tx.GetOperationType();
     switch (opType) {
     case NKikimrSchemeOp::EOperationType::ESchemeOpMkDir:
@@ -1380,11 +1394,6 @@ TVector<ISubOperation::TPtr> TDefaultOperationFactory::MakeOperationParts(
         return {CreateAlterUserAttrs(op.NextPartId(), tx)};
     case NKikimrSchemeOp::EOperationType::ESchemeOpForceDropUnsafe:
         return {CreateForceDropUnsafe(op.NextPartId(), tx)};
-    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable:
-        if (tx.GetCreateTable().HasCopyFromTable()) {
-            return CreateCopyTable(op.NextPartId(), tx, context); // Copy indexes table as well as common table
-        }
-        return {CreateNewTable(op.NextPartId(), tx)};
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable:
         return CreateConsistentAlterTable(op.NextPartId(), tx, context);
     case NKikimrSchemeOp::EOperationType::ESchemeOpSplitMergeTablePartitions:

@@ -5,13 +5,10 @@
 
 namespace NKikimr::NSchemeShard {
 
-enum EOperationClass {
-    Create = 0,
-    Alter,
-    Drop,
-    Other,
-    Unknown
-};
+// Parity guard: trait Class must match this switch for every migrated op.
+static_assert(
+    TSchemeTxTraits<NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable>::Class
+    == EOperationClass::Create);
 
 EOperationClass GetOperationClass(NKikimrSchemeOp::EOperationType op) {
     switch (op) {

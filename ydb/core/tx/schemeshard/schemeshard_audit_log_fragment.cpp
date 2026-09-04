@@ -1,5 +1,7 @@
 #include "schemeshard_audit_log_fragment.h"
 
+#include "schemeshard__dispatch_op.h"
+
 #include <ydb/core/base/path.h>
 #include <ydb/core/protos/flat_scheme_op.pb.h>
 #include <ydb/core/protos/index_builder.pb.h>
@@ -327,12 +329,22 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
 TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) {
     TVector<TString> result;
 
+    // Per-op module dispatch: trait owns extraction if it provides the method.
+    const bool handled = DispatchOp(tx, [&](auto traits) {
+        using Traits = decltype(traits);
+        if constexpr (requires { Traits::CollectChangingPaths(tx, result); }) {
+            Traits::CollectChangingPaths(tx, result);
+            return true;
+        }
+        return false;
+    });
+    if (handled) {
+        return result;
+    }
+
     switch (tx.GetOperationType()) {
     case NKikimrSchemeOp::EOperationType::ESchemeOpMkDir:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetMkDir().GetName()}));
-        break;
-    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateTable:
-        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreateTable().GetName()}));
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreatePersQueueGroup:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreatePersQueueGroup().GetName()}));
