@@ -816,6 +816,24 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         }
     }
 
+    // CheckApplyIf resolves every precondition path id before the operation
+    // itself runs, for any operation type (found by the read-set gate in
+    // ut_user_attributes).
+    Y_UNIT_TEST(ApplyIfPathIdsAreDependencies) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpMkDir, "/MyRoot");
+        tx.MutableMkDir()->SetName("DirB");
+        tx.AddApplyIf()->SetPathId(5);
+        tx.AddApplyIf()->SetPathId(7);
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(FieldPaths(refs), (TVector<TString>{
+            "MkDir.Name", "ApplyIf[0].PathId", "ApplyIf[1].PathId",
+        }));
+        CheckRef(refs[1], "ApplyIf[0].PathId", "",
+            EPathRefKind::ById, EPathRefRole::Dependency);
+        UNIT_ASSERT_VALUES_EQUAL(refs[1].LocalPathId, 5u);
+        UNIT_ASSERT_VALUES_EQUAL(refs[2].LocalPathId, 7u);
+    }
+
     Y_UNIT_TEST(CreateFullBackupOpTargetsWorkingDir) {
         auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpCreateFullBackupOp,
             "/MyRoot/.backups/collections/coll");

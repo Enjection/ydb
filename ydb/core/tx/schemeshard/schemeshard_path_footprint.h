@@ -385,6 +385,10 @@ enum class EPathRefRole {
     /* CreateFullBackupOp: WorkingDir already points at the backup collection.  */                   \
     /* Reported as an entry, unlike the WorkingDir of every other request.      */                   \
     X(WorkingDirItself, "<WorkingDir>", "", PathUnderWorkingDir, Target)                             \
+    /* Every operation may carry ApplyIf preconditions; CheckApplyIf resolves   */                  \
+    /* each PathId (schemeshard_impl.cpp:1585). No name form exists: strip on   */                  \
+    /* replay (StripSourceLocalPreconditions), never canonicalize or relocate.  */                  \
+    X(ApplyIf_PathId, "ApplyIf[{i}].PathId", "", ById, Dependency)                                   \
     /* Removing a user or a group scans the whole database subtree for paths    */                   \
     /* that sid owns or appears in the ACL of, and names the first one it finds  */                  \
     /* in the error (schemeshard__operation_alter_login.cpp:300-313). The scan   */                  \
@@ -417,12 +421,7 @@ enum class EPathRefRole {
     X(TruncateTable_TableName, "TruncateTable.TableName",                                           \
         "NKikimrSchemeOp.TTruncateTable.TableName", PathUnderWorkingDir, Target)                    \
     X(CreateTestShardSet_Name, "CreateTestShardSet.Name",                                           \
-        "NKikimrSchemeOp.TCreateTestShardSet.Name", LeafUnderWorkingDir, Target)                    \
-    /* Not emitted by ExtractPathRefs: TModifyScheme.ApplyIf is a precondition on                   \
-       the source schemeshard's path ids and versions, not a path the operation                     \
-       touches. The row exists so StripSourceLocalPreconditions can name what it                    \
-       removed. */                                                                                  \
-    X(ApplyIf_PathId, "ApplyIf[{i}].PathId", "", ById, Dependency)
+        "NKikimrSchemeOp.TCreateTestShardSet.Name", LeafUnderWorkingDir, Target)
 
 // Compile-time identity of one path-carrying field. Replaces the field-path
 // string that TPathRef used to carry: rendering it is now a resolve-time

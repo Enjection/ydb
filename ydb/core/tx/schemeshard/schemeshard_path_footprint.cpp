@@ -169,9 +169,9 @@ public:
     }
 
     // Shape 2: numeric-id addressing, bypasses WorkingDir/Name.
-    void ById(EPathField field, ui64 ownerId, ui64 localPathId) {
+    void ById(EPathField field, ui64 ownerId, ui64 localPathId, TAt at = {}) {
         TPathRef& ref = Emit(field, {}, PathFieldDefaultKind(field),
-            PathFieldDefaultRole(field), {}, {});
+            PathFieldDefaultRole(field), {}, at);
         ref.OwnerId = ownerId;
         ref.LocalPathId = localPathId;
     }
@@ -1111,6 +1111,16 @@ TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx) {
         break;
     }
 
+    // Preconditions are read by every operation type: TSchemeShard::CheckApplyIf
+    // resolves each ApplyIf[i].PathId on this schemeshard before Propose() gets
+    // to the operation itself.
+    for (size_t i = 0; i < size_t(tx.ApplyIfSize()); ++i) {
+        const auto& item = tx.GetApplyIf(i);
+        if (item.HasPathId()) {
+            out.ById(F::ApplyIf_PathId, 0, item.GetPathId(), TAt{.Index = ui32(i)});
+        }
+    }
+
     return result;
 }
 
@@ -1756,6 +1766,11 @@ TCanonicalizeResult CanonicalizeToPaths(NKikimrSchemeOp::TModifyScheme& tx, TPat
         if (fp.Entries[i].Ref.Kind != EPathRefKind::ById) {
             continue;
         }
+        // ApplyIf has no name form; it is stripped or re-derived by the consumer
+        // (StripSourceLocalPreconditions), so it is neither changed nor a failure.
+        if (fp.Entries[i].Ref.Field == EPathField::ApplyIf_PathId) {
+            continue;
+        }
         // An id nothing resolved to: the operation would be rejected on this
         // schemeshard anyway, and guessing a name would invent a target.
         if (fp.Entries[i].AbsPath.empty() || !CanonicalizeEntry(tx, fp, i)) {
@@ -1775,6 +1790,9 @@ TRelocateResult RelocatePaths(NKikimrSchemeOp::TModifyScheme& tx, const TPathFoo
     for (const auto& entry : fp.Entries) {
         switch (entry.Ref.Kind) {
         case EPathRefKind::ById:
+            if (entry.Ref.Field == EPathField::ApplyIf_PathId) {
+                continue; // consumer policy, see StripSourceLocalPreconditions
+            }
             // Canonicalization has to run first: a path id says nothing about
             // where the path lives in the new database.
             result.Skipped.push_back(entry.Ref.Field);
