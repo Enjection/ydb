@@ -19,6 +19,7 @@
 
 #include <libfyaml.h>
 
+#include "fy-typelist.h"
 #include "fy-utils.h"
 #include "fy-atom.h"
 
@@ -78,18 +79,65 @@ static inline bool fy_token_type_is_mapping_marker(enum fy_token_type type)
 #define FYACF_SIZE0		0x020000	/* contains absolutely nothing */
 #define FYACF_VALID_ANCHOR	0x040000	/* contains valid anchor (without & prefix) */
 #define FYACF_JSON_ESCAPE	0x080000	/* contains a character that JSON escapes */
+#define FYACF_ENDS_WITH_COLON	0x100000	/* ends with : */
+
+/* analysis flags */
+#define FYTTAF_HAS_LB			FY_BIT(0)
+#define FYTTAF_HAS_WS			FY_BIT(1)
+#define FYTTAF_HAS_CONSECUTIVE_LB	FY_BIT(2)
+#define FYTTAF_HAS_CONSECUTIVE_WS	FY_BIT(4)
+#define FYTTAF_EMPTY			FY_BIT(5)
+#define FYTTAF_CAN_BE_SIMPLE_KEY	FY_BIT(6)
+#define FYTTAF_DIRECT_OUTPUT		FY_BIT(7)
+#define FYTTAF_NO_TEXT_TOKEN		FY_BIT(8)
+#define FYTTAF_TEXT_TOKEN		FY_BIT(9)
+#define FYTTAF_CAN_BE_PLAIN		FY_BIT(10)
+#define FYTTAF_CAN_BE_SINGLE_QUOTED	FY_BIT(11)
+#define FYTTAF_CAN_BE_DOUBLE_QUOTED	FY_BIT(12)
+#define FYTTAF_CAN_BE_LITERAL		FY_BIT(13)
+#define FYTTAF_CAN_BE_FOLDED		FY_BIT(14)
+#define FYTTAF_CAN_BE_PLAIN_FLOW	FY_BIT(15)
+#define FYTTAF_QUOTE_AT_0		FY_BIT(16)
+#define FYTTAF_CAN_BE_UNQUOTED_PATH_KEY	FY_BIT(17)
+#define FYTTAF_HAS_ANY_LB		FY_BIT(18)	/* any LB including unicode, not per input */
+#define FYTTAF_HAS_START_IND		FY_BIT(19)	/* has --- at col 0 */
+#define FYTTAF_HAS_END_IND		FY_BIT(20)	/* has ... at col 0 */
+#define FYTTAF_HAS_NON_PRINT		FY_BIT(21)	/* has any non printable utf8 */
+#define FYTTAF_ENDS_WITH_COLON		FY_BIT(22)	/* ends with a colon */
+#define FYTTAF_ALL_WS_LB		FY_BIT(23)	/* everything is ws or linebreak */
+#define FYTTAF_ALL_PRINT_ASCII		FY_BIT(24)	/* everything is >= '!' && <= '~' */
+#define FYTTAF_HAS_START_WS		FY_BIT(25)	/* leads with whitespace */
+#define FYTTAF_SIZE0			FY_BIT(26)	/* zero sized */
+#define FYTTAF_HAS_ZERO			FY_BIT(27)	/* contains a zero byte */
+#define FYTTAF_HAS_NON_NL_LB		FY_BIT(28)	/* if it has a linebreak which is not \n */
+
+#define FYTTAF_ANALYZED			FY_BIT(31)	/* analyzed mark */
+
+struct fy_token_analysis {
+	unsigned int flags;
+	int maxspan;
+	int maxcol;
+};
+
+struct fy_token_comment {
+	struct fy_token_comment *next;
+	enum fy_comment_placement placement;
+	struct fy_atom handle;
+	char *comment;
+};
 
 FY_TYPE_FWD_DECL_LIST(token);
 struct fy_token {
 	struct fy_list_head node;
 	enum fy_token_type type;
 	int refs;		/* when on document, we switch to reference counting */
-	int analyze_flags;	/* cache of the analysis flags */
+	struct fy_token_analysis analysis;
 	size_t text_len;
 	const char *text;
 	char *text0;		/* this is allocated */
 	struct fy_atom handle;
-	struct fy_atom *comment;	/* only when enabled */
+	struct fy_token_comment *token_comment;
+	char *comments;		/* this is allocated */
 	union  {
 		struct {
 			unsigned int tag_length;	/* from start */
@@ -102,6 +150,8 @@ struct fy_token {
 		struct {
 			enum fy_scalar_style style;
 			/* path key (if requested only) */
+			struct fy_mark style_start;
+			struct fy_mark style_end;
 			const char *path_key;
 			size_t path_key_len;
 			char *path_key_storage;	/* if this is not null, it's \0 terminated */
@@ -114,6 +164,8 @@ struct fy_token {
 			struct fy_token *fyt_td;
 			char *handle0;	/* zero terminated and allocated, only used by binding */
 			char *suffix0;
+			unsigned int short_length;
+			char *short0;	/* zero terminated and allocated for when the short tag is requested */
 			struct fy_tag tag;	/* prefix is now suffix */
 		} tag;
 		struct {
@@ -131,8 +183,12 @@ struct fy_token {
 			int end_index;
 		} seq_slice;
 		struct {
+			struct fy_mark style_start;
 			struct fy_path_expr *expr;
 		} alias;
+		struct {
+			struct fy_mark style_start;
+		} anchor;
 		struct {
 			int flow_level;
 		} key;
@@ -166,13 +222,13 @@ fy_token_alloc_rl(struct fy_token_list *fytl)
 
 	fyt->type = FYTT_NONE;
 	fyt->refs = 1;
-
-	fyt->analyze_flags = 0;
+	memset(&fyt->analysis, 0, sizeof(fyt->analysis));
 	fyt->text_len = 0;
 	fyt->text = NULL;
 	fyt->text0 = NULL;
 	fyt->handle.fyi = NULL;
-	fyt->comment = NULL;
+	fyt->token_comment = NULL;
+	fyt->comments = NULL;
 
 	return fyt;
 }
@@ -212,13 +268,13 @@ fy_token_alloc(void)
 static inline FY_ALWAYS_INLINE void
 fy_token_clean(struct fy_token *fyt)
 {
-	return fy_token_clean_rl(NULL, fyt);
+	fy_token_clean_rl(NULL, fyt);
 }
 
 static inline FY_ALWAYS_INLINE void
 fy_token_free(struct fy_token *fyt)
 {
-	return fy_token_free_rl(NULL, fyt);
+	fy_token_free_rl(NULL, fyt);
 }
 
 static inline FY_ALWAYS_INLINE struct fy_token *
@@ -236,13 +292,13 @@ fy_token_ref(struct fy_token *fyt)
 static inline FY_ALWAYS_INLINE void
 fy_token_unref(struct fy_token *fyt)
 {
-	return fy_token_unref_rl(NULL, fyt);
+	fy_token_unref_rl(NULL, fyt);
 }
 
 static inline void
 fy_token_list_unref_all(struct fy_token_list *fytl_tofree)
 {
-	return fy_token_list_unref_all_rl(NULL, fytl_tofree);
+	fy_token_list_unref_all_rl(NULL, fytl_tofree);
 }
 
 /* recycling aware */
@@ -277,11 +333,11 @@ fy_token_list_queue(struct fy_token_list *fytl, enum fy_token_type type, ...)
 	return fyt;
 }
 
-int fy_tag_token_format_text_length(const struct fy_token *fyt);
+size_t fy_tag_token_format_text_length(const struct fy_token *fyt);
 const char *fy_tag_token_format_text(const struct fy_token *fyt, char *buf, size_t maxsz);
-int fy_token_format_utf8_length(struct fy_token *fyt);
+size_t fy_token_format_utf8_length(struct fy_token *fyt);
 
-int fy_token_format_text_length(struct fy_token *fyt);
+size_t fy_token_format_text_length(struct fy_token *fyt);
 const char *fy_token_format_text(struct fy_token *fyt, char *buf, size_t maxsz);
 
 /* non-parser token methods */
@@ -366,6 +422,7 @@ static inline bool fy_token_is_multiline(struct fy_token *fyt)
 }
 
 const char *fy_token_get_direct_output(struct fy_token *fyt, size_t *sizep);
+const char *fy_token_get_direct_simple_output(struct fy_token *fyt, size_t *sizep);
 
 static inline struct fy_input *fy_token_get_input(struct fy_token *fyt)
 {
@@ -423,25 +480,7 @@ static inline bool fy_token_is_flow_ws(struct fy_token *fyt, int c)
 	return fy_atom_is_flow_ws(&fyt->handle, c);
 }
 
-#define FYTTAF_HAS_LB			FY_BIT(0)
-#define FYTTAF_HAS_WS			FY_BIT(1)
-#define FYTTAF_HAS_CONSECUTIVE_LB	FY_BIT(2)
-#define FYTTAF_HAS_CONSECUTIVE_WS	FY_BIT(4)
-#define FYTTAF_EMPTY			FY_BIT(5)
-#define FYTTAF_CAN_BE_SIMPLE_KEY	FY_BIT(6)
-#define FYTTAF_DIRECT_OUTPUT		FY_BIT(7)
-#define FYTTAF_NO_TEXT_TOKEN		FY_BIT(8)
-#define FYTTAF_TEXT_TOKEN		FY_BIT(9)
-#define FYTTAF_CAN_BE_PLAIN		FY_BIT(10)
-#define FYTTAF_CAN_BE_SINGLE_QUOTED	FY_BIT(11)
-#define FYTTAF_CAN_BE_DOUBLE_QUOTED	FY_BIT(12)
-#define FYTTAF_CAN_BE_LITERAL		FY_BIT(13)
-#define FYTTAF_CAN_BE_FOLDED		FY_BIT(14)
-#define FYTTAF_CAN_BE_PLAIN_FLOW	FY_BIT(15)
-#define FYTTAF_QUOTE_AT_0		FY_BIT(16)
-#define FYTTAF_CAN_BE_UNQUOTED_PATH_KEY	FY_BIT(17)
-
-int fy_token_text_analyze(struct fy_token *fyt);
+const struct fy_token_analysis *fy_token_text_analyze(struct fy_token *fyt);
 
 unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 		bool json_mode, enum fy_lb_mode lb_mode, enum fy_flow_ws_mode fws_mode);
@@ -449,20 +488,36 @@ unsigned int fy_analyze_scalar_content(const char *data, size_t size,
 /* must be freed */
 char *fy_token_debug_text(struct fy_token *fyt);
 
-#define fy_token_debug_text_a(_fyt, _res) \
-	do { \
+#ifdef _MSC_VER
+/* MSVC version using thread-local buffer */
+#define FY_TOKEN_DEBUG_TEXT_A_BUFSZ 4096
+static __declspec(thread) char fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ];
+static __inline const char *fy_token_debug_text_a_impl(struct fy_token *fyt)
+{
+	char *buf = fy_token_debug_text(fyt);
+	if (!buf) return "";
+	strncpy(fy_token_debug_text_a_buf, buf, FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1);
+	fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1] = '\0';
+	free(buf);
+	return fy_token_debug_text_a_buf;
+}
+#define fy_token_debug_text_a(_fyt) fy_token_debug_text_a_impl(_fyt)
+#else
+#define fy_token_debug_text_a(_fyt) \
+	({ \
 		struct fy_token *__fyt = (_fyt); \
 		char *_buf, *_rbuf = ""; \
 		size_t _len; \
 		_buf = fy_token_debug_text(__fyt); \
 		if (_buf) { \
 			_len = strlen(_buf); \
-			_rbuf = FY_ALLOCA(_len + 1); \
+			_rbuf = alloca(_len + 1); \
 			memcpy(_rbuf, _buf, _len + 1); \
 			free(_buf); \
 		} \
-		*(_res) = _rbuf; \
-	} while(false)
+		_rbuf; \
+	})
+#endif
 
 int fy_token_memcmp(struct fy_token *fyt, const void *ptr, size_t len);
 int fy_token_strcmp(struct fy_token *fyt, const char *str);
@@ -519,5 +574,9 @@ fy_token_get_type_inline(struct fy_token *fyt)
 {
 	return fyt ? fyt->type : FYTT_NONE;
 }
+
+/* needs fy_input_unref(handle->fyi) */
+struct fy_atom *
+fy_token_get_style_atom(struct fy_token *fyt, struct fy_atom *dst_handle);
 
 #endif

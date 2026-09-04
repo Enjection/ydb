@@ -1,18 +1,13 @@
 pkgs: attrs: with pkgs; rec {
-  version = "0.8";
+  version = "0.9.4";
 
-  src = fetchFromGitHub {
-    owner = "pantoniou";
-    repo = "libfyaml";
-    rev = "v${version}";
-    hash = "sha256-b/jRKe23NIVSydoczI+Ax2VjBJLfAEwF8SW61vIDTwA=";
+  src = fetchurl {
+    url = "https://github.com/pantoniou/libfyaml/archive/v${version}.tar.gz";
+    hash = "sha256-PLACEHOLDER";
   };
 
   patches = [
-    ./pr0064-remove-gpl-code.patch
-    ./pr0067-add-basic-win-support.patch
+    ./pr0064-rename-list-symbols.patch
     ./pr0073-add-document-destroy-hook.patch
-    ./pr0078-add-node-style-setter.patch
-    ./xxhash-static-link.patch
     ];
 }

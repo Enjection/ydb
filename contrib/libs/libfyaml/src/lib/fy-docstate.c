@@ -32,6 +32,7 @@ struct fy_document_state *fy_document_state_alloc(void)
 		return NULL;
 	memset(fyds, 0, sizeof(*fyds));
 
+	fyds->fyt_ds = NULL;
 	fyds->fyt_vd = NULL;
 	fy_token_list_init(&fyds->fyt_td);
 
@@ -47,6 +48,7 @@ void fy_document_state_free(struct fy_document_state *fyds)
 
 	assert(fyds->refs == 1);
 
+	fy_token_unref(fyds->fyt_ds);
 	fy_token_unref(fyds->fyt_vd);
 	fy_token_list_unref_all(&fyds->fyt_td);
 
@@ -156,6 +158,7 @@ struct fy_document_state *fy_document_state_default(
 	memset(&fyds->start_mark, 0, sizeof(fyds->start_mark));
 	memset(&fyds->end_mark, 0, sizeof(fyds->end_mark));
 
+	fyds->fyt_ds = NULL;
 	fyds->fyt_vd = NULL;
 	fy_token_list_init(&fyds->fyt_td);
 
@@ -190,6 +193,20 @@ struct fy_document_state *fy_document_state_copy(struct fy_document_state *fyds)
 
 	fyds_new->start_mark = fyds->start_mark;
 	fyds_new->end_mark = fyds->end_mark;
+
+	if (fyds->fyt_ds) {
+		fyt = fy_token_alloc();
+		if (!fyt)
+			goto err_out;
+
+		fyt->type = FYTT_DOCUMENT_START;
+		fyt->handle = fyds->fyt_ds->handle;
+
+		/* take reference */
+		fy_input_ref(fyt->handle.fyi);
+
+		fyds_new->fyt_ds = fyt;
+	}
 
 	if (fyds->fyt_vd) {
 		fyt = fy_token_alloc();
@@ -391,4 +408,97 @@ fy_document_state_tag_directive_iterate(struct fy_document_state *fyds, void **i
 	*iterp = fyt;
 
 	return tag;
+}
+
+struct fy_tag **
+fy_document_state_tag_directives(struct fy_document_state *fyds)
+{
+	struct fy_tag *tags, **tagsp;
+	const struct fy_tag *fytag;
+	size_t size, len;
+	void *iter;
+	char *s;
+	int i;
+
+	if (!fyds)
+		return NULL;
+
+	/* first find the extents of the area we're going to need */
+	i = 0;
+	size = 0;
+	iter = NULL;
+	while ((fytag = fy_document_state_tag_directive_iterate(fyds, &iter)) != NULL) {
+		size += strlen(fytag->handle) + 1 + strlen(fytag->prefix) + 1;
+		i++;
+	}
+	size += sizeof(struct fy_tag) * i;
+	size += sizeof(struct fy_tag *) * (i + 1);
+
+	tagsp = malloc(size);
+	if (!tagsp)
+		return NULL;
+	memset(tagsp, 0, size);
+	tags = (void *)(tagsp + i + 1);
+	s = (void *)(tags + i);
+
+	i = 0;
+	iter = NULL;
+	while ((fytag = fy_document_state_tag_directive_iterate(fyds, &iter)) != NULL) {
+		tags[i].handle = s;
+		len = strlen(fytag->handle);
+		memcpy(s, fytag->handle, len + 1);
+		s += len + 1;
+
+		tags[i].prefix = s;
+		len = strlen(fytag->prefix);
+		memcpy(s, fytag->prefix, len + 1);
+		s += len + 1;
+
+		tagsp[i] = &tags[i];
+
+		i++;
+	}
+	tagsp[i] = NULL;	/* NULL terminated */
+
+	return tagsp;
+}
+
+int fy_document_state_shorten_tag(struct fy_document_state *fyds,
+		const char *full_tag, size_t full_tag_size,
+		const char **handlep, size_t *handle_sizep,
+		const char **suffixp, size_t *suffix_sizep)
+{
+	const char *td_handle, *td_prefix;
+	size_t td_handle_size, td_prefix_size;
+	struct fy_token *fyt;
+
+	if (!fyds || !full_tag || !handlep || !handle_sizep || !suffixp || !suffix_sizep)
+		return -1;
+
+	if (full_tag_size == FY_NT)
+		full_tag_size = strlen(full_tag);
+
+	for (fyt = fy_token_list_first(&fyds->fyt_td); fyt; fyt = fy_token_next(&fyds->fyt_td, fyt)) {
+
+		td_prefix = fy_tag_directive_token_prefix(fyt, &td_prefix_size);
+		if (!td_prefix)
+			continue;
+
+		if (td_prefix_size < full_tag_size && !memcmp(td_prefix, full_tag, td_prefix_size)) {
+
+			td_handle = fy_tag_directive_token_handle(fyt, &td_handle_size);
+			if (!td_handle)
+				continue;
+
+			*handlep = td_handle;
+			*handle_sizep = td_handle_size;
+			*suffixp = full_tag + td_prefix_size;
+			*suffix_sizep = full_tag_size - td_prefix_size;
+
+			return 0;
+		}
+
+	}
+
+	return -1;
 }

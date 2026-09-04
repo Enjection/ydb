@@ -28,6 +28,7 @@
 #define FYEF_HAD_DOCUMENT_START		0x0008
 #define FYEF_HAD_DOCUMENT_END		0x0010
 #define FYEF_HAD_DOCUMENT_OUTPUT	0x0020
+#define FYEF_HAD_DOCUMENT_END_OUTPUT	0x0040
 
 struct fy_document;
 struct fy_emitter;
@@ -53,6 +54,7 @@ struct fy_emit_save_ctx {
 	bool flow_token : 1;
 	bool flow : 1;
 	bool empty : 1;
+	bool oneline_flow : 1;
 	enum fy_node_style xstyle;
 	int old_indent;
 	int flags;
@@ -71,6 +73,7 @@ struct fy_emit_save_ctx {
 #define DDNF_FLOW		0x0010
 #define DDNF_INDENTLESS		0x0020
 #define DDNF_SIMPLE_SCALAR_KEY	0x0040
+#define DDNF_HANGING_INDENT	0x0080
 
 struct fy_emitter {
 	int line;
@@ -84,7 +87,12 @@ struct fy_emitter {
 	bool suppress_recycling : 1;
 
 	/* current document */
-	struct fy_emitter_cfg cfg;	/* yeah, it isn't worth just to save a few bytes */
+	struct fy_emitter_xcfg xcfg;
+	FILE *output_fp;
+	int output_fd;
+	bool output_colorize;
+	FILE *owned_output_fp;
+
 	struct fy_document *fyd;
 	struct fy_document_state *fyds;	/* fyd->fyds when fyd != NULL */
 	struct fy_emit_accum ea;
@@ -120,7 +128,7 @@ struct fy_emitter {
 int fy_emit_setup(struct fy_emitter *emit, const struct fy_emitter_cfg *cfg);
 void fy_emit_cleanup(struct fy_emitter *emit);
 
-void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, int len);
+void fy_emit_write(struct fy_emitter *emit, enum fy_emitter_write_type type, const char *str, size_t len);
 
 static inline bool fy_emit_whitespace(struct fy_emitter *emit)
 {
@@ -147,6 +155,12 @@ fy_emit_output_accum(struct fy_emitter *emit, enum fy_emitter_write_type type, s
 	if (text && len > 0)
 		fy_emit_write(emit, type, text, len);
 	fy_emit_accum_reset(ea);
+}
+
+static inline void
+fy_emit_output_col_sync(struct fy_emitter *emit, struct fy_emit_accum *ea)
+{
+	ea->col += emit->column;
 }
 
 #endif

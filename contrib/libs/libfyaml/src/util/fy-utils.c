@@ -15,100 +15,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
+#include <ctype.h>
+
+#ifndef _WIN32
 #include <termios.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#elif defined(_MSC_VER)
-#include <windows.h>
 #endif
 
+#include "fy-win32.h"
 #include "fy-utf8.h"
 #include "fy-ctype.h"
 #include "fy-utils.h"
 
-int fy_get_pagesize() {
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-       return sysconf(_SC_PAGESIZE);
-#elif defined (_MSC_VER)
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-       return si.dwPageSize;
-#endif
-}
-
-#if defined(_MSC_VER)
-#ifndef VA_COPY
-# ifdef HAVE_VA_COPY
-#  define VA_COPY(dest, src) va_copy(dest, src)
-# else
-#  ifdef HAVE___VA_COPY
-#   define VA_COPY(dest, src) __va_copy(dest, src)
-#  else
-#   define VA_COPY(dest, src) (dest) = (src)
-#  endif
-# endif
-#endif
-
-#define INIT_SZ 128
-
-int
-vasprintf(char **str, const char *fmt, va_list ap)
-{
-    int ret;
-    va_list ap2;
-    char *string, *newstr;
-    size_t len;
-
-    if ((string = malloc(INIT_SZ)) == NULL)
-        goto fail;
-
-    VA_COPY(ap2, ap);
-    ret = vsnprintf(string, INIT_SZ, fmt, ap2);
-    va_end(ap2);
-    if (ret >= 0 && ret < INIT_SZ) { /* succeeded with initial alloc */
-        *str = string;
-    } else if (ret == INT_MAX || ret < 0) { /* Bad length */
-        free(string);
-        goto fail;
-    } else {    /* bigger than initial, realloc allowing for nul */
-        len = (size_t)ret + 1;
-        if ((newstr = realloc(string, len)) == NULL) {
-            free(string);
-            goto fail;
-        }
-        VA_COPY(ap2, ap);
-        ret = vsnprintf(newstr, len, fmt, ap2);
-        va_end(ap2);
-        if (ret < 0 || (size_t)ret >= len) { /* failed with realloc'ed string */
-            free(newstr);
-            goto fail;
-        }
-        *str = newstr;
-    }
-    return (ret);
-
-fail:
-    *str = NULL;
-    errno = ENOMEM;
-    return (-1);
-}
-
-int asprintf(char **str, const char *fmt, ...)
-{
-    va_list ap;
-    int ret;
-
-    *str = NULL;
-    va_start(ap, fmt);
-    ret = vasprintf(str, fmt, ap);
-    va_end(ap);
-
-    return ret;
-}
-#endif
+#include "xxhash.h"
 
 #if defined(__APPLE__) && (_POSIX_C_SOURCE < 200809L)
 
@@ -379,12 +301,15 @@ int fy_tag_handle_length(const char *data, size_t len)
 	s += w;
 
 	c = fy_utf8_get(s, e - s, &w);
+	if (c == -1)
+		return (int)len;
+
 	if (fy_is_ws(c))
-		return s - data;
+		return (int)(s - data);
 	/* if first character is !, empty handle */
 	if (c == '!') {
 		s += w;
-		return s - data;
+		return (int)(s - data);
 	}
 	if (!fy_is_first_alpha(c))
 		return -1;
@@ -394,7 +319,7 @@ int fy_tag_handle_length(const char *data, size_t len)
 	if (c == '!')
 		s += w;
 
-	return s - data;
+	return (int)(s - data);
 }
 
 int fy_tag_uri_length(const char *data, size_t len)
@@ -411,7 +336,7 @@ int fy_tag_uri_length(const char *data, size_t len)
 			break;
 		s += w;
 	}
-	uri_length = s - data;
+	uri_length = (int)(s - data);
 
 	if (!fy_tag_uri_is_valid(data, uri_length))
 		return -1;
@@ -424,6 +349,7 @@ int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info)
 	const char *s, *e;
 	int total_length, handle_length, uri_length, prefix_length, suffix_length;
 	int c, cn, w, wn;
+	bool bare;
 
 	s = data;
 	e = s + len;
@@ -432,25 +358,32 @@ int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info)
 
 	/* it must start with '!' */
 	c = fy_utf8_get(s, e - s, &w);
-	if (c != '!')
-		return -1;
-	cn = fy_utf8_get(s + w, e - (s + w), &wn);
-	if (cn == '<') {
-		prefix_length = 2;
-		suffix_length = 1;
-	} else
-		prefix_length = suffix_length = 0;
+	if (c == '!') {
+		bare = false;
+		cn = fy_utf8_get(s + w, e - (s + w), &wn);
+		if (cn == '<') {
+			prefix_length = 2;
+			suffix_length = 1;
+		} else
+			prefix_length = suffix_length = 0;
 
-	if (prefix_length) {
-		handle_length = 0; /* set the handle to '' */
-		s += prefix_length;
+		if (prefix_length) {
+			handle_length = 0; /* set the handle to '' */
+			s += prefix_length;
+		} else {
+			/* either !suffix or !handle!suffix */
+			/* we scan back to back, and split handle/suffix */
+			handle_length = fy_tag_handle_length(s, e - s);
+			if (handle_length < 0)
+				return -1;
+			s += handle_length;
+		}
 	} else {
-		/* either !suffix or !handle!suffix */
-		/* we scan back to back, and split handle/suffix */
-		handle_length = fy_tag_handle_length(s, e - s);
-		if (handle_length <= 0)
-			return -1;
-		s += handle_length;
+		bare = true;
+		/* it's just a uri */
+		prefix_length = 0;
+		handle_length = 0;
+		suffix_length = 0;
 	}
 
 	uri_length = fy_tag_uri_length(s, e - s);
@@ -458,7 +391,7 @@ int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info)
 		return -1;
 
 	/* a handle? */
-	if (!prefix_length && (handle_length == 0 || data[handle_length - 1] != '!')) {
+	if (!bare && !prefix_length && (handle_length == 0 || data[handle_length - 1] != '!')) {
 		/* special case, '!', handle set to '' and suffix to '!' */
 		if (handle_length == 1 && uri_length == 0) {
 			handle_length = 0;
@@ -482,9 +415,11 @@ int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info)
 	return 0;
 }
 
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 /* simple terminal methods; mainly for getting size of terminal */
-int fy_term_set_raw(int fd, struct termios *oldt)
+/* These functions are not available on Windows */
+#ifndef _WIN32
+static int
+fy_term_set_raw(int fd, struct termios *oldt)
 {
 	struct termios newt, t;
 	int ret;
@@ -511,7 +446,8 @@ int fy_term_set_raw(int fd, struct termios *oldt)
 	return 0;
 }
 
-int fy_term_restore(int fd, const struct termios *oldt)
+static int
+fy_term_restore(int fd, const struct termios *oldt)
 {
 	/* must be a terminal */
 	if (!isatty(fd))
@@ -520,7 +456,8 @@ int fy_term_restore(int fd, const struct termios *oldt)
 	return tcsetattr(fd, TCSANOW, oldt);
 }
 
-ssize_t fy_term_write(int fd, const void *data, size_t count)
+static ssize_t
+fy_term_write(int fd, const void *data, size_t count)
 {
 	ssize_t wrn, r;
 
@@ -543,7 +480,8 @@ ssize_t fy_term_write(int fd, const void *data, size_t count)
 	return wrn > 0 ? wrn : r;
 }
 
-int fy_term_safe_write(int fd, const void *data, size_t count)
+static int
+fy_term_safe_write(int fd, const void *data, size_t count)
 {
 	if (!isatty(fd))
 		return -1;
@@ -551,7 +489,8 @@ int fy_term_safe_write(int fd, const void *data, size_t count)
 	return fy_term_write(fd, data, count) == (ssize_t)count ? 0 : -1;
 }
 
-ssize_t fy_term_read(int fd, void *data, size_t count, int timeout_us)
+static ssize_t
+fy_term_read(int fd, void *data, size_t count, int timeout_us)
 {
 	ssize_t rdn, r;
 	struct timeval tv, tvto, *tvp;
@@ -603,7 +542,8 @@ ssize_t fy_term_read(int fd, void *data, size_t count, int timeout_us)
 	return rdn > 0 ? rdn : r;
 }
 
-ssize_t fy_term_read_escape(int fd, void *buf, size_t count)
+static ssize_t
+fy_term_read_escape(int fd, void *buf, size_t count)
 {
 	char *p;
 	int r, rdn;
@@ -652,7 +592,8 @@ ssize_t fy_term_read_escape(int fd, void *buf, size_t count)
 	return rdn;
 }
 
-int fy_term_query_size_raw(int fd, int *rows, int *cols)
+static int
+fy_term_query_size_raw(int fd, int *rows, int *cols)
 {
 	char buf[32];
 	char *s, *e;
@@ -718,4 +659,350 @@ int fy_term_query_size(int fd, int *rows, int *cols)
 
 	return ret;
 }
+
+#else /* _WIN32 */
+
+int fy_term_query_size(int fd, int *rows, int *cols)
+{
+	CONSOLE_SCREEN_BUFFER_INFO csbi;
+	HANDLE h;
+
+	if (fd != _fileno(stdout) && fd != _fileno(stderr))
+		return -1;
+
+	h = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (!GetConsoleScreenBufferInfo(h, &csbi))
+		return -1;
+
+	*cols = (int)(csbi.srWindow.Right  - csbi.srWindow.Left + 1);
+	*rows = (int)(csbi.srWindow.Bottom - csbi.srWindow.Top  + 1);
+	return 0;
+}
+
+#endif /* !_WIN32 - end of terminal functions */
+
+int fy_comment_iter_begin(const char *comment, size_t size, struct fy_comment_iter *iter)
+{
+	if (!comment || !iter)
+		return -1;
+
+	memset(iter, 0, sizeof(*iter));
+	iter->start = comment;
+	iter->size = size == (size_t)-1 ? strlen(comment) : size;
+	iter->end = iter->start + iter->size;
+
+	if (!iter->size)
+		return -1;
+
+	iter->next = iter->start;
+	iter->line = 0;
+
+	return 0;
+}
+
+const char *fy_comment_iter_next_line(struct fy_comment_iter *iter, size_t *lenp)
+{
+	const char *s, *e, *le, *t;
+
+	if (!iter || !lenp || !iter->start)
+		return NULL;
+
+	/* no more */
+	if (iter->next >= iter->end)
+		return NULL;
+again:
+	*lenp = 0;
+
+	s = iter->next;
+	e = iter->end;
+
+	/* skip whitespace */
+	while (s < e && isblank((unsigned char)*s))
+		s++;
+
+	if (s >= e)
+		return NULL;
+
+	/* find end of line */
+	le = memchr(s, '\n', e - s);
+	if (!le) {
+		le = e;
+		iter->next = e;
+	} else {
+		iter->next = le + 1;
+	}
+
+	/* final? check if ends in *\/ */
+	if (le >= e && (le - s) > 2 && le[-2] == '*' && le[-1] == '/')
+		le -= 2;
+
+	/* backtrack while there's space at the end of line */
+	while (le > s && isblank((unsigned char)le[-1]))
+		le--;
+
+	/* check if the whole line is punctuation so it's formatting */
+	t = s;
+	while (t < le && ispunct((unsigned char)*t))
+		t++;
+
+	/* everything is punctuation? */
+	if (t > s && t >= le) {
+		if (((le - s) == 2 && s[0] == '/' && s[1] == '/') || 	/* '//' -> empty line */
+		    ((le - s) == 1 && s[0] == '*')) {			/* '*' -> empty line */
+			iter->line++;
+			return "";
+		}
+		/* for anything else, just try again */
+		goto again;
+	}
+
+	/* something is there, skip over '// ' or '* ' */
+	if ((le - s) > 3 && s[0] == '/' && s[1] == '/' && isblank((unsigned char)s[2]))
+		s += 3;
+	else if ((le - s) > 2 && s[0] == '*' && isblank((unsigned char)s[1]))
+		s += 2;
+	else if (iter->line == 0 && (le - s) > 3 && s[0] == '/' && s[1] == '*' && isblank((unsigned char)s[2]))
+		s += 3;
+
+	iter->line++;
+	*lenp = le - s;
+	return s;
+}
+
+void fy_comment_iter_end(struct fy_comment_iter *iter)
+{
+	/* nothing */
+}
+
+char *fy_get_cooked_comment(const char *raw_comment, size_t size)
+{
+	struct fy_memstream *fyms = NULL;
+	struct fy_comment_iter iter;
+	FILE *fp;
+	char *buf;
+	const char *line;
+	size_t len, line_len;
+	int ret;
+
+	if (!raw_comment)
+		return NULL;
+
+	fyms = fy_memstream_open(&fp);
+	if (!fyms)
+		return NULL;
+
+	ret = 0;
+	fy_comment_iter_begin(raw_comment, size, &iter);
+	while ((line = fy_comment_iter_next_line(&iter, &line_len)) != NULL) {
+		ret = fprintf(fp, "%.*s\n", (int)line_len, line);
+		if (ret < 0)
+			break;
+	}
+	fy_comment_iter_end(&iter);
+
+	buf = fy_memstream_close(fyms, &len);
+	if (ret < 0) {
+		if (buf)
+			free(buf);
+		return NULL;
+	}
+
+	/* must be freed */
+	return buf;
+}
+
+int fy_keyword_iter_begin(const char *text, size_t size, const char *keyword, struct fy_keyword_iter *iter)
+{
+	if (!text || !size || !keyword || !iter)
+		return -1;
+
+	memset(iter, 0, sizeof(*iter));
+	iter->keyword = keyword;
+	iter->keyword_len = strlen(keyword);
+	iter->start = text;
+	iter->size = size == (size_t)-1 ? strlen(text) : size;
+	iter->end = iter->start + iter->size;
+	iter->pc = '\n';
+
+	if (!iter->size)
+		return -1;
+
+	iter->next = iter->start;
+
+	return 0;
+}
+
+const char *fy_keyword_iter_next(struct fy_keyword_iter *iter)
+{
+	const char *keyword;
+	size_t keyword_len;
+	const char *s, *e;
+	int c, w, pc, mode;
+
+	if (!iter || !iter->start)
+		return NULL;
+
+	/* no more */
+	if (iter->next >= iter->end)
+		return NULL;
+
+	s = iter->next;
+	e = iter->end;
+
+	keyword = iter->keyword;
+	keyword_len = iter->keyword_len;
+
+	mode = 0;
+	pc = iter->pc;
+	while ((c = fy_utf8_get_s(s, e, &w)) >= 0) {
+
+		/* simple state machine to handle quoting */
+		switch (mode) {
+		case 0: /* unquoted */
+			if (c == keyword[0] && (fy_is_any_lb(pc) || fy_is_ws(pc)) &&
+			   (size_t)(e - s) > (keyword_len + 1) && !memcmp(s, keyword, keyword_len) &&
+			   (fy_is_ws(s[keyword_len]) || fy_is_any_lb(s[keyword_len]))) {
+
+				iter->next = s;
+				iter->pc = pc;
+				return s;
+			}
+
+			if (c == '\'')
+				mode = 1;
+			else if (c == '"')
+				mode = 3;
+			break;
+		case 1:	/* single quote */
+			if (c == '\\')
+				mode = 2;	/* escaped single quote? */
+			else if (c == '\'')
+				mode = 0;	/* back to unquoted */
+			break;
+		case 2:	/* single quote backslash */
+			mode = 1;	/* back to single quote mode always */
+			break;
+		case 3: /* double quote */
+			if (c == '\\')
+				mode = 4;	/* escaped quote? */
+			else if (c == '"')
+				mode = 0;	/* back to unquoted */
+			break;
+		case 4:
+			mode = 3;	/* back to double quote mode always */
+			break;
+		}
+		s += w;
+		pc = c;
+	}
+
+	return NULL;
+}
+
+void fy_keyword_iter_advance(struct fy_keyword_iter *iter, size_t advance)
+{
+	int w;
+	const char *prev;
+
+	if (!iter || !iter->next)
+		return;
+
+	prev = iter->next;
+
+	iter->next += advance;
+	if (iter->next >= iter->end)
+		iter->next = iter->end;
+
+	iter->pc = fy_utf8_get_right(prev, (size_t)(iter->next - prev), &w);
+	if (iter->pc < 0)
+		iter->pc = '\n';
+}
+
+void fy_keyword_iter_end(struct fy_keyword_iter *iter)
+{
+	/* nothing */
+}
+
+#define FY_XXHASH64_SEED	((uint64_t)0x1973198120142019U)
+
+uint64_t fy_iovec_xxhash64(const struct iovec *iov, int iovcnt)
+{
+	XXH64_state_t xxstate;
+	uint64_t hash;
+	int i;
+
+	XXH64_reset(&xxstate, FY_XXHASH64_SEED);
+	for (i = 0; i < iovcnt; i++)
+		XXH64_update(&xxstate, iov[i].iov_base, iov[i].iov_len);
+	hash = XXH64_digest(&xxstate);
+	/* XXX we never return a hash value of zero */
+	if (!hash)
+		hash++;
+	return hash;
+}
+
+struct fy_memstream {
+	FILE *fp;
+	char *buf;
+	size_t size;
+};
+
+struct fy_memstream *fy_memstream_open(FILE **fpp)
+{
+	struct fy_memstream *fyms;
+
+	if (!fpp)
+		return NULL;
+
+	*fpp = NULL;
+
+	fyms = malloc(sizeof(*fyms));
+	if (!fyms)
+		return NULL;
+	memset(fyms, 0, sizeof(*fyms));
+#if !defined(_WIN32)
+	fyms->fp = open_memstream(&fyms->buf, &fyms->size);
+#else
+	fyms->fp = tmpfile();
 #endif
+	if (!fyms->fp) {
+		free(fyms);
+		return NULL;
+	}
+	*fpp = fyms->fp;
+	return fyms;
+}
+
+char *fy_memstream_close(struct fy_memstream *fyms, size_t *sizep)
+{
+	char *buf;
+#if defined(_WIN32)
+	long sz;
+#endif
+
+	if (!fyms) {
+		*sizep = 0;
+		return NULL;
+	}
+
+#if defined(_WIN32)
+	if (fyms->fp && fflush(fyms->fp) == 0 &&
+	    (sz = ftell(fyms->fp)) >= 0 &&
+	    (fyms->buf = malloc((size_t)sz + 1)) != NULL) {
+		rewind(fyms->fp);
+		fyms->size = fread(fyms->buf, 1, (size_t)sz, fyms->fp);
+		fyms->buf[fyms->size] = '\0';
+	}
+#endif
+
+	if (fyms->fp)
+		fclose(fyms->fp);
+
+	/* the buffer is updated only after close */
+	buf = fyms->buf;
+	*sizep = buf ? fyms->size : 0;
+
+	free(fyms);
+
+	return buf;
+}

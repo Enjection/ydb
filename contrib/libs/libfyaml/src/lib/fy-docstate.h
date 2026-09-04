@@ -33,9 +33,11 @@ struct fy_document_state {
 	bool tags_explicit : 1;
 	bool start_implicit : 1;
 	bool end_implicit : 1;
+	bool started_explicit : 1;
 	bool json_mode : 1;
 	struct fy_mark start_mark;
 	struct fy_mark end_mark;
+	struct fy_token *fyt_ds;		/* the document start token (if any) */
 	struct fy_token *fyt_vd;		/* version directive */
 	struct fy_token_list fyt_td;		/* tag directives */
 };
@@ -59,5 +61,10 @@ int fy_document_state_merge(struct fy_document_state *fyds,
 
 struct fy_token *fy_document_state_lookup_tag_directive(struct fy_document_state *fyds,
 		const char *handle, size_t handle_size);
+
+int fy_document_state_shorten_tag(struct fy_document_state *fyds,
+		const char *full_tag, size_t full_tag_size,
+		const char **handlep, size_t *handle_sizep,
+		const char **suffixp, size_t *suffix_sizep);
 
 #endif

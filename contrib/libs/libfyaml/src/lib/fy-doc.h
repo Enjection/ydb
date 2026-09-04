@@ -61,11 +61,7 @@ struct fy_node {
 	struct fy_node *parent;
 	struct fy_document *fyd;
 	unsigned int marks;
-#if !defined(_MSC_VER)
-	enum fy_node_type type : 2;	/* 2 bits are enough for 3 types */
-#else
-	enum fy_node_type type;	/* it converted incorrectly and can't be used as supposed to be */
-#endif
+	unsigned int type : 2;	/* enum fy_node_type: 2 bits are enough for 3 types */
 	bool has_meta : 1;
 	bool attached : 1;		/* when it's attached somewhere */
 	bool synthetic : 1;		/* node has been modified programmaticaly */
@@ -122,15 +118,16 @@ struct fy_document {
 	fy_node_meta_clear_fn meta_clear_fn;
 	void *meta_user;
 
-	fy_document_on_destroy_fn on_destroy_fn;
-	void *userdata;
-
 	struct fy_path_expr_document_data *pxdd;
+
+	void *userdata;
+	void (*on_destroy_fn)(struct fy_document *fyd, void *userdata);
 };
 /* only the list declaration/methods */
 FY_TYPE_DECL_LIST(document);
 
 struct fy_document *fy_parse_document_create(struct fy_parser *fyp, struct fy_eventp *fyep);
+void fy_document_purge_anchors(struct fy_document *fyd);
 
 struct fy_node_mapping_sort_ctx {
 	fy_node_mapping_sort_fn key_cmp;
@@ -163,13 +160,18 @@ bool fy_node_is_empty(struct fy_node *fyn);
 
 bool fy_check_ref_loop(struct fy_document *fyd, struct fy_node *fyn,
 		       enum fy_node_walk_flags flags,
-		       struct fy_node_walk_ctx *ctx);
+		       struct fy_node_walk_ctx *ctx,
+		       unsigned int depth);
 
 #define FYNWF_VISIT_MARKER	(FYNWF_MAX_USER_MARKER + 1)
 #define FYNWF_REF_MARKER	(FYNWF_MAX_USER_MARKER + 2)
+#define FYNWF_INSET_MARKER	(FYNWF_MAX_USER_MARKER + 3)
 
 #define FYNWF_SYSTEM_MARKS	(FY_BIT(FYNWF_VISIT_MARKER) | \
-				 FY_BIT(FYNWF_REF_MARKER))
+				 FY_BIT(FYNWF_REF_MARKER) | \
+				 FY_BIT(FYNWF_INSET_MARKER) )
+
+void fy_node_clear_system_marks(struct fy_node *fyn);
 
 bool fy_node_uses_single_input_only(struct fy_node *fyn, struct fy_input *fyi);
 struct fy_input *fy_node_get_first_input(struct fy_node *fyn);
@@ -215,6 +217,7 @@ enum fy_document_iterator_state {
 	FYDIS_BODY,
 	FYDIS_WAITING_DOCUMENT_END,
 	FYDIS_WAITING_STREAM_END_OR_DOCUMENT_START,
+	FYDIS_ENDED,
 	FYDIS_ERROR,
 };
 
@@ -228,6 +231,7 @@ struct fy_document_iterator_body_state {
 };
 
 struct fy_document_iterator {
+	struct fy_document_iterator_cfg cfg;
 	enum fy_document_iterator_state state;
 	struct fy_document *fyd;
 	struct fy_node *iterate_root;
@@ -244,14 +248,28 @@ struct fy_document_iterator {
 	unsigned int stack_alloc;
 	struct fy_document_iterator_body_state *stack;
 	struct fy_document_iterator_body_state in_place[FYPCF_GUARANTEED_MINIMUM_DEPTH_LIMIT];
+
+#define FYDIGF_GENERATED_SS	FY_BIT(0)
+#define FYDIGF_GENERATED_DS	FY_BIT(1)
+#define FYDIGF_GENERATED_DE	FY_BIT(2)
+#define FYDIGF_GENERATED_SE	FY_BIT(3)
+#define FYDIGF_GENERATED_BODY	FY_BIT(4)
+#define FYDIGF_GENERATED_NULL	FY_BIT(5)
+#define FYDIGF_ENDS_AFTER_BODY	FY_BIT(6)
+#define FYDIGF_ENDS_AFTER_DOC	FY_BIT(7)
+#define FYDIGF_WANTS_STREAM	FY_BIT(8)
+#define FYDIGF_WANTS_DOC	FY_BIT(9)
+	unsigned int generator_state;
 };
 
-void fy_document_iterator_setup(struct fy_document_iterator *fydi);
+int fy_document_iterator_setup(struct fy_document_iterator *fydi, const struct fy_document_iterator_cfg *cfg);
 void fy_document_iterator_cleanup(struct fy_document_iterator *fydi);
 struct fy_document_iterator *fy_document_iterator_create(void);
 void fy_document_iterator_destroy(struct fy_document_iterator *fydi);
-void fy_document_iterator_start(struct fy_document_iterator *fydi, struct fy_document *fyd);
-void fy_document_iterator_end(struct fy_document_iterator *fydi);
+
+struct fy_event *
+fy_document_iterator_document_start_internal(struct fy_document_iterator *fydi, struct fy_document *fyd,
+					     struct fy_node *iterate_root);
 
 struct fy_document_iterator_body_result {
 	struct fy_node *fyn;
@@ -261,5 +279,115 @@ struct fy_document_iterator_body_result {
 bool
 fy_document_iterator_body_next_internal(struct fy_document_iterator *fydi,
 					struct fy_document_iterator_body_result *res);
+
+/* diagnostics */
+
+static inline bool
+fyd_debug_log_level_is_enabled(struct fy_document *fyd, enum fy_error_module module)
+{
+	return fyd && fy_diag_log_level_is_enabled(fyd->diag, FYET_DEBUG, module);
+}
+
+int fy_document_vdiag(struct fy_document *fyd, unsigned int flags,
+		      const char *file, int line, const char *func,
+		      const char *fmt, va_list ap);
+
+int fy_document_diag(struct fy_document *fyd, unsigned int flags,
+		     const char *file, int line, const char *func,
+		     const char *fmt, ...)
+			__attribute__((format(printf, 6, 7)));
+
+void fy_document_diag_vreport(struct fy_document *fyd,
+			      const struct fy_diag_report_ctx *fydrc,
+			      const char *fmt, va_list ap);
+void fy_document_diag_report(struct fy_document *fyd,
+			     const struct fy_diag_report_ctx *fydrc,
+			     const char *fmt, ...)
+			__attribute__((format(printf, 3, 4)));
+
+#ifdef FY_DEVMODE
+
+#define fyd_debug(_fyd, _fmt, ...) \
+	do { \
+		struct fy_document *__fyd = (_fyd); \
+		if (fyd_debug_log_level_is_enabled(__fyd, FYEM_DOC)) \
+			fy_document_diag(__fyd, FYET_DEBUG, \
+					__FILE__, __LINE__, __func__, \
+					(_fmt) , ## __VA_ARGS__); \
+	} while(0)
+#else
+
+#define fyd_debug(_fyd, _fmt, ...) \
+	do { } while(0)
+
+#endif
+
+#define fyd_info(_fyd, _fmt, ...) \
+	fy_document_diag((_fyd), FYET_INFO, __FILE__, __LINE__, __func__, \
+			(_fmt) , ## __VA_ARGS__)
+#define fyd_notice(_fyd, _fmt, ...) \
+	fy_document_diag((_fyd), FYET_NOTICE, __FILE__, __LINE__, __func__, \
+			(_fmt) , ## __VA_ARGS__)
+#define fyd_warning(_fyd, _fmt, ...) \
+	fy_document_diag((_fyd), FYET_WARNING, __FILE__, __LINE__, __func__, \
+			(_fmt) , ## __VA_ARGS__)
+#define fyd_error(_fyd, _fmt, ...) \
+	fy_document_diag((_fyd), FYET_ERROR, __FILE__, __LINE__, __func__, \
+			(_fmt) , ## __VA_ARGS__)
+
+#define fyd_doc_debug(_fyd, _fmt, ...) \
+	fyd_debug((_fyd), (_fmt) , ## __VA_ARGS__)
+
+#define fyd_error_check(_fyd, _cond, _label, _fmt, ...) \
+	do { \
+		if (!(_cond)) { \
+			fyd_error((_fyd), _fmt, ## __VA_ARGS__); \
+			goto _label ; \
+		} \
+	} while(0)
+
+#define _FYD_TOKEN_DIAG(_fyd, _fyt, _type, _module, _fmt, ...) \
+	do { \
+		struct fy_diag_report_ctx _drc; \
+		memset(&_drc, 0, sizeof(_drc)); \
+		_drc.type = (_type); \
+		_drc.module = (_module); \
+		_drc.fyt = (_fyt); \
+		fy_document_diag_report((_fyd), &_drc, (_fmt) , ## __VA_ARGS__); \
+	} while(0)
+
+#define FYD_TOKEN_DIAG(_fyd, _fyt, _type, _module, _fmt, ...) \
+	_FYD_TOKEN_DIAG(_fyd, fy_token_ref(_fyt), _type, _module, _fmt, ## __VA_ARGS__)
+
+#define FYD_NODE_DIAG(_fyd, _fyn, _type, _module, _fmt, ...) \
+	_FYD_TOKEN_DIAG(_fyd, fy_node_token(_fyn), _type, _module, _fmt, ## __VA_ARGS__)
+
+#define FYD_TOKEN_ERROR(_fyd, _fyt, _module, _fmt, ...) \
+	FYD_TOKEN_DIAG(_fyd, _fyt, FYET_ERROR, _module, _fmt, ## __VA_ARGS__)
+
+#define FYD_NODE_ERROR(_fyd, _fyn, _module, _fmt, ...) \
+	FYD_NODE_DIAG(_fyd, _fyn, FYET_ERROR, _module, _fmt, ## __VA_ARGS__)
+
+#define FYD_TOKEN_ERROR_CHECK(_fyd, _fyt, _module, _cond, _label, _fmt, ...) \
+	do { \
+		if (!(_cond)) { \
+			FYD_TOKEN_ERROR(_fyd, _fyt, _module, _fmt, ## __VA_ARGS__); \
+			goto _label; \
+		} \
+	} while(0)
+
+#define FYD_NODE_ERROR_CHECK(_fyd, _fyn, _module, _cond, _label, _fmt, ...) \
+	do { \
+		if (!(_cond)) { \
+			FYD_NODE_ERROR(_fyd, _fyn, _module, _fmt, ## __VA_ARGS__); \
+			goto _label; \
+		} \
+	} while(0)
+
+#define FYD_TOKEN_WARNING(_fyd, _fyt, _module, _fmt, ...) \
+	FYD_TOKEN_DIAG(_fyd, _fyt, FYET_WARNING, _module, _fmt, ## __VA_ARGS__)
+
+#define FYD_NODE_WARNING(_fyd, _fyn, _type, _module, _fmt, ...) \
+	FYD_NODE_DIAG(_fyd, _fyn, FYET_WARNING, _module, _fmt, ## __VA_ARGS__)
 
 #endif

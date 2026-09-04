@@ -11,26 +11,16 @@
 
 #include <stdio.h>
 #include <string.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <sys/mman.h>
-#endif
-#include <sys/types.h>
-#include <sys/stat.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <sys/ioctl.h>
-#endif
-#include <fcntl.h>
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-#include <unistd.h>
-#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <fcntl.h>
 
 #include <libfyaml.h>
 
+#include "fy-win32.h"
 #include "fy-parse.h"
 
 #include "fy-utils.h"
@@ -40,10 +30,16 @@
 #define ATOM_SIZE_CHECK
 #endif
 
+#ifdef ATOM_SIZE_CHECK
+#define FORCE_ATOM_SIZE_CHECK_DEFAULT	true
+#else
+#define FORCE_ATOM_SIZE_CHECK_DEFAULT	false
+#endif
+
 const char *fy_library_version(void)
 {
 #ifndef VERSION
-#warn No version defined
+#warning No version defined
 	return "UNKNOWN";
 #else
 	return VERSION;
@@ -55,7 +51,7 @@ int fy_parse_input_append(struct fy_parser *fyp, const struct fy_input_cfg *fyic
 	struct fy_input *fyi = NULL;
 
 	fyi = fy_input_create(fyic);
-	fyp_error_check(fyp, fyp != NULL, err_out,
+	fyp_error_check(fyp, fyi != NULL, err_out,
 			"fy_parse_input_create() failed!");
 
 	fyi->state = FYIS_QUEUED;
@@ -111,11 +107,7 @@ int fy_parse_get_next_input(struct fy_parser *fyp)
 		json_mode = true;
 
 	/* set the initial reader mode according to json option and default version */
-	if (!json_mode)
-		rdmode = fy_version_compare(&fyp->default_version, fy_version_make(1, 1)) <= 0 ? fyrm_yaml_1_1 : fyrm_yaml;
-	else
-		rdmode = fyrm_json;
-
+	rdmode = fy_reader_calculate_mode(&fyp->stream_version, json_mode);
 	fy_reader_set_mode(fyp->reader, rdmode);
 
 	memset(&icfg, 0, sizeof(icfg));
@@ -139,6 +131,37 @@ int fy_parse_get_next_input(struct fy_parser *fyp)
 err_out:
 	fy_input_unref(fyi);
 	return -1;
+}
+
+ssize_t fy_parse_estimate_queued_input_size(struct fy_parser *fyp)
+{
+	struct fy_input *fyi;
+	ssize_t size, total;
+
+	if (!fyp)
+		return 0;
+
+	total = 0;
+	for (fyi = fy_input_list_head(&fyp->queued_inputs); fyi; fyi = fy_input_next(&fyp->queued_inputs, fyi)) {
+		if (fyi->state != FYIS_QUEUED)
+			continue;
+
+		size = fy_input_estimate_queued_size(fyi);
+		if (size < 0)
+			return -1;
+
+		/* something that's indetermined */
+		if (size == SSIZE_MAX)
+			return SSIZE_MAX;
+
+		total += size;
+
+		/* roll-over check */
+		if (total < 0)
+			return SSIZE_MAX;
+	}
+
+	return total;
 }
 
 static inline void
@@ -333,7 +356,7 @@ const struct fy_version *fy_version_supported_iterate(void **prevp)
 
 	versp++;
 
-	idx = versp - fy_map_option_to_version;
+	idx = (unsigned int)(versp - fy_map_option_to_version);
 	if (idx >= sizeof(fy_map_option_to_version)/sizeof(fy_map_option_to_version[0]))
 		return NULL;
 
@@ -434,11 +457,12 @@ bool fy_token_tag_directive_is_overridable(struct fy_token *fyt_td)
 int fy_reset_document_state(struct fy_parser *fyp)
 {
 	struct fy_document_state *fyds_new = NULL;
+	enum fy_reader_mode rdmode;
 
 	fyp_scan_debug(fyp, "resetting document state");
 
 	if (!fyp->default_document_state) {
-		fyds_new = fy_document_state_default(&fyp->default_version, NULL);
+		fyds_new = fy_document_state_default(&fyp->stream_version, NULL);
 		fyp_error_check(fyp, fyds_new, err_out,
 				"fy_document_state_default() failed");
 	} else {
@@ -457,6 +481,12 @@ int fy_reset_document_state(struct fy_parser *fyp)
 	fyp->flow_level = 0;
 	fyp->flow = FYFT_NONE;
 	fy_parse_flow_list_recycle_all(fyp, &fyp->flow_stack);
+
+	/* and reset all aliases (TODO look for cross document aliases) */
+	fy_parse_streaming_aliases_reset(fyp);
+
+	rdmode = fy_reader_calculate_mode(&fyds_new->version, fyds_new->json_mode);
+	fy_reader_set_mode(fyp->reader, rdmode);
 
 	return 0;
 
@@ -507,10 +537,10 @@ int fy_check_document_version(struct fy_parser *fyp)
 	/* we only support YAML version 1.x */
 	if (major == 1) {
 		/* 1.1 is supported without warnings */
-		if (minor == 1)
+		if (minor == 1 || minor == 2)
 			goto ok;
 
-		if (minor == 2 || minor == 3)
+		if (minor == 3)
 			goto experimental;
 	}
 
@@ -554,7 +584,7 @@ int fy_parse_version_directive(struct fy_parser *fyp, struct fy_token *fyt, bool
 	vs = fy_token_get_text(fyt, &vs_len);
 	fyp_error_check(fyp, vs, err_out,
 			"fy_token_get_text() failed");
-	vs0 = FY_ALLOCA(vs_len + 1);
+	vs0 = alloca(vs_len + 1);
 	memcpy(vs0, vs, vs_len);
 	vs0[vs_len] = '\0';
 
@@ -677,7 +707,7 @@ static int fy_parser_reader_file_open(struct fy_reader *fyr, const char *name)
 	}
 
 	len = strlen(fyp->cfg.search_path);
-	sp = FY_ALLOCA(len + 1);
+	sp = alloca(len + 1);
 	memcpy(sp, fyp->cfg.search_path, len + 1);
 
 	/* allocate the maximum possible so that we don't deal with reallocations */
@@ -759,11 +789,13 @@ int fy_parse_setup(struct fy_parser *fyp, const struct fy_parse_cfg *cfg)
 	fyp->reader = &fyp->builtin_reader;
 
 	fyp->default_version = *vers;
+	fyp->stream_version = fyp->default_version;
 
 	fy_indent_list_init(&fyp->indent_stack);
 	fy_indent_list_init(&fyp->recycled_indent);
 	fyp->indent = -2;
 	fyp->indent_line = -1;
+	fyp->starting_indent = -1;
 	fyp->generated_block_map = false;
 	fyp->last_was_comma = false;
 
@@ -787,6 +819,13 @@ int fy_parse_setup(struct fy_parser *fyp, const struct fy_parse_cfg *cfg)
 
 	fyp->pending_complex_key_column = -1;
 	fyp->last_block_mapping_key_line = -1;
+
+	fy_streaming_alias_list_init(&fyp->streaming_aliases);
+	fy_streaming_alias_list_init(&fyp->recycled_streaming_alias);
+	fy_eventp_list_init(&fyp->mks.args);
+
+	fy_atom_reset(&fyp->last_comment);
+	fy_atom_reset(&fyp->override_comment);
 
 	fyp->suppress_recycling = !!(fyp->cfg.flags & FYPCF_DISABLE_RECYCLING) ||
 		                  (getenv("FY_VALGRIND") &&
@@ -820,6 +859,16 @@ void fy_parse_cleanup(struct fy_parser *fyp)
 	struct fy_eventp *fyep;
 	struct fy_token *fyt;
 
+	fy_parse_eventp_recycle(fyp, fyp->fyep_peek);
+
+	fy_parse_streaming_aliases_reset(fyp);
+
+	fy_input_unref(fyp->last_comment.fyi);
+	fy_atom_reset(&fyp->last_comment);
+
+	fy_input_unref(fyp->override_comment.fyi);
+	fy_atom_reset(&fyp->override_comment);
+
 	fy_input_unref(fyp->last_event_handle.fyi);
 	fy_atom_reset(&fyp->last_event_handle);
 
@@ -832,6 +881,7 @@ void fy_parse_cleanup(struct fy_parser *fyp)
 
 	fy_parse_parse_state_log_list_recycle_all(fyp, &fyp->state_stack);
 	fy_parse_flow_list_recycle_all(fyp, &fyp->flow_stack);
+	fy_parse_streaming_alias_list_recycle_all(fyp, &fyp->streaming_aliases);
 
 	fy_token_unref_rl(fyp->recycled_token_list, fyp->stream_end_token);
 
@@ -851,6 +901,7 @@ void fy_parse_cleanup(struct fy_parser *fyp)
 	fy_parse_simple_key_vacuum(fyp);
 	fy_parse_parse_state_log_vacuum(fyp);
 	fy_parse_flow_vacuum(fyp);
+	fy_parse_streaming_alias_vacuum(fyp);
 
 	/* free the recycled events */
 	while ((fyep = fy_eventp_list_pop(&fyp->recycled_eventp)) != NULL) {
@@ -987,11 +1038,51 @@ int fy_scan_comment(struct fy_parser *fyp, struct fy_atom *handle, bool single_l
 	return 0;
 }
 
+bool
+fy_comment_atoms_seperated_by_ws(struct fy_parser *fyp, struct fy_atom *a, struct fy_atom *b)
+{
+	struct fy_atom *tmpatom;
+	struct fy_atom inbetween;
+	struct fy_atom_iter iter;
+	int c;
+	bool ws_or_lb;
+
+	if (!a || !b)
+		return false;
+
+	/* must be on same input */
+	if (a->fyi != b->fyi)
+		return false;
+
+	/* must be comments */
+	if (a->style != FYAS_COMMENT || b->style != FYAS_COMMENT)
+		return false;
+
+	/* a must be before */
+	if (a->end_mark.input_pos > b->start_mark.input_pos) {
+		tmpatom = a;
+		a = b;
+		b = tmpatom;
+	}
+
+	memcpy(&inbetween, a, sizeof(inbetween));
+	inbetween.start_mark = a->end_mark;
+	inbetween.end_mark = b->start_mark;
+
+	fy_atom_iter_start(&inbetween, &iter);
+	ws_or_lb = true;
+	while (ws_or_lb && (c = fy_atom_iter_utf8_get(&iter)) >= 0)
+		ws_or_lb = fy_is_ws(c) || fy_is_lb_m(c, a->lb_mode);
+	fy_atom_iter_finish(&iter);
+	return ws_or_lb;
+}
+
+/* -1 error, 0, no comment attached, 1 comment attached */
 int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 {
 	struct fy_atom *handle;
 	struct fy_mark fym;
-	int c, rc;
+	int c, rc, count;
 
 	if (!fyp || !fyt)
 		return -1;
@@ -999,12 +1090,37 @@ int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 	if (!(fyp->cfg.flags & FYPCF_PARSE_COMMENTS))
 		return 0;
 
+	count = 0;
+
+	/* special handling for document start */
+	if (fyt->type == FYTT_DOCUMENT_START && fy_atom_is_set(&fyp->override_comment)) {
+
+		handle = fy_token_comment_handle(fyt, fycp_top, true);
+		fyp_error_check(fyp, handle, err_out,
+				"fy_token_comment_handle() top failed\n");
+
+		fy_input_unref(handle->fyi);
+		fy_atom_reset(handle);
+
+		*handle = fyp->override_comment;
+		count++;
+
+		fy_atom_reset(&fyp->override_comment);
+	}
+
 	/* if a last comment exists and is valid */
-	if (fy_atom_is_set(&fyp->last_comment) &&
-	    (handle = fy_token_comment_handle(fyt, fycp_top, true)) != NULL) {
-		assert (!fy_atom_is_set(handle));
+	if (fy_atom_is_set(&fyp->last_comment)) {
+
+		handle = fy_token_comment_handle(fyt, count == 0 ? fycp_top : fycp_right, true);
+		fyp_error_check(fyp, handle, err_out,
+				"fy_token_comment_handle() top failed\n");
+
+		fy_input_unref(handle->fyi);
+		fy_atom_reset(handle);
+
 		*handle = fyp->last_comment;
-		/* erase last comment */
+		count++;
+
 		fy_atom_reset(&fyp->last_comment);
 	}
 
@@ -1014,23 +1130,124 @@ int fy_attach_comments_if_any(struct fy_parser *fyp, struct fy_token *fyt)
 	while (fy_is_ws(c = fy_parse_peek(fyp)))
 		fy_advance(fyp, c);
 
-	if (c == '#') {
-		fy_get_mark(fyp, &fym);
+	if (c != '#')
+		return 0;
 
-		/* it's a right comment only if it's on the same line */
-		if (fym.line == fyt->handle.end_mark.line)
-			handle = fy_token_comment_handle(fyt, fycp_right, true);
-		else
-			handle = &fyp->last_comment;	/* otherwise, last comment */
+	fy_get_mark(fyp, &fym);
 
-		rc = fy_scan_comment(fyp, handle, false);
-		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_scan_comment() failed");
-	}
+	/* only the one that in the same line */
+	if (fym.line != fyt->handle.end_mark.line)
+		return 0;
+
+	/* it's a right comment only if it's on the same line */
+	handle = fy_token_comment_handle(fyt, fycp_right, true);
+	fyp_error_check(fyp, handle, err_out,
+			"fy_token_comment_handle() right failed\n");
+
+	fy_input_unref(handle->fyi);
+	fy_atom_reset(handle);
+
+	rc = fy_scan_comment(fyp, handle, false);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_scan_comment() failed");
+
+	if (fy_atom_is_set(handle))
+		count++;
+	return count;
+
+err_out_rc:
+	return rc;
+err_out:
+	rc = -1;
+	goto err_out;
+}
+
+int fy_fetch_flow_collection_entry(struct fy_parser *fyp, int c);
+
+int fy_parse_handle_comma(struct fy_parser *fyp, int c)
+{
+	struct fy_mark m;
+	int rc;
+
+	fyp->indent_line = fyp_line(fyp);
+
+	fyp_error_check(fyp, c == ',', err_out,
+			"illegal comma");
+
+	fy_get_mark(fyp, &m);
+
+	fyp_scan_debug(fyp, "fy_fetch_flow_collection_entry(%c)", c);
+	rc = fy_fetch_flow_collection_entry(fyp, c);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_fetch_flow_collection_entry() failed");
+
+	fyp->last_was_comma = true;
+	fyp->last_comma_mark = m;
+
 	return 0;
 
 err_out_rc:
 	return rc;
+err_out:
+	rc = -1;
+	goto err_out_rc;
+}
+
+int fy_parse_handle_right_comment_after_comma(struct fy_parser *fyp, struct fy_token *fyt)
+{
+	int c, rc, start_line;
+
+	/* not collecting comment or now in flow mode */
+	if (!(fyp->cfg.flags & FYPCF_PARSE_COMMENTS) || !fyp->flow_level)
+		return 0;
+
+	/* we can only attach right to these tokens */
+	if (fyt->type != FYTT_SCALAR &&
+	    fyt->type != FYTT_FLOW_SEQUENCE_END &&
+	    fyt->type != FYTT_FLOW_MAPPING_END)
+		return 0;
+
+	/* skip white space while we're on the same line */
+	start_line = fyp_line(fyp);
+	while (fy_is_ws(c = fy_parse_peek(fyp)))
+		fy_advance(fyp, c);
+
+	/* is it a comma at the same line? */
+	if (c != ',' || start_line != fyp_line(fyp))
+		return 0;
+
+	/* immediately parse the comma because grab the scalar to attach the comment */
+	rc = fy_parse_handle_comma(fyp, ',');
+	fyp_error_check(fyp, !rc, err_out_rc,
+		"fy_parse_handle_comma() failed");
+
+	return 0;
+err_out_rc:
+	return rc;
+}
+
+int fy_parse_handle_comments_after_token(struct fy_parser *fyp, struct fy_token *fyt)
+{
+	int rc;
+
+	if (!(fyp->cfg.flags & FYPCF_PARSE_COMMENTS))
+		return 0;
+
+	rc = fy_attach_comments_if_any(fyp, fyt);
+	fyp_error_check(fyp, rc >= 0, err_out_rc,
+			"fy_attach_right_hand_comment() failed");
+
+	rc = fy_parse_handle_right_comment_after_comma(fyp, fyt);
+	fyp_error_check(fyp, rc >= 0, err_out_rc,
+			"fy_parse_handle_right_comment_after_comma() failed");
+
+	return 0;
+
+err_out_rc:
+	return rc;
+err_out:
+	rc = -1;
+	goto err_out;
 }
 
 int fy_scan_to_next_token(struct fy_parser *fyp)
@@ -1038,9 +1255,8 @@ int fy_scan_to_next_token(struct fy_parser *fyp)
 	int c, c_after_ws, i, rc = 0;
 	bool tabs_allowed, sloppy_flow, no_indent;
 	ssize_t offset;
-	struct fy_atom *handle;
+	struct fy_atom this_comment;
 	struct fy_reader *fyr;
-	char *str;
 
 	fyr = fyp->reader;
 
@@ -1049,7 +1265,7 @@ int fy_scan_to_next_token(struct fy_parser *fyp)
 			"fy_reader_input_scan_token_mark() failed");
 
 	/* skip BOM at the start of the stream */
-	if (fyr->current_input_pos == 0 && (c = fy_parse_peek(fyp)) == FY_UTF8_BOM) {
+	if (fy_reader_current_input_pos(fyr) == 0 && (c = fy_parse_peek(fyp)) == FY_UTF8_BOM) {
 
 		fy_advance(fyp, c);
 		/* reset column */
@@ -1131,13 +1347,38 @@ int fy_scan_to_next_token(struct fy_parser *fyp)
 		/* comment? */
 		if (c == '#') {
 
-			handle = NULL;
-			if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS)
-				handle = &fyp->last_comment;
+			if (!(fyp->cfg.flags & FYPCF_PARSE_COMMENTS)) {
+				rc = fy_scan_comment(fyp, NULL, false);
+				fyp_error_check(fyp, !rc, err_out_rc,
+						"fy_scan_comment() failed");
+			} else {
 
-			rc = fy_scan_comment(fyp, handle, false);
-			fyp_error_check(fyp, !rc, err_out_rc,
-					"fy_scan_comment() failed");
+				memset(&this_comment, 0, sizeof(this_comment));
+				fy_atom_reset(&this_comment);
+				rc = fy_scan_comment(fyp, &this_comment, false);
+				fyp_error_check(fyp, !rc, err_out_rc,
+						"fy_scan_comment() failed");
+
+				if (fy_atom_is_set(&fyp->last_comment)) {
+
+					/* merge consecutive override comments */
+					if (fy_atom_is_set(&fyp->override_comment) &&
+						fy_comment_atoms_seperated_by_ws(fyp, &fyp->override_comment, &fyp->last_comment)) {
+						fyp->override_comment.end_mark = fyp->last_comment.end_mark;
+						fy_input_unref(fyp->last_comment.fyi);
+					} else {
+						/* override comment keeps the last comment */
+						fy_input_unref(fyp->override_comment.fyi);
+						fy_atom_reset(&fyp->override_comment);
+						/* transfer the reference, do not take an additional one */
+						fyp->override_comment = fyp->last_comment;
+					}
+
+					fy_atom_reset(&fyp->last_comment);
+					fyp->last_comment = this_comment;
+				} else
+					fyp->last_comment = this_comment;
+			}
 
 			tabs_allowed = (fyp->flow_level || !fyp->simple_key_allowed) || fyp_tabsize(fyp);
 		}
@@ -1173,8 +1414,8 @@ done:
 	fyp_error_check(fyp, !rc, err_out_rc,
 			"fy_reader_input_scan_token_mark() failed");
 
-    fy_utf8_format_a(fy_parse_peek(fyp), fyue_singlequote, &str);
-	fyp_scan_debug(fyp, "%s: next token starts with c='%s'", __func__, str);
+	fyp_scan_debug(fyp, "%s: next token starts with c='%s'", __func__,
+			fy_utf8_format_a(fy_parse_peek(fyp), fyue_singlequote));
 	return 0;
 }
 
@@ -1297,6 +1538,8 @@ int fy_push_indent(struct fy_parser *fyp, int indent, bool generated_block_map, 
 	fyp->parent_indent = fyp->indent;
 	fyp->indent = indent;
 	fyp->indent_line = indent_line;
+	if (fyp->parse_block_only && fyp->starting_indent < 0)
+		fyp->starting_indent = indent;
 	fyp->generated_block_map = generated_block_map;
 
 	fyp_scan_debug(fyp, "push_indent %d -> %d - generated_block_map=%s\n",
@@ -1692,7 +1935,7 @@ int fy_fetch_stream_end(struct fy_parser *fyp)
 	int rc;
 
 	/* only reset the stream in regular mode */
-	if (!fyp->parse_flow_only)
+	if (!fyp->parse_flow_only && !fyp->parse_block_only)
 		fy_reader_stream_end(fyp->reader);
 
 	fy_remove_all_simple_keys(fyp);
@@ -1811,7 +2054,7 @@ err_out:
 	return false;
 }
 
-int fy_scan_tag_handle_length(struct fy_parser *fyp, int start)
+int fy_scan_tag_handle_length(struct fy_parser *fyp, int start, bool req_end_bang)
 {
 	int c, length, i, width;
 	ssize_t offset;
@@ -1882,6 +2125,10 @@ int fy_scan_tag_handle_length(struct fy_parser *fyp, int start)
 		c = fy_parse_peek_at_internal(fyp, start + length, &offset);
 	}
 
+	FYP_PARSE_ERROR_CHECK(fyp, start + length, 1, FYEM_SCAN,
+			!req_end_bang || c == '!', err_out,
+			"Missing required ! at end of tag handle");
+
 	/* if last character is !, copy it */
 	if (c == '!')
 		length++;
@@ -1940,47 +2187,6 @@ err_out:
 	return -1;
 }
 
-int fy_scan_tag_handle(struct fy_parser *fyp, bool is_directive,
-		struct fy_atom *handle)
-{
-	int length;
-
-	length = fy_scan_tag_handle_length(fyp, 0);
-	fyp_error_check(fyp, length > 0, err_out,
-			"fy_scan_tag_handle_length() failed");
-
-	fy_fill_atom(fyp, length, handle);
-
-	return 0;
-
-err_out:
-	return -1;
-}
-
-
-int fy_scan_tag_uri(struct fy_parser *fyp, bool is_directive,
-		struct fy_atom *handle)
-{
-	int length;
-	bool is_valid;
-
-	length = fy_scan_tag_uri_length(fyp, 0);
-	fyp_error_check(fyp, length > 0, err_out,
-			"fy_scan_tag_uri_length() failed");
-
-	is_valid = fy_scan_tag_uri_is_valid(fyp, 0, length);
-	fyp_error_check(fyp, is_valid, err_out,
-			"tag URI is invalid");
-
-	fy_fill_atom(fyp, length, handle);
-	handle->style = FYAS_URI;	/* this is a URI, need to handle URI escapes */
-
-	return 0;
-
-err_out:
-	return -1;
-}
-
 int fy_scan_directive(struct fy_parser *fyp)
 {
 	int c, advance, version_length, tag_length, uri_length;
@@ -1988,32 +2194,39 @@ int fy_scan_directive(struct fy_parser *fyp)
 	enum fy_reader_mode rdmode;
 	enum fy_token_type type = FYTT_NONE;
 	struct fy_atom handle;
-	bool is_uri_valid;
+	bool is_uri_valid, only_ws;
 	struct fy_token *fyt;
 	int i, lastc;
 
-	if (!fy_parse_strcmp(fyp, "YAML") && fy_is_ws(fy_parse_peek_at(fyp, 4))) {
-		advance = 5;
+	if (!fy_parse_strcmp(fyp, "YAML") && fy_is_blank_lb_r_n(fy_parse_peek_at(fyp, 4)))
 		type = FYTT_VERSION_DIRECTIVE;
-	} else if (!fy_parse_strcmp(fyp, "TAG") && fy_is_ws(fy_parse_peek_at(fyp, 3))) {
-		advance = 4;
+	else if (!fy_parse_strcmp(fyp, "TAG") && fy_is_blank_lb_r_n(fy_parse_peek_at(fyp, 3)))
 		type = FYTT_TAG_DIRECTIVE;
-	} else {
+	else {
 		/* skip until linebreak (or #) */
 		i = 0;
 		lastc = -1;
-		while ((c = fy_parse_peek_at(fyp, i)) != -1 && !fyp_is_lb(fyp, c)) {
+		only_ws = true;
+		while ((c = fy_parse_peek_at(fyp, i)) >= 0 && !fyp_is_lb(fyp, c)) {
 			if (fy_is_ws(lastc) && c == '#')
 				break;
+			if (!fy_is_ws(c))
+				only_ws = false;
 			lastc = c;
 			i++;
 		}
 
+		FYP_PARSE_ERROR_CHECK(fyp, i, 1, FYEM_SCAN, !only_ws, err_out,
+			"Directive indicator %% without a directive");
+
 		FYP_PARSE_WARNING(fyp, 0, i, FYEM_SCAN,
 			"Unsupported directive");
 
+		FYP_PARSE_ERROR_CHECK(fyp, i, 1, FYEM_SCAN, c >= 0 || c == FYUG_EOF, err_out,
+			"Bad UTF8 input while scanning unknown %%TAG directive");
+
 		if (fy_is_ws(lastc) && c == '#') {
-			while ((c = fy_parse_peek_at(fyp, i)) != -1 && !fyp_is_lb(fyp, c))
+			while ((c = fy_parse_peek_at(fyp, i)) >= 0 && !fyp_is_lb(fyp, c))
 				i++;
 		}
 
@@ -2029,11 +2242,21 @@ int fy_scan_directive(struct fy_parser *fyp)
 		return 0;
 	}
 
-	fyp_error_check(fyp, type != FYTT_NONE, err_out,
-			"neither YAML|TAG found");
+	/* advance over the YAML/TAG part */
+	advance = type == FYTT_VERSION_DIRECTIVE ? 4 : 3;
 
 	/* advance */
 	fy_advance_by(fyp, advance);
+
+	/* must be a whitespace after YAML/TAG */
+	c = fy_parse_peek(fyp);
+
+	FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
+			fy_is_ws(c), err_out,
+			"illegal empty %%%s directive",
+			type == FYTT_VERSION_DIRECTIVE ? "YAML" : "TAG");
+
+	fy_advance(fyp, c);
 
 	/* skip white space */
 	while (fy_is_ws(c = fy_parse_peek(fyp)))
@@ -2048,8 +2271,11 @@ int fy_scan_directive(struct fy_parser *fyp)
 		fyp_error_check(fyp, version_length > 0, err_out,
 				"fy_scan_yaml_version() failed");
 
+		/* save the version per stream */
+		fyp->stream_version = vers;
+
 		/* set the reader's mode according to the version just scanned */
-		rdmode = fy_version_compare(&vers, fy_version_make(1, 1)) <= 0 ? fyrm_yaml_1_1 : fyrm_yaml;
+		rdmode = fy_reader_calculate_mode(&vers, false);
 		fy_reader_set_mode(fyp->reader, rdmode);
 
 		fy_advance_by(fyp, version_length);
@@ -2062,7 +2288,7 @@ int fy_scan_directive(struct fy_parser *fyp)
 
 	} else {
 
-		tag_length = fy_scan_tag_handle_length(fyp, 0);
+		tag_length = fy_scan_tag_handle_length(fyp, 0, true);
 		fyp_error_check(fyp, tag_length > 0, err_out,
 				"fy_scan_tag_handle_length() failed");
 
@@ -2098,7 +2324,7 @@ int fy_scan_directive(struct fy_parser *fyp)
 	/* skip until linebreak (or #) */
 	i = 0;
 	lastc = -1;
-	while ((c = fy_parse_peek_at(fyp, i)) != -1 && !fyp_is_lb(fyp, c)) {
+	while ((c = fy_parse_peek_at(fyp, i)) >= 0 && !fyp_is_lb(fyp, c)) {
 		if (fy_is_ws(lastc) && c == '#')
 			break;
 
@@ -2168,6 +2394,10 @@ int fy_fetch_document_indicator(struct fy_parser *fyp, enum fy_token_type type)
 	while (fy_is_ws(c = fy_parse_peek(fyp)))
 		fy_advance(fyp, c);
 
+	rc = fy_attach_comments_if_any(fyp, fyt);
+	fyp_error_check(fyp, rc >= 0, err_out_rc,
+			"fy_attach_right_hand_comment() failed");
+
 	return 0;
 
 err_out:
@@ -2218,9 +2448,34 @@ int fy_fetch_flow_collection_mark_start(struct fy_parser *fyp, int c)
 	fyp_error_check(fyp, fyt, err_out,
 			"fy_token_queue_simple() failed");
 
-	rc = fy_save_simple_key_mark(fyp, &skm, type, NULL);
-	fyp_error_check(fyp, !rc, err_out_rc,
-			"fy_save_simple_key_mark() failed");
+	/* json does not have complex keys */
+	if (!fyp_json_mode(fyp)) {
+		rc = fy_save_simple_key_mark(fyp, &skm, type, NULL);
+		fyp_error_check(fyp, !rc, err_out_rc,
+				"fy_save_simple_key_mark() failed");
+	}
+
+	/* if a last comment exists and is valid */
+	if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
+			(fy_atom_is_set(&fyp->override_comment) || fy_atom_is_set(&fyp->last_comment))) {
+
+		struct fy_atom *handle;
+
+		handle = fy_token_comment_handle(fyt, fycp_top, true);
+		fyp_error_check(fyp, handle, err_out,
+			"fy_token_comment_handle() failed");
+
+		fy_input_unref(handle->fyi);
+		fy_atom_reset(handle);
+
+		if (fy_atom_is_set(&fyp->override_comment)) {
+			*handle = fyp->override_comment;
+			fy_atom_reset(&fyp->override_comment);
+		} else if (fy_atom_is_set(&fyp->last_comment)) {
+			*handle = fyp->last_comment;
+			fy_atom_reset(&fyp->last_comment);
+		}
+	}
 
 	/* increase flow level */
 	fyp->flow_level++;
@@ -2352,6 +2607,11 @@ int fy_fetch_flow_collection_mark_end(struct fy_parser *fyp, int c)
 		}
 	}
 
+	rc = fy_parse_handle_comments_after_token(fyp, fyt);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_parse_handle_comments_after_token() failed");
+
+
 	return 0;
 
 err_out:
@@ -2392,7 +2652,10 @@ int fy_fetch_flow_collection_entry(struct fy_parser *fyp, int c)
 	fyp->tab_used_for_ws = false;
 	fyp_scan_debug(fyp, "simple_key_allowed -> %s\n", fyp->simple_key_allowed ? "true" : "false");
 
-	fyt_last = fy_token_list_tail(&fyp->queued_tokens);
+	if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS)
+		fyt_last = fy_token_list_tail(&fyp->queued_tokens);
+	else
+		fyt_last = NULL;
 
 	fyt = fy_token_queue_simple(fyp, &fyp->queued_tokens, type, 1);
 	fyp_error_check(fyp, fyt, err_out,
@@ -2406,20 +2669,21 @@ int fy_fetch_flow_collection_entry(struct fy_parser *fyp, int c)
 			"invalid comment after comma");
 
 	/* skip white space */
-	while (fy_is_ws(c = fy_parse_peek(fyp)))
-		fy_advance(fyp, c);
+	if (fyt_last) {
+		while (fy_is_ws(c = fy_parse_peek(fyp)))
+			fy_advance(fyp, c);
 
-	if (c == '#') {
-		if (fyt_last)
-			fyt = fyt_last;
+		if (c == '#') {
+			handle = fy_token_comment_handle(fyt_last, fycp_right, true);
+			fyp_error_check(fyp, handle, err_out,
+				"fy_token_comment_handle() failed");
+			fy_input_unref(handle->fyi);
+			fy_atom_reset(handle);
 
-		handle = NULL;
-		if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS)
-			handle = fy_token_comment_handle(fyt, fycp_right, true);
-
-		rc = fy_scan_comment(fyp, handle, true);
-		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_scan_comment() failed");
+			rc = fy_scan_comment(fyp, handle, true);
+			fyp_error_check(fyp, !rc, err_out_rc,
+					"fy_scan_comment() failed");
+		}
 	}
 
 	return 0;
@@ -2435,6 +2699,7 @@ int fy_fetch_block_entry(struct fy_parser *fyp, int c)
 	struct fy_mark mark;
 	struct fy_simple_key *fysk;
 	struct fy_token *fyt;
+	struct fy_atom *handle;
 
 	fyp_error_check(fyp, c == '-', err_out,
 			"illegal block entry");
@@ -2471,7 +2736,30 @@ int fy_fetch_block_entry(struct fy_parser *fyp, int c)
 		fyt = fy_token_queue_simple_internal(fyp, &fyp->queued_tokens, FYTT_BLOCK_SEQUENCE_START, 0);
 		fyp_error_check(fyp, fyt, err_out,
 				"fy_token_queue_simple_internal() failed");
+
+		/* if a last comment exists and is valid */
+		if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
+				(fy_atom_is_set(&fyp->override_comment) || fy_atom_is_set(&fyp->last_comment))) {
+
+			handle = fy_token_comment_handle(fyt, fycp_top, true);
+			fyp_error_check(fyp, handle, err_out,
+				"fy_token_comment_handle() failed");
+			fy_input_unref(handle->fyi);
+			fy_atom_reset(handle);
+
+			if (fy_atom_is_set(&fyp->override_comment)) {
+				*handle = fyp->override_comment;
+				fy_atom_reset(&fyp->override_comment);
+			} else if (fy_atom_is_set(&fyp->last_comment)) {
+				*handle = fyp->last_comment;
+				fy_atom_reset(&fyp->last_comment);
+			}
+		}
 	}
+
+	/* always reset the override comment */
+	fy_input_unref(fyp->override_comment.fyi);
+	fy_atom_reset(&fyp->override_comment);
 
 	if (c == '-' && fyp->flow_level) {
 		/* this is an error, but we let the parser catch it */
@@ -2557,6 +2845,26 @@ int fy_fetch_key(struct fy_parser *fyp, int c)
 		fyt = fy_token_queue_simple_internal(fyp, &fyp->queued_tokens, FYTT_BLOCK_MAPPING_START, 0);
 		fyp_error_check(fyp, fyt, err_out,
 				"fy_token_queue_simple_internal() failed");
+
+		/* if a last comment exists and is valid */
+		if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) &&
+				(fy_atom_is_set(&fyp->override_comment) || fy_atom_is_set(&fyp->last_comment))) {
+
+			handle = fy_token_comment_handle(fyt, fycp_top, true);
+			fyp_error_check(fyp, handle, err_out,
+				"fy_token_comment_handle() failed");
+
+			fy_input_unref(handle->fyi);
+			fy_atom_reset(handle);
+
+			if (fy_atom_is_set(&fyp->override_comment)) {
+				*handle = fyp->override_comment;
+				fy_atom_reset(&fyp->override_comment);
+			} else if (fy_atom_is_set(&fyp->last_comment)) {
+				*handle = fyp->last_comment;
+				fy_atom_reset(&fyp->last_comment);
+			}
+		}
 	}
 
 	rc = fy_remove_simple_key(fyp, FYTT_KEY);
@@ -2590,12 +2898,15 @@ int fy_fetch_key(struct fy_parser *fyp, int c)
 	} else
 		fyp->tab_used_for_ws = false;	// XXX
 
-	/* comment? */
-	if (c == '#') {
+	/* comment which we care about? */
+	if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) && c == '#') {
 
-		handle = NULL;
-		if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS)
-			handle = fy_token_comment_handle(fyt, fycp_right, true);
+		handle = fy_token_comment_handle(fyt, fycp_right, true);
+		fyp_error_check(fyp, handle, err_out,
+			"fy_token_comment_handle() failed");
+
+		fy_input_unref(handle->fyi);
+		fy_atom_reset(handle);
 
 		rc = fy_scan_comment(fyp, handle, false);
 		fyp_error_check(fyp, !rc, err_out_rc,
@@ -2754,6 +3065,47 @@ int fy_fetch_value(struct fy_parser *fyp, int c)
 		fyp_error_check(fyp, fyt, err_out,
 				"fy_token_queue_simple_internal() failed");
 
+		/* if a last comment exists and is valid */
+		if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS) {
+
+			struct fy_atom *key_handle, *handle;
+
+			if (fysk && fysk->token) {
+				key_handle = fy_token_comment_handle(fysk->token, fycp_top, true);
+				fyp_error_check(fyp, key_handle, err_out,
+					"fy_token_comment_handle() failed");
+
+				handle = fy_token_comment_handle(fyt, fycp_top, true);
+				fyp_error_check(fyp, handle, err_out,
+					"fy_token_comment_handle() failed");
+
+				/* move the comment to the block mapping start */
+				fy_input_unref(handle->fyi);
+				fy_atom_reset(handle);
+				*handle = *key_handle;
+				fy_atom_reset(key_handle);
+			}
+
+			if (fy_atom_is_set(&fyp->override_comment) ||
+			    fy_atom_is_set(&fyp->last_comment)) {
+
+				handle = fy_token_comment_handle(fyt, fycp_top, true);
+				fyp_error_check(fyp, handle, err_out,
+					"fy_token_comment_handle() failed");
+
+				fy_input_unref(handle->fyi);
+				fy_atom_reset(handle);
+
+				if (fy_atom_is_set(&fyp->override_comment)) {
+					*handle = fyp->override_comment;
+					fy_atom_reset(&fyp->override_comment);
+				} else if (fy_atom_is_set(&fyp->last_comment)) {
+					*handle = fyp->last_comment;
+					fy_atom_reset(&fyp->last_comment);
+				}
+			}
+		}
+
 		/* update with this mark */
 		fyt->handle.start_mark = fyt->handle.end_mark = mark_insert;
 	}
@@ -2822,22 +3174,24 @@ int fy_fetch_value(struct fy_parser *fyp, int c)
 				fyp->pending_complex_key_column);
 	}
 
-	if (fyt_insert) {
+	if ((fyp->cfg.flags & FYPCF_PARSE_COMMENTS) && fyt_insert) {
 		/* eat whitespace */
 		while (fy_is_blank(c = fy_parse_peek(fyp)))
 			fy_advance(fyp, c);
 
 		/* comment? */
 		if (c == '#') {
-			chandle = NULL;
-			if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS)
-				chandle = fy_token_comment_handle(fyt_insert, fycp_right, true);
+			chandle = fy_token_comment_handle(fyt_insert, fycp_right, true);
+			fyp_error_check(fyp, chandle, err_out,
+				"fy_token_comment_handle() failed");
+
+			fy_input_unref(chandle->fyi);
+			fy_atom_reset(chandle);
 
 			rc = fy_scan_comment(fyp, chandle, false);
 			fyp_error_check(fyp, !rc, err_out_rc,
 					"fy_scan_comment() failed");
 		}
-
 	}
 
 	return 0;
@@ -2938,6 +3292,11 @@ int fy_fetch_anchor_or_alias(struct fy_parser *fyp, int c)
 	fyp_error_check(fyp, fyt, err_out_rc,
 			"fy_token_queue() failed");
 
+	if (type == FYTT_ALIAS)
+		fyt->alias.style_start = skm.mark;
+	else
+		fyt->anchor.style_start = skm.mark;
+
 	/* scan forward for '-' block sequence indicator */
 	if (type == FYTT_ANCHOR && !fyp->flow_level) {
 		for (i = 0; ; i++) {
@@ -3003,7 +3362,7 @@ int fy_fetch_tag(struct fy_parser *fyp, int c)
 	else {
 		/* either !suffix or !handle!suffix */
 		/* we scan back to back, and split handle/suffix */
-		handle_length = fy_scan_tag_handle_length(fyp, prefix_length);
+		handle_length = fy_scan_tag_handle_length(fyp, prefix_length, false);
 		fyp_error_check(fyp, handle_length > 0, err_out,
 				"fy_scan_tag_handle_length() failed");
 	}
@@ -3089,17 +3448,17 @@ err_out_rc:
 }
 
 int fy_scan_block_scalar_indent(struct fy_parser *fyp, int indent, int *breaks, int *breaks_length,
-				int *presentation_breaks_length, int *first_break_length, int *lastc)
+				int *presentation_breaks_length, int *first_break_length, int *lastc,
+				int *max_indentp, bool first_scan)
 {
-	int c, max_indent = 0, min_indent, break_length;
+	int c, max_indent = 0, break_length, col;
 
 	*breaks = 0;
 	*breaks_length = 0;
 	*presentation_breaks_length = 0;
 	*first_break_length = 0;
 
-	/* minimum indent is 0 for zero indent scalars */
-	min_indent = fyp->document_first_content_token ? 0 : 1;
+	max_indent = -1;
 
 	/* scan over the indentation spaces */
 	/* we don't format content for display */
@@ -3126,19 +3485,25 @@ int fy_scan_block_scalar_indent(struct fy_parser *fyp, int indent, int *breaks, 
 				(!indent || fyp_column(fyp) < indent))
 				fy_advance(fyp, c);
 		}
+		col = fyp_column(fyp);
 
-		if (fyp_column(fyp) > max_indent)
-			max_indent = fyp_column(fyp);
+		if (col > max_indent)
+			max_indent = col;
 
 		/* non-empty line or EOF */
 		if (!fyp_is_lb(fyp, c)) {
 			*lastc = c;
+			indent = col;
+
+			FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
+					c < 0 || !first_scan || max_indent <= indent, err_out,
+					"block scalar with wrong indented line after spaces only");
 			break;
 		}
 
 		fy_advance(fyp, c);
 
-		break_length = fy_utf8_width(c);
+		break_length = (int)fy_utf8_width(c);
 
 		(*breaks)++;
 		(*breaks_length) += 1;
@@ -3148,14 +3513,6 @@ int fy_scan_block_scalar_indent(struct fy_parser *fyp, int indent, int *breaks, 
 
 		if (!*first_break_length)
 			*first_break_length = break_length;
-	}
-
-	if (!indent) {
-		indent = max_indent;
-		if (indent < fyp->indent)
-			indent = fyp->indent;
-		if (indent < min_indent)
-			indent = min_indent;
 	}
 
 	return indent;
@@ -3168,11 +3525,11 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 {
 	struct fy_atom handle;
 	enum fy_atom_chomp chomp = FYAC_CLIP;	/* default */
-	int lastc, rc, increment = 0, current_indent, new_indent, indent = 0;
-	int breaks, breaks_length, presentation_breaks_length, first_break_length;
+	int lastc, rc, increment = 0, current_indent, new_indent, indent = 0, check_indent;
+	int breaks, breaks_length, presentation_breaks_length, first_break_length, max_indent, min_indent;
 	bool doc_start_end_detected, empty, empty_line, prev_empty_line, indented, prev_indented, first;
-	bool has_ws, has_lb, starts_with_ws, starts_with_lb, ends_with_ws, ends_with_lb, trailing_lb;
-	bool pending_nl, ends_with_eof, starts_with_eof;
+	bool has_ws, has_lb, has_weird_nl, starts_with_ws, starts_with_lb, ends_with_ws, ends_with_lb, trailing_lb;
+	bool pending_nl, ends_with_eof, starts_with_eof, content_is_eof;
 	struct fy_token *fyt;
 	size_t length, line_length, trailing_ws, trailing_breaks_length;
 	size_t leading_ws;
@@ -3180,16 +3537,12 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	unsigned int chomp_amt;
 	int actual_lb_length, pending_lb_length;
 	struct fy_mark indicator_mark;
-	bool generated_indent;
-	char *str;
-#ifdef ATOM_SIZE_CHECK
+	bool generated_indent, final_lb;
 	size_t tlength;
-#endif
 
-    fy_utf8_format_a(c, fyue_singlequote, &str);
 	fyp_error_check(fyp, c == '|' || c == '>', err_out,
 			"bad start of block scalar ('%s')",
-				str);
+				fy_utf8_format_a(c, fyue_singlequote));
 
 	fy_get_mark(fyp, &indicator_mark);
 
@@ -3276,11 +3629,15 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	}
 
 	/* advance */
-	fy_advance(fyp, c);
+	if (fy_utf8_is_valid(c))
+		fy_advance(fyp, c);
 
 	fy_fill_atom_start(fyp, &handle);
 
 	starts_with_eof = c < 0;
+
+	c = fy_parse_peek(fyp);
+	content_is_eof = c < 0;	/* any error or EOF */
 
 	current_indent = fyp->indent >= 0 ? fyp->indent : 0;
 	indent = increment ? current_indent + increment : 0;
@@ -3291,15 +3648,27 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	empty = true;
 	has_ws = false;
 	has_lb = false;
+	has_weird_nl = false;
 	starts_with_ws = false;
 	starts_with_lb = false;
 	ends_with_ws = false;
 	ends_with_lb = false;
 	trailing_lb = false;
 
-	new_indent = fy_scan_block_scalar_indent(fyp, indent, &breaks, &breaks_length, &presentation_breaks_length, &first_break_length, &lastc);
+	new_indent = fy_scan_block_scalar_indent(fyp, indent, &breaks, &breaks_length,
+			&presentation_breaks_length, &first_break_length, &lastc, &max_indent, true);
 	fyp_error_check(fyp, new_indent >= 0, err_out,
 			"fy_scan_block_scalar_indent() failed");
+
+	min_indent = fyp->indent;
+
+	if (!(fyp->state == FYPS_IMPLICIT_DOCUMENT_START ||
+	     fyp->state == FYPS_DOCUMENT_START ||
+	     fyp->state == FYPS_DOCUMENT_CONTENT))
+		min_indent++;
+
+	if (new_indent < min_indent)
+		new_indent = min_indent;
 
 	length = breaks_length;
 	length += presentation_breaks_length;
@@ -3367,24 +3736,32 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 
 			line_length += fy_utf8_width(c);
 		}
+		/* keep the variables without warning */
+		(void)trailing_ws;
+		(void)leading_ws;
 
 		if (doc_start_end_detected)
 			break;
 
 		if (!fy_is_z(c)) {
 			/* eat line break */
-			actual_lb_length = fy_utf8_width(c);
+			actual_lb_length = (int)fy_utf8_width(c);
 			fy_advance(fyp, c);
 
 			has_lb = true;
-			new_indent = fy_scan_block_scalar_indent(fyp, indent, &breaks, &breaks_length, &presentation_breaks_length, &first_break_length, &lastc);
-			fyp_error_check(fyp, new_indent >= 0, err_out,
+			check_indent = fy_scan_block_scalar_indent(fyp, indent, &breaks,
+					&breaks_length, &presentation_breaks_length,
+					&first_break_length, &lastc,
+					&max_indent, false);
+			fyp_error_check(fyp, check_indent >= 0, err_out,
 					"fy_scan_block_scalar_indent() failed");
 			if (fy_is_lb_LS_PS(c))
 				presentation_breaks_length += actual_lb_length;
+
+			/* very simple heuristic, if we hit a '\r' then force size check */
+			has_weird_nl |= c != '\n';
 		} else {
 			has_lb = false;
-			new_indent = indent;
 			// was chomp = FYAC_STRIP, very very wrong
 
 			breaks = 0;
@@ -3466,7 +3843,6 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 
 
 		length += prefix_length + line_length + suffix_length;
-		indent = new_indent;
 
 		prev_empty_line = empty_line;
 		prev_indented = indented;
@@ -3511,42 +3887,24 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	if (chomp_amt == (unsigned int)-1)
 		chomp_amt = current_indent;
 
+	/* whether the final character is an lb (or implied to be one) */
+	final_lb = pending_nl || (!starts_with_eof && ends_with_eof);
+	trailing_lb = trailing_breaks_length > 0;
+	ends_with_ws = fy_is_ws(lastc);
+
 	switch (chomp) {
 	case FYAC_CLIP:
-		if (pending_nl || (!starts_with_eof && ends_with_eof)) {
-			if (actual_lb_length <= 2)
-				length += 1;
-			else
-				length += actual_lb_length;
-
-			ends_with_lb = true;
-			ends_with_ws = false;
-		} else {
-			if (trailing_breaks_length > 0)
-				ends_with_lb = true;
-			else if (fy_is_ws(lastc))
-				ends_with_ws = true;
-		}
-		break;
 	case FYAC_KEEP:
-		if (pending_nl || (!starts_with_eof && ends_with_eof))
-			length += actual_lb_length;
+		if (chomp == FYAC_KEEP)
+			length += breaks + presentation_breaks_length;
 
-		length += breaks + presentation_breaks_length;
+		if (final_lb && !content_is_eof)
+			length += (actual_lb_length == 0 && pending_nl) ? 1 : actual_lb_length;
 
-		trailing_lb = trailing_breaks_length > 0;
-		if (pending_nl || (!starts_with_eof && ends_with_eof) || trailing_breaks_length) {
-			ends_with_lb = true;
-			ends_with_ws = false;
-		} else if (fy_is_ws(lastc)) {
-			ends_with_ws = true;
-			ends_with_lb = false;
-		}
+		ends_with_lb = final_lb || trailing_lb;
 		break;
 	case FYAC_STRIP:
 		ends_with_lb = false;
-		if (fy_is_ws(lastc))
-			ends_with_ws = true;
 		break;
 	}
 
@@ -3571,19 +3929,22 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	handle.json_mode = fyp_json_mode(fyp);
 	handle.lb_mode = fyp_lb_mode(fyp);
 	handle.fws_mode = fyp_fws_mode(fyp);
+	handle.directive0_mode = fyp_directive0_mode(fyp);
 	handle.tabsize = fyp_tabsize(fyp);
 	handle.ends_with_eof = ends_with_eof;
+	handle.is_merge_key = false;
 
-#ifdef ATOM_SIZE_CHECK
-	tlength = fy_atom_format_text_length(&handle);
-	if (tlength != length) {
-        fy_utf8_format_text_a(fy_atom_data(&handle), fy_atom_size(&handle), fyue_doublequote, &str);
-		fyp_warning(fyp, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
-			tlength, length,
-			str);
-		length = tlength;
+	/* force calculation of length if we had a CR */
+	if (has_weird_nl || FORCE_ATOM_SIZE_CHECK_DEFAULT) {
+		tlength = fy_atom_format_text_length(&handle);
+		if (tlength != length) {
+			if (!has_weird_nl)
+				fyp_warning(fyp, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
+					tlength, length,
+					fy_utf8_format_text_a(fy_atom_data(&handle), fy_atom_size(&handle), fyue_doublequote));
+			length = tlength;
+		}
 	}
-#endif
 
 	handle.storage_hint = length;
 	handle.storage_hint_valid = true;
@@ -3592,11 +3953,12 @@ int fy_fetch_block_scalar(struct fy_parser *fyp, bool is_literal, int c)
 	fyp_error_check(fyp, fyt, err_out_rc,
 			"fy_token_queue() failed");
 
-	if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS) {
-		rc = fy_attach_comments_if_any(fyp, fyt);
-		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_attach_right_hand_comment() failed");
-	}
+	/* update the start of the style */
+	fyt->scalar.style_start = indicator_mark;
+
+	rc = fy_attach_comments_if_any(fyp, fyt);
+	fyp_error_check(fyp, rc >= 0, err_out_rc,
+			"fy_attach_right_hand_comment() failed");
 
 	if (generated_indent) {
 		rc = fy_pop_indent(fyp);
@@ -3622,7 +3984,7 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 	int breaks_found, blanks_found, break_run, total_code_length;
 	int breaks_found_length, first_break_length, value;
 	uint32_t hi_surrogate, lo_surrogate;
-	bool is_single, is_multiline, esc_lb, ws_lb_only, has_ws, has_lb, has_esc;
+	bool is_single, is_multiline, esc_lb, ws_lb_only, has_ws, has_lb, has_weird_nl, has_esc;
 	bool first, starts_with_ws, starts_with_lb, ends_with_ws, ends_with_lb, trailing_lb = false;
 	bool unicode_esc, is_json_unesc, has_json_esc;
 	int last_esc_lb, break_length, presentation_breaks_length;
@@ -3631,20 +3993,16 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 	size_t escbuf_len;
 	enum fy_utf8_escape esc_mode;
 	const char *ep;
-	char *str;
-#ifdef ATOM_SIZE_CHECK
 	size_t tlength;
-#endif
 
 	(void)last_esc_lb;
 
 	is_single = c == '\'';
 	end_c = c;
 
-    fy_utf8_format_a(c, fyue_singlequote, &str);
 	fyr_error_check(fyr, c == '\'' || c == '"', err_out,
 			"bad start of flow scalar ('%s')",
-				str);
+				fy_utf8_format_a(c, fyue_singlequote));
 
 	fy_reader_get_mark(fyr, &mark);
 
@@ -3664,6 +4022,7 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 	ws_lb_only = true;
 	has_ws = false;
 	has_lb = false;
+	has_weird_nl = false;
 	starts_with_ws = false;
 	starts_with_lb = false;
 	ends_with_ws = false;
@@ -3753,7 +4112,7 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 				size_t len, consumed;
 				const char *p, *s, *e;
 				int8_t cc;
-				int run;
+				size_t run;
 
 				run = 0;
 				while ((p = fy_reader_ensure_lookahead(fyr, 1, &len)) != NULL) {
@@ -3767,7 +4126,7 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 					consumed = s - p;
 					if (consumed) {
 						fy_reader_advance_octets(fyr, consumed);
-						fyr->column += consumed;
+						fyr->column += (int)consumed;
 						lastc = (int)cc;
 					}
 					run += consumed;
@@ -3891,12 +4250,11 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 
 					ep = escbuf;
 
-					fy_utf8_format_a(c, fyue_singlequote, &str);
 					value = fy_utf8_parse_escape(&ep, escbuf_len, esc_mode);
 					FYR_PARSE_ERROR_CHECK(fyr, 0, 2, FYEM_SCAN,
 						value >= 0, err_out,
 						"invalid escape '%s' in %s string",
-						   str,
+							fy_utf8_format_a(c, fyue_singlequote),
 							is_single ? "single-quoted" : "double-quoted");
 
 					fy_reader_advance_by(fyr, 2);
@@ -3963,7 +4321,7 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 				if (!fy_is_lb_LS_PS(c)) {
 					break_length = 1;
 				} else {
-					break_length = fy_utf8_width(c);
+					break_length = (int)fy_utf8_width(c);
 					presentation_breaks_length += break_length;
 				}
 
@@ -3974,6 +4332,8 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 				breaks_found_length += break_length;
 				blanks_found = 0;
 				esc_lb = false;
+
+				has_weird_nl |= c != '\n';
 			} else {
 				has_ws = true;
 				if (!esc_lb)
@@ -4011,22 +4371,25 @@ int fy_reader_fetch_flow_scalar_handle(struct fy_reader *fyr, int c, int indent,
 	handle->json_mode = fy_reader_json_mode(fyr);
 	handle->lb_mode = fy_reader_lb_mode(fyr);
 	handle->fws_mode = fy_reader_flow_ws_mode(fyr);
+	handle->directive0_mode = fy_reader_directive0_mode(fyr);
 	handle->tabsize = fy_reader_tabsize(fyr);
 	handle->ends_with_eof = false;	/* flow scalars never end with EOF and be valid */
+	handle->is_merge_key = false;
+	handle->simple_key_allowed = false;
 
 	/* skip over block scalar end */
 	fy_reader_advance_by(fyr, 1);
 
-#ifdef ATOM_SIZE_CHECK
-	tlength = fy_atom_format_text_length(handle);
-	fy_utf8_format_text_a(fy_atom_data(handle), fy_atom_size(handle), fyue_doublequote, &str);
-	if (tlength != length) {
-		fyr_warning(fyr, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
-			tlength, length,
-			str);
-		length = tlength;
+	if (has_weird_nl || FORCE_ATOM_SIZE_CHECK_DEFAULT) {
+		tlength = fy_atom_format_text_length(handle);
+		if (tlength != length) {
+			if (!has_weird_nl)
+				fyr_warning(fyr, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
+					tlength, length,
+					fy_utf8_format_text_a(fy_atom_data(handle), fy_atom_size(handle), fyue_doublequote));
+			length = tlength;
+		}
 	}
-#endif
 
 	handle->storage_hint = length;
 	handle->storage_hint_valid = true;
@@ -4041,23 +4404,277 @@ err_out:
 	return -1;
 }
 
-int fy_reader_fetch_plain_scalar_handle(struct fy_reader *fyr, int c, int indent, int flow_level, struct fy_atom *handle, bool directive0)
-{
+struct fy_fetch_plain_state {
+	struct fy_mark last_mark;
 	size_t length;
-	int rc = -1, run, nextc, lastc, breaks_found, blanks_found;
-	int breaks_found_length, first_break_length, break_length, presentation_breaks_length;
-	bool has_leading_blanks;
-	bool last_ptr;
-	struct fy_mark mark, last_mark;
-	bool is_multiline, has_lb, has_ws, ends_with_eof;
+	int c;
+	int lastc;
+	bool has_lb;
+	bool has_ws;
 	bool has_json_esc;
-	char *str;
-#ifdef ATOM_SIZE_CHECK
+	bool has_high_ascii;
+	bool simple_key_allowed;
+	bool last_was_lb;
+	bool has_weird_nl;
+};
+
+static FY_ALWAYS_INLINE inline int
+fy_reader_fetch_plain_scalar_handle_inline(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   const bool directive0,
+					   const enum fy_lb_mode lb_mode,
+					   const bool json_mode,
+					   struct fy_fetch_plain_state *state)
+{
+	int nextc, width;
+	size_t length, length_advance;
+	int blanks_found_length, breaks_found_length, first_break_length;
+	union {
+		struct {
+			bool run_has_lb : 1;
+			bool run_has_ws : 1;
+			bool run_has_weird_nl : 1;
+			bool has_json_esc : 1;
+			bool has_high_ascii : 1;
+			bool has_lb : 1;
+			bool has_ws : 1;
+			bool has_weird_nl : 1;
+			bool had_run : 1;
+			bool flow_level_gt_0 : 1;
+			bool flow_level_le_0_indent_ge_0 : 1;
+			bool check_tab : 1;
+			bool last_was_lb : 1;
+		};
+		unsigned short flags;
+	} u;
+	size_t run, len;
+	const char *s;
+
+	u.flags = 0;
+
+	u.flow_level_gt_0 = flow_level > 0;
+	u.flow_level_le_0_indent_ge_0 = flow_level <= 0 && indent >= 0;
+	u.check_tab = fy_reader_tabsize(fyr) || indent < 0;
+
+	length = 0;
+	length_advance = 0;
+
+	for (;;) {
+		/* break for document indicators */
+		if (fy_reader_column(fyr) == 0 &&
+		    ((!fy_reader_strncmp(fyr, "---", 3) || !fy_reader_strncmp(fyr, "...", 3)) &&
+			fy_reader_is_blankz_at_offset(fyr, 3)))
+			break;
+
+		if (c == '#')
+			break;
+
+		/* for YAML 1.1 check % directive break */
+		if (directive0 && fy_reader_column(fyr) == 0 && c == '%')
+			break;
+
+		u.had_run = false;
+		u.last_was_lb = false;
+		while (!fy_is_blankz_m(c, lb_mode)) {
+
+			if (fy_utf8_is_simple_scalar(c)) {
+				s = fy_reader_ensure_lookahead(fyr, 1, &len);
+				run = 0;
+				while (run < len && fy_utf8_is_simple_scalar_no_check((int8_t)s[run]))
+					run++;
+
+				fyr->column += (int)run;
+				nextc = -1;
+			} else {
+
+				width = (int)fy_utf8_width(c);
+
+				if (c == ':') {
+
+					nextc = fy_reader_peek_at_offset(fyr, width);
+
+					/* ':' followed by space terminates */
+					if (fy_is_blankz_m(nextc, lb_mode))
+						break;
+
+					/* in flow context ':' followed by flow markers */
+					if (u.flow_level_gt_0 && fy_is_flow_indicator(nextc))
+						break;
+				} else
+					nextc = -1;
+
+				/* in flow context any or , [ ] { } */
+				if (u.flow_level_gt_0 && fy_is_flow_indicator(c))
+					break;
+
+				/* check whether we have a JSON unescaped character */
+				u.has_json_esc |= !fy_is_json_unescaped(c);
+				u.has_high_ascii |= c >= 0x80;
+
+				fyr->column++;
+
+				run = width;
+			}
+
+			u.had_run = true;
+			fy_reader_advance_octets(fyr, run);
+			length += run;
+
+			c = nextc >= 0 ? nextc : fy_reader_peek(fyr);
+		}
+
+		/* save end mark if we processed more than one non-blank */
+		if (u.had_run) {
+			length += length_advance;
+
+			u.has_lb |= u.run_has_lb;
+			u.has_ws |= u.run_has_ws;
+			u.has_weird_nl |= u.run_has_weird_nl;
+
+			fy_reader_get_mark(fyr, &state->last_mark);
+		}
+
+		/* end? */
+		if (!(fy_is_blank_lb_m(c, lb_mode)))
+			break;
+
+		/* consume blanks */
+		breaks_found_length = 0;
+		first_break_length = 0;
+		blanks_found_length = 0;
+		u.run_has_ws = u.run_has_lb = u.run_has_weird_nl = false;
+
+		width = (int)fy_utf8_width(c);
+		do {
+			fy_reader_advance_lb_mode(fyr, c, lb_mode);
+
+			if (u.check_tab) {
+				FYR_PARSE_ERROR_CHECK(fyr, 0, 1, FYEM_SCAN,
+						c != '\t' || fy_reader_column(fyr) >= (indent + 1), err_out,
+						"invalid tab used as indentation");
+			}
+
+			u.last_was_lb = !fy_is_blank(c);
+
+			/* if it's a break */
+			if (!u.last_was_lb) {
+				blanks_found_length += width;
+				u.run_has_ws = true;
+			} else {
+				/* first break, turn on leading blanks */
+				if (!first_break_length)
+					first_break_length = width;
+				breaks_found_length += width;
+				u.run_has_lb = true;
+				u.run_has_weird_nl |= c != '\n';
+			}
+
+			c = fy_reader_peek_width(fyr, &width);
+
+		} while (fy_is_blank_lb_m(c, lb_mode));
+
+		/* break out if indentation is less */
+		if (u.flow_level_le_0_indent_ge_0 && fy_reader_column(fyr) <= indent)
+			break;
+
+		length_advance = u.run_has_lb ?
+					(breaks_found_length > first_break_length ? (breaks_found_length - first_break_length) : first_break_length) :
+					blanks_found_length;
+	}
+
+	state->c = c;
+	state->length = length;
+	state->simple_key_allowed = u.run_has_lb;	// simple key allowed if there was an lb
+	state->has_lb = u.has_lb;
+	state->has_ws = u.has_ws;
+	state->has_json_esc = u.has_json_esc;
+	state->has_high_ascii = u.has_high_ascii;
+	state->last_was_lb = u.last_was_lb;
+	state->has_weird_nl = u.has_weird_nl;
+
+	return 0;
+
+err_out:
+	return -1;
+}
+
+int fy_reader_fetch_plain_scalar_handle_yaml(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   struct fy_fetch_plain_state *state)
+{
+	return fy_reader_fetch_plain_scalar_handle_inline(fyr, c, indent, flow_level, handle,
+			false,		// directive0
+			fylb_cr_nl,	// lb_mode
+			false,		// json
+			state);
+}
+
+int fy_reader_fetch_plain_scalar_handle_json(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   struct fy_fetch_plain_state *state)
+{
+	return fy_reader_fetch_plain_scalar_handle_inline(fyr, c, indent, flow_level, handle,
+			false,		// directive0
+			fylb_cr_nl,	// lb_mode
+			true,		// json
+			state);
+}
+
+int fy_reader_fetch_plain_scalar_handle_yaml_1_1(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   struct fy_fetch_plain_state *state)
+{
+	return fy_reader_fetch_plain_scalar_handle_inline(fyr, c, indent, flow_level, handle,
+			true,			// directive0
+			fylb_cr_nl_N_L_P,	// lb_mode
+			false,			// json
+			state);
+}
+
+typedef int (*fy_reader_fetch_plain_scalar_handle_func)(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   struct fy_fetch_plain_state *state);
+
+static inline int
+fy_reader_fetch_plain_scalar_handle_switch(struct fy_reader *fyr, int c,
+					   const int indent, const int flow_level,
+					   struct fy_atom *handle,
+					   struct fy_fetch_plain_state *state)
+{
+
+	static const fy_reader_fetch_plain_scalar_handle_func funcs[] = {
+		[fyrm_yaml] = fy_reader_fetch_plain_scalar_handle_yaml,
+		[fyrm_json] = fy_reader_fetch_plain_scalar_handle_json,
+		[fyrm_yaml_1_1] = fy_reader_fetch_plain_scalar_handle_yaml_1_1,
+	};
+	fy_reader_fetch_plain_scalar_handle_func func;
+
+	assert((unsigned int)fyr->mode <= ARRAY_SIZE(funcs));
+	func = funcs[fyr->mode];
+	assert(func != NULL);
+
+	return func(fyr, c, indent, flow_level, handle, state);
+}
+
+int fy_reader_fetch_plain_scalar_handle(struct fy_reader *fyr, int c,
+					const int indent, int flow_level,
+					struct fy_atom *handle)
+{
+	struct fy_fetch_plain_state state_local, *state = &state_local;
+	const enum fy_lb_mode lb_mode = fy_reader_lb_mode(fyr);
+	bool is_merge_key, ends_with_eof, is_multiline;
+	int nextc, rc;
 	size_t tlength;
-#endif
+
+	nextc = fy_reader_peek_at(fyr, 1);
 
 	FYR_PARSE_ERROR_CHECK(fyr, 0, 1, FYEM_SCAN,
-			!fy_reader_is_blankz(fyr, c), err_out,
+			!fy_is_blankz_m(c, lb_mode), err_out,
 			"plain scalar cannot start with blank or zero");
 
 	/* may not start with any of ,[]{}#&*!|>'\"%@` */
@@ -4067,256 +4684,83 @@ int fy_reader_fetch_plain_scalar_handle(struct fy_reader *fyr, int c, int indent
 
 	/* may not start with - not followed by blankz */
 	FYR_PARSE_ERROR_CHECK(fyr, 0, 2, FYEM_SCAN,
-			c != '-' || !fy_reader_is_blank_at_offset(fyr, 1), err_out,
+			c != '-' || !fy_is_blank(nextc), err_out,
 			"plain scalar cannot start with '%c' followed by blank", c);
 
 	/* may not start with -?: not followed by blankz (in block context) */
 	FYR_PARSE_ERROR_CHECK(fyr, 0, 2, FYEM_SCAN,
-			flow_level > 0 || !((c == '?' || c == ':') && fy_reader_is_blank_at_offset(fyr, 1)), err_out,
+			flow_level > 0 || !((c == '?' || c == ':') && fy_is_blank(nextc)), err_out,
 			"plain scalar cannot start with '%c' followed by blank (in block context)", c);
 
 	/* may not start with - followed by ",[]{}" in flow context */
 	FYR_PARSE_ERROR_CHECK(fyr, 0, 2, FYEM_SCAN,
-			flow_level == 0 || !(c == '-' && fy_utf8_strchr(",[]{}", fy_reader_peek_at(fyr, 1))), err_out,
+			flow_level == 0 || !(c == '-' && fy_is_flow_indicator(nextc)), err_out,
 			"plain scalar cannot start with '%c' followed by ,[]{} (in flow context)", c);
 
-	fy_reader_get_mark(fyr, &mark);
+	memset(state, 0, sizeof(*state));
+	state->last_mark.input_pos = (size_t)-1;
+
+	/* we can prime is_merge_key here */
+	is_merge_key = c == '<' && nextc == '<';
 
 	fy_reader_fill_atom_start(fyr, handle);
 
-	has_leading_blanks = false;
-	has_lb = false;
-	has_ws = false;
-	has_json_esc = false;
-
-	length = 0;
-	breaks_found = 0;
-	breaks_found_length = 0;
-	first_break_length = 0;
-	presentation_breaks_length = 0;
-	blanks_found = 0;
-	last_ptr = false;
-	memset(&last_mark, 0, sizeof(last_mark));
-	c = FYUG_EOF;
-	lastc = FYUG_EOF;
-
-	for (;;) {
-		/* break for document indicators */
-		if (fy_reader_column(fyr) == 0 &&
-		    ((!fy_reader_strncmp(fyr, "---", 3) || !fy_reader_strncmp(fyr, "...", 3)) &&
-			fy_reader_is_blankz_at_offset(fyr, 3)))
-			break;
-
-		c = fy_reader_peek(fyr);
-		if (c == '#')
-			break;
-
-		/* for YAML 1.1 check % directive break */
-		if (directive0 && fy_reader_column(fyr) == 0 && c == '%')
-			break;
-
-		/* quickly deal with runs */
-		run = 0;
-		if (c >= 0 && c <= 0x7f && (fy_utf8_low_ascii_flags[c] & F_SIMPLE_SCALAR)) {
-			size_t len, consumed;
-			const char *p, *s, *e;
-			int8_t cc;
-
-			while ((p = fy_reader_ensure_lookahead(fyr, 1, &len)) != NULL) {
-
-				s = p;
-				e = s + len;
-
-				while (s < e && (cc = (int8_t)*s) >= 0 && (fy_utf8_low_ascii_flags[cc] & F_SIMPLE_SCALAR))
-					s++;
-
-				consumed = s - p;
-				if (consumed) {
-					fy_reader_advance_octets(fyr, consumed);
-					fyr->column += consumed;
-				}
-				run += consumed;
-
-				/* we're done if stopped earlier */
-				if (s < e)
-					break;
-			}
-
-		}
-		if (run > 0) {
-			length += run;
-			if (breaks_found) {
-				/* minimum 1 sep, or more for consecutive */
-				length += breaks_found > 1 ? (breaks_found_length - first_break_length) : 1;
-				length += presentation_breaks_length;
-				breaks_found = 0;
-				blanks_found = 0;
-				presentation_breaks_length = 0;
-			} else if (blanks_found) {
-				/* just the blanks mam' */
-				length += blanks_found;
-				blanks_found = 0;
-			}
-		}
-
-		while (!fy_reader_is_blankz(fyr, c = fy_reader_peek(fyr))) {
-
-
-			if (c == ':') {
-
-				nextc = fy_reader_peek_at(fyr, 1);
-
-				/* ':' followed by space terminates */
-				if (fy_reader_is_blankz(fyr, nextc)) {
-					/* super rare case :: not followed by space  */
-					/* :: not followed by space */
-					if (lastc != ':' || fy_reader_is_blankz(fyr, nextc))
-						break;
-				}
-
-				/* in flow context ':' followed by flow markers */
-				if (flow_level > 0 && fy_utf8_strchr(",[]{}", nextc))
-					break;
-			}
-
-			/* in flow context any or , [ ] { } */
-			if (flow_level > 0 && (c == ',' || c == '[' || c == ']' || c == '{' || c == '}'))
-				break;
-
-			if (breaks_found) {
-				/* minimum 1 sep, or more for consecutive */
-				length += breaks_found > 1 ? (breaks_found_length - first_break_length) : 1;
-				length += presentation_breaks_length;
-				breaks_found = 0;
-				blanks_found = 0;
-				presentation_breaks_length = 0;
-			} else if (blanks_found) {
-				/* just the blanks mam' */
-				length += blanks_found;
-				blanks_found = 0;
-			}
-
-			/* check whether we have a JSON unescaped character */
-			if (!has_json_esc && !fy_is_json_unescaped(c))
-				has_json_esc = true;
-
-			fy_reader_advance(fyr, c);
-			run++;
-
-			length += fy_utf8_width(c);
-
-			lastc = c;
-		}
-
-		/* save end mark if we processed more than one non-blank */
-		if (run > 0) {
-			/* fyp_scan_debug(fyp, "saving mark"); */
-			last_ptr = true;
-			fy_reader_get_mark(fyr, &last_mark);
-		}
-
-		/* end? */
-		if (!(fy_is_blank(c) || fy_reader_is_lb(fyr, c)))
-			break;
-
-		has_json_esc = true;
-
-		/* consume blanks */
-		breaks_found = 0;
-		breaks_found_length = 0;
-		first_break_length = 0;
-		blanks_found = 0;
-		do {
-			fy_reader_advance(fyr, c);
-
-			if (!fy_reader_tabsize(fyr)) {
-				/* check for tab */
-				FYR_PARSE_ERROR_CHECK(fyr, 0, 1, FYEM_SCAN,
-						c != '\t' || !has_leading_blanks || indent < 0 || fy_reader_column(fyr) >= (indent + 1), err_out,
-						"invalid tab used as indentation");
-			}
-
-			nextc = fy_reader_peek(fyr);
-
-			/* if it's a break */
-			if (fy_reader_is_lb(fyr, c)) {
-
-				if (!fy_is_lb_LS_PS(c)) {
-					break_length = 1;
-				} else {
-					break_length = fy_utf8_width(c);
-					presentation_breaks_length += break_length;
-				}
-
-				/* first break, turn on leading blanks */
-				if (!has_leading_blanks)
-					has_leading_blanks = true;
-				if (!breaks_found)
-					first_break_length = break_length;
-				breaks_found++;
-				breaks_found_length += break_length;
-				blanks_found = 0;
-				has_lb = true;
-			} else {
-				blanks_found++;
-				has_ws = true;
-			}
-
-			c = nextc;
-
-		} while (fy_is_blank(c) || fy_reader_is_lb(fyr, c));
-
-		/* break out if indentation is less */
-		if (flow_level <= 0 && indent >= 0 && fy_reader_column(fyr) < (indent + 1))
-			break;
-	}
+	rc = fy_reader_fetch_plain_scalar_handle_switch(fyr, c, indent, flow_level, handle, state);
+	if (rc)
+		goto err_out;
 
 	/* end... */
-	if (!last_ptr)
+	if (state->last_mark.input_pos == (size_t)-1)
 		fy_reader_fill_atom_end(fyr, handle);
 	else
-		fy_reader_fill_atom_end_at(fyr, handle, &last_mark);
+		fy_reader_fill_atom_end_at(fyr, handle, &state->last_mark);
 
+	c = state->c;
 	if (c == FYUG_INV || c == FYUG_PARTIAL) {
 		FYR_MARK_ERROR(fyr, &handle->start_mark, &handle->end_mark, FYEM_SCAN,
 			"plain scalar is malformed UTF8");
 		goto err_out;
 	}
-	ends_with_eof = c == FYUG_EOF && !fy_reader_is_lb(fyr, lastc);
+
+	ends_with_eof = c == FYUG_EOF && !state->last_was_lb;
 
 	is_multiline = handle->end_mark.line > handle->start_mark.line;
 
 	handle->style = FYAS_PLAIN;
 	handle->chomp = FYAC_STRIP;
-	handle->direct_output = !is_multiline && !has_json_esc && fy_atom_size(handle) == length;
+	handle->direct_output = !is_multiline && !state->has_json_esc && fy_atom_size(handle) == state->length;
 	handle->empty = false;
-	handle->has_lb = has_lb;
-	handle->has_ws = has_ws;
+	handle->has_lb = state->has_lb;
+	handle->has_ws = state->has_ws;
 	handle->starts_with_ws = false;
 	handle->starts_with_lb = false;
 	handle->ends_with_ws = false;
 	handle->ends_with_lb = false;
 	handle->trailing_lb = false;
-	handle->size0 = length == 0;
+	handle->size0 = state->length == 0;
 	handle->valid_anchor = false;
 	handle->json_mode = fy_reader_json_mode(fyr);
 	handle->lb_mode = fy_reader_lb_mode(fyr);
 	handle->fws_mode = fy_reader_flow_ws_mode(fyr);
+	handle->directive0_mode = fy_reader_directive0_mode(fyr);
 	handle->tabsize = fy_reader_tabsize(fyr);
 	handle->ends_with_eof = ends_with_eof;
+	handle->is_merge_key = is_merge_key && state->length == 2;
+	handle->simple_key_allowed = state->simple_key_allowed;
+	handle->high_ascii = state->has_high_ascii;
 
-#ifdef ATOM_SIZE_CHECK
-	tlength = fy_atom_format_text_length(handle);
-	if (tlength != length) {
-		fy_utf8_format_text_a(fy_atom_data(handle), fy_atom_size(handle), fyue_doublequote, &str);
-		fyr_warning(fyr, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
-			tlength, length,
-			str);
-		length = tlength;
+	if (state->has_weird_nl || FORCE_ATOM_SIZE_CHECK_DEFAULT) {
+		tlength = fy_atom_format_text_length(handle);
+		if (tlength != state->length) {
+			if (!state->has_weird_nl)
+				fyr_warning(fyr, "%s: storage hint calculation failed real %zu != hint %zu - \"%s\"", __func__,
+					tlength, state->length,
+					fy_utf8_format_text_a(fy_atom_data(handle), fy_atom_size(handle), fyue_doublequote));
+			state->length = tlength;
+		}
 	}
-#endif
 
-	handle->storage_hint = length;
+	handle->storage_hint = state->length;
 	handle->storage_hint_valid = true;
 
 	/* extra check in json mode */
@@ -4333,13 +4777,13 @@ int fy_reader_fetch_plain_scalar_handle(struct fy_reader *fyr, int c, int indent
 				"Invalid JSON plain scalar");
 	}
 
+
 	return 0;
 
 err_out:
 	rc = -1;
 	return rc;
 }
-
 
 int fy_fetch_flow_scalar(struct fy_parser *fyp, int c)
 {
@@ -4349,14 +4793,12 @@ int fy_fetch_flow_scalar(struct fy_parser *fyp, int c)
 	struct fy_simple_key_mark skm;
 	struct fy_token *fyt;
 	int i = 0, rc = -1;
-	char *str;
 
 	is_single = c == '\'';
 
-	fy_utf8_format_a(c, fyue_singlequote, &str);
 	fyp_error_check(fyp, c == '\'' || c == '"', err_out,
 			"bad start of flow scalar ('%s')",
-			str);
+				fy_utf8_format_a(c, fyue_singlequote));
 
 	FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
 			fy_flow_indent_check(fyp), err_out,
@@ -4377,6 +4819,10 @@ int fy_fetch_flow_scalar(struct fy_parser *fyp, int c)
 	fyt = fy_token_queue(fyp, FYTT_SCALAR, &handle, is_single ? FYSS_SINGLE_QUOTED : FYSS_DOUBLE_QUOTED);
 	fyp_error_check(fyp, fyt, err_out_rc,
 			"fy_token_queue() failed");
+
+	/* update style marks */
+	fyt->scalar.style_start = mark;
+	fy_get_mark(fyp, &fyt->scalar.style_end);
 
 	if (fyp->parse_flow_only && fyp->flow_level == 0) {
 		rc = fy_fetch_stream_end(fyp);
@@ -4426,11 +4872,9 @@ int fy_fetch_flow_scalar(struct fy_parser *fyp, int c)
 			"invalid comment without whitespace after %s scalar",
 				is_single ? "single-quoted" : "double-quoted");
 
-	if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS) {
-		rc = fy_attach_comments_if_any(fyp, fyt);
-		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_attach_right_hand_comment() failed");
-	}
+	rc = fy_parse_handle_comments_after_token(fyp, fyt);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_parse_handle_comments_after_token() failed");
 
 	return 0;
 
@@ -4570,7 +5014,7 @@ void fy_reader_skip_space(struct fy_reader *fyr)
 		consumed = s - p;
 		if (consumed) {
 			fy_reader_advance_octets(fyr, consumed);
-			fyr->column += consumed;
+			fyr->column += (int)consumed;
 		}
 
 		if (s < e)
@@ -4644,7 +5088,7 @@ void fy_reader_skip_ws_lb(struct fy_reader *fyr)
 				}
 				s++;
 			} else {
-				c = fy_utf8_get(s, (int)(e - s), &w);
+				c = fy_utf8_get(s, (size_t)(e - s), &w);
 
 				if (c == FYUG_PARTIAL) {
 					/* get the width (from the first octet */
@@ -4727,8 +5171,7 @@ int fy_fetch_plain_scalar(struct fy_parser *fyp, int c)
 
 	fy_get_simple_key_mark(fyp, &skm);
 
-	rc = fy_reader_fetch_plain_scalar_handle(fyp->reader, c, fyp->indent, fyp->flow_level, &handle,
-						fy_document_state_version_compare(fyp->current_document_state, fy_version_make(1, 1)) <= 0);
+	rc = fy_reader_fetch_plain_scalar_handle(fyp->reader, c, fyp->indent, fyp->flow_level, &handle);
 	if (rc) {
 		fyp->stream_error = true;
 		goto err_out_rc;
@@ -4777,14 +5220,12 @@ int fy_fetch_plain_scalar(struct fy_parser *fyp, int c)
 	fyp_error_check(fyp, !rc, err_out_rc,
 			"fy_save_simple_key_mark() failed");
 
-	fyp->simple_key_allowed = handle.has_lb;
+	fyp->simple_key_allowed = handle.simple_key_allowed;
 	fyp_scan_debug(fyp, "simple_key_allowed -> %s\n", fyp->simple_key_allowed ? "true" : "false");
 
-	if (fyp->cfg.flags & FYPCF_PARSE_COMMENTS) {
-		rc = fy_attach_comments_if_any(fyp, fyt);
-		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_attach_right_hand_comment() failed");
-	}
+	rc = fy_parse_handle_comments_after_token(fyp, fyt);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_parse_handle_comments_after_token() failed");
 
 	return 0;
 
@@ -4796,7 +5237,6 @@ err_out_rc:
 
 int fy_fetch_tokens(struct fy_parser *fyp)
 {
-	struct fy_mark m;
 	bool was_double_colon;
 	int c, rc;
 
@@ -4823,22 +5263,30 @@ int fy_fetch_tokens(struct fy_parser *fyp)
 			"fy_scan_to_next_token() failed");
 
 	if (fyp_block_mode(fyp)) {
+		if (fyp->parse_block_only && fyp->starting_indent >= 0 &&
+		    fyp_column(fyp) < fyp->starting_indent) {
+			rc = fy_fetch_stream_end(fyp);
+			fyp_error_check(fyp, !rc, err_out_rc,
+					"fy_fetch_stream_end() failed");
+			return 0;
+		}
 		rc = fy_parse_unroll_indent(fyp, fyp_column(fyp));
 		fyp_error_check(fyp, !rc, err_out_rc,
 				"fy_parse_unroll_indent() failed");
 	}
 
 	c = fy_parse_peek(fyp);
-	if (c < 0 || c == '\0') {
+	if (c <= 0) {
+
+		FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
+				c == FYUG_EOF, err_out,
+				"Invalid UTF8 %s in the input stream",
+					c == '\0' ? "(null \\0)" :
+					c == FYUG_INV ? "(invalid)" :
+					c == FYUG_PARTIAL ? "(partial)" : "(unspecified)");
 
 		fyp->stream_end_reached = true;
 
-		FYP_PARSE_ERROR_CHECK(fyp, 0, 1, FYEM_SCAN,
-				!fyp_json_mode(fyp) || c != '\0', err_out,
-				"JSON disallows '\\0' in the input stream");
-
-		if (c >= 0)
-			fy_advance(fyp, c);
 		rc = fy_fetch_stream_end(fyp);
 		fyp_error_check(fyp, !rc, err_out_rc,
 				"fy_fetch_stream_end() failed");
@@ -4926,17 +5374,9 @@ int fy_fetch_tokens(struct fy_parser *fyp)
 
 	if (c == ',') {
 
-		fyp->indent_line = fyp_line(fyp);
-
-		fy_get_mark(fyp, &m);
-
-		fyp_scan_debug(fyp, "fy_fetch_flow_collection_entry(%c)", c);
-		rc = fy_fetch_flow_collection_entry(fyp, c);
+		rc = fy_parse_handle_comma(fyp, ',');
 		fyp_error_check(fyp, !rc, err_out_rc,
-				"fy_fetch_flow_collection_entry() failed");
-
-		fyp->last_was_comma = true;
-		fyp->last_comma_mark = m;
+			"fy_parse_handle_comma() failed");
 
 		goto out;
 	}
@@ -5064,6 +5504,10 @@ struct fy_token *fy_scan_peek(struct fy_parser *fyp)
 	int rc, last_token_activity_counter;
 	bool have_simple_keys;
 
+	/* do not try to peek */
+	if (fy_reader_generates_events(fyp->reader))
+		return NULL;
+
 	/* nothing if stream end produced (and no stream end token in queue) */
 	if (fyp->stream_end_produced) {
 		fyt = fy_token_list_head(&fyp->queued_tokens);
@@ -5117,6 +5561,9 @@ struct fy_token *fy_scan_peek(struct fy_parser *fyp)
 		fyp_error_check(fyp, !rc, err_out,
 				"fy_fetch_tokens() failed");
 
+		if (fy_reader_generates_events(fyp->reader))
+			return NULL;
+
 		fyp_error_check(fyp, last_token_activity_counter != fyp->token_activity_counter, err_out,
 				"out of tokens and failed to produce anymore");
 	}
@@ -5130,7 +5577,7 @@ struct fy_token *fy_scan_peek(struct fy_parser *fyp)
 		fyp_scan_debug(fyp, "setting stream_end_produced to true");
 		fyp->stream_end_produced = true;
 
-		if (!fyp->parse_flow_only) {
+		if (!fyp->parse_flow_only && !fyp->parse_block_only) {
 			rc = fy_reader_input_done(fyp->reader);
 			fyp_error_check(fyp, !rc, err_out,
 					"fy_parse_input_done() failed");
@@ -5265,6 +5712,7 @@ fy_parse_node(struct fy_parser *fyp, struct fy_token *fyt, bool is_block)
 	struct fy_token *fyt_td;
 	struct fy_token *fytn;
 	struct fy_atom *ev_handle = NULL;
+	int rc;
 
 	fyds = fyp->current_document_state;
 	assert(fyds);
@@ -5341,6 +5789,10 @@ fy_parse_node(struct fy_parser *fyp, struct fy_token *fyt, bool is_block)
 		fy_input_ref(fytn->handle.fyi);
 
 		fye->sequence_start.sequence_start = fytn;
+
+		rc = fy_attach_comments_if_any(fyp, fye->sequence_start.sequence_start);
+		fyp_error_check(fyp, rc >= 0, err_out,
+				"fy_attach_comments_if_any() failed");
 
 		fy_parse_state_set(fyp, FYPS_INDENTLESS_SEQUENCE_ENTRY);
 
@@ -5433,6 +5885,21 @@ fy_parse_node(struct fy_parser *fyp, struct fy_token *fyt, bool is_block)
 		goto return_ok;
 	}
 
+	/* handle really weird cases of empty block sequences */
+	if (fyp->state == FYPS_INDENTLESS_SEQUENCE_ENTRY) {
+		switch (fyt->type) {
+		case FYTT_BLOCK_ENTRY:
+			/* mark that we're in this weird state */
+			fyp_parse_debug(fyp, "BARE -\n");
+			goto do_empty_scalar;
+		case FYTT_KEY:
+			fyp_parse_debug(fyp, "BARE - followed by KEY\n");
+			goto do_empty_scalar;
+		default:
+			break;
+		}
+	}
+
 	if (!anchor && !tag) {
 
 		if (fyt->type == FYTT_FLOW_ENTRY &&
@@ -5458,6 +5925,8 @@ fy_parse_node(struct fy_parser *fyp, struct fy_token *fyt, bool is_block)
 
 		goto err_out;
 	}
+
+do_empty_scalar:
 
 	fyp_parse_debug(fyp, "parse_node: empty scalar...");
 
@@ -5535,6 +6004,7 @@ int fy_parse_stream_start(struct fy_parser *fyp)
 {
 	fyp->indent = -2;
 	fyp->indent_line = -1;
+	fyp->starting_indent = -1;
 	fyp->generated_block_map = false;
 	fyp->last_was_comma = false;
 	fyp->flow = FYFT_NONE;
@@ -5575,18 +6045,41 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 	char tbuf[16] __FY_DEBUG_UNUSED__;
 	int rc;
 
+	(void)tbuf;
 	version_directive = NULL;
 	fy_token_list_init(&tag_directives);
 
 	/* are we done? */
-	if (fyp->stream_error || fyp->state == FYPS_END)
+	if (fyp->stream_error || fyp->state == FYPS_END) {
+		fy_parser_debug(fyp, "%s: NULL: fyp->stream_error=%s fyp->state=%s", __func__,
+			fyp->stream_error ? "true" : "false", state_txt[fyp->state]);
 		return NULL;
+	}
 
 	fyt = fy_scan_peek(fyp);
+#ifdef FY_DEVMODE
+	fy_parser_debug(fyp, "[%s]", state_txt[fyp->state]);
+	fyp_debug_dump_token(fyp, fyt, "scan_peek: ");
+#endif
+
+	if (!fyt && fy_reader_generates_events(fyp->reader)) {
+		fye = fy_reader_generate_next_event(fyp->reader);
+		if (!fye) {
+			rc = fy_reader_input_done(fyp->reader);
+			fyp_error_check(fyp, !rc, err_out,
+					"fy_parse_input_done() failed");
+
+			fy_parser_debug(fyp, "%s: NULL: !fyt && fy_reader_generates_events(fyp->reader)", __func__);
+			return NULL;
+		}
+		return fy_container_of(fye, struct fy_eventp, e);
+	}
 
 	/* special case without an error message for start */
-	if (!fyt && fyp->state == FYPS_NONE)
+	if (!fyt && fyp->state == FYPS_NONE) {
+		fy_parser_debug(fyp, "%s: NULL: !fyt && fyp->state==FYPS_NONE", __func__);
 		return NULL;
+	}
 
 	/* keep a copy of stream end */
 	if (fyt && fyt->type == FYTT_STREAM_END && !fyp->stream_end_token) {
@@ -5804,8 +6297,8 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 			fyp_parse_debug(fyp, "document_start_implicit=true");
 
 			FYP_TOKEN_ERROR_CHECK(fyp, fyt, FYEM_PARSE,
-					fyt->type != FYTT_DOCUMENT_END || !had_directives, err_out,
-					"directive(s) without a document");
+					!had_directives, err_out,
+					"missing required document start indicator after directives");
 
 			fy_parse_state_set(fyp, FYPS_BLOCK_NODE);
 		} else {
@@ -5825,6 +6318,11 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 		fyds->json_mode = fyp_json_mode(fyp);
 		fye->document_start.document_state = fy_document_state_ref(fyds);
 		fye->document_start.implicit = fyds->start_implicit;
+
+		/* update the handle of the document start token */
+		fytn = fyds->fyt_ds;
+		fyds->fyt_ds = fy_token_ref(fye->document_start.document_start);
+		fy_token_unref(fytn);
 
 		ev_handle = &fye->document_start.document_start->handle;
 		break;
@@ -6477,9 +6975,7 @@ static struct fy_eventp *fy_parse_internal(struct fy_parser *fyp)
 		break;
 
 	case FYPS_END:
-		/* should never happen */
-		assert(0);
-		break;
+		FY_IMPOSSIBLE_ABORT();
 	}
 
 	assert(fyep);
@@ -6499,6 +6995,8 @@ err_out:
 	fy_token_list_unref_all_rl(fyp->recycled_token_list, &tag_directives);
 	fy_parse_eventp_recycle(fyp, fyep);
 	fyp->stream_error = true;
+
+	fy_parser_debug(fyp, "%s: NULL: stream_error=true", __func__);
 	return NULL;
 }
 
@@ -6523,12 +7021,38 @@ const char *fy_event_type_get_text(enum fy_event_type type)
 	return fy_event_type_txt[type];
 }
 
+#ifndef NDEBUG
+
+static void fy_parse_dump_eventp(struct fy_parser *fyp, struct fy_eventp *fyep, const char *pfx)
+{
+	char *mbuf = NULL;
+
+	if (!fyep)
+		return;
+
+	/* perform the enable tests early to avoid the overhead */
+	if ((FYET_DEBUG >> FYDF_LEVEL_SHIFT) < fyp->diag->cfg.level)
+		return;
+
+	mbuf = fy_event_to_string(&fyep->e);
+	if (!mbuf)
+		return;
+
+	fyp_parse_debug(fyp, "%s%s", pfx, mbuf);
+	free(mbuf);
+}
+
+#else
+static inline void
+fy_parse_dump_eventp(struct fy_parser *fyp, struct fy_eventp *fyep, const char *pfx) { }
+#endif
+
 struct fy_eventp *fy_parse_private(struct fy_parser *fyp)
 {
 	struct fy_eventp *fyep = NULL;
 
 	fyep = fy_parse_internal(fyp);
-	fyp_parse_debug(fyp, "> %s", fyep ? fy_event_type_txt[fyep->e.type] : "NULL");
+	fy_parse_dump_eventp(fyp, fyep, "gen> ");
 
 	return fyep;
 }
@@ -6537,9 +7061,6 @@ struct fy_parser *fy_parser_create(const struct fy_parse_cfg *cfg)
 {
 	struct fy_parser *fyp;
 	int rc;
-
-	if (!cfg)
-		return NULL;
 
 	fyp = malloc(sizeof(*fyp));
 	if (!fyp)
@@ -6607,6 +7128,7 @@ static void fy_parse_input_reset(struct fy_parser *fyp)
 		fyin = fy_input_next(&fyp->queued_inputs, fyi);
 		fy_input_unref(fyi);
 	}
+	fy_input_list_init(&fyp->queued_inputs);
 
 	fy_parse_parse_state_log_list_recycle_all(fyp, &fyp->state_stack);
 
@@ -6829,10 +7351,42 @@ err_out_rc:
 	return rc;
 }
 
-int fy_parser_reset(struct fy_parser *fyp)
+int fy_parser_set_document_iterator(struct fy_parser *fyp, enum fy_parser_event_generator_flags flags,
+				    struct fy_document_iterator *fydi)
 {
+	struct fy_input_cfg fyic;
 	int rc;
 
+	if (!fyp || !fydi)
+		return -1;
+
+	memset(&fyic, 0, sizeof(fyic));
+
+	fyic.type = fyit_dociter;
+	fyic.dociter.flags = flags;
+	fyic.dociter.fydi = fydi;
+	fyic.dociter.owns_iterator = false;
+
+	/* must not be in the middle of something */
+	fyp_error_check(fyp, fyp->state == FYPS_NONE || fyp->state == FYPS_END,
+			err_out, "parser cannot be reset at state '%s'",
+				state_txt[fyp->state]);
+
+	fy_parse_input_reset(fyp);
+
+	rc = fy_parse_input_append(fyp, &fyic);
+	fyp_error_check(fyp, !rc, err_out_rc,
+			"fy_parse_input_append() failed");
+
+	return 0;
+err_out:
+	rc = -1;
+err_out_rc:
+	return rc;
+}
+
+int fy_parser_reset(struct fy_parser *fyp)
+{
 	if (!fyp)
 		return -1;
 
@@ -6853,26 +7407,62 @@ int fy_parser_reset(struct fy_parser *fyp)
 	assert(fyp->diag);
 	fyp->diag->on_error = false;
 
-	rc = fy_reset_document_state(fyp);
-	fyp_error_check(fyp, !rc, err_out_rc,
-			"fy_parse_input_reset() failed");
+	fy_document_state_unref(fyp->current_document_state);
+	fyp->current_document_state = NULL;
+
+	fy_document_state_unref(fyp->default_document_state);
+	fyp->default_document_state = NULL;
+
+	fy_parse_streaming_aliases_reset(fyp);
+
+	fy_input_unref(fyp->last_event_handle.fyi);
+	fy_atom_reset(&fyp->last_event_handle);
+
+	fy_parse_indent_list_recycle_all(fyp, &fyp->indent_stack);
+	fy_parse_simple_key_list_recycle_all(fyp, &fyp->simple_keys);
+	fy_token_list_unref_all(&fyp->queued_tokens);
+
+	fy_parse_parse_state_log_list_recycle_all(fyp, &fyp->state_stack);
+	fy_parse_flow_list_recycle_all(fyp, &fyp->flow_stack);
+	fy_parse_streaming_alias_list_recycle_all(fyp, &fyp->streaming_aliases);
+
+	fy_token_unref_rl(fyp->recycled_token_list, fyp->stream_end_token);
+	fyp->stream_end_token = NULL;
 
 	return 0;
-err_out_rc:
-	return rc;
 }
 
 struct fy_event *fy_parser_parse(struct fy_parser *fyp)
 {
-	struct fy_eventp *fyep;
+	struct fy_eventp *fyep, *fyep2;
 	enum fy_composer_return ret;
 
 	if (!fyp)
 		return NULL;
 
+	if (fyp->fyep_peek) {
+		fyep = fyp->fyep_peek;
+		fyp->fyep_peek = NULL;
+		fy_parse_dump_eventp(fyp, fyep, "peek> ");
+		return &fyep->e;
+	}
+
+	if ((fyp->cfg.flags & FYPCF_RESOLVE_DOCUMENT) && fy_reader_get_mode(fyp->reader) != fyrm_json) {
+		fyep = fy_parser_parse_resolve_prolog(fyp);
+		if (fyep)
+			return &fyep->e;
+	}
+
 	fyep = fy_parse_private(fyp);
 	if (!fyep)
 		return NULL;
+
+	if ((fyp->cfg.flags & FYPCF_RESOLVE_DOCUMENT) && fy_reader_get_mode(fyp->reader) != fyrm_json) {
+		fyep2 = fy_parser_parse_resolve_epilog(fyp, fyep);
+		if (!fyep2)
+			return NULL;
+		fyep = fyep2;
+	}
 
 	if (fyp->fyc) {
 		ret = fy_composer_process_event(fyp->fyc, &fyep->e);
@@ -6886,6 +7476,95 @@ struct fy_event *fy_parser_parse(struct fy_parser *fyp)
 	}
 
 	return &fyep->e;
+}
+
+const struct fy_event *fy_parser_parse_peek(struct fy_parser *fyp)
+{
+	struct fy_event *fye;
+
+	if (!fyp->fyep_peek) {
+		fye = fy_parser_parse(fyp);
+		if (!fye)
+			return NULL;
+
+		fyp->fyep_peek = fy_container_of(fye, struct fy_eventp, e);
+	}
+	return &fyp->fyep_peek->e;
+}
+
+int fy_parser_skip(struct fy_parser *fyp)
+{
+	struct fy_event *fye = 0;
+	enum fy_event_type start_type, end_type;
+	int nest, map_nest, seq_nest;
+
+	/* check that we start on a scalar/seq/map */
+	fye = fy_parser_parse(fyp);
+	if (!fye)
+		goto err_out;
+
+	start_type = fye->type;
+	fy_parser_event_free(fyp, fye);
+	fye = NULL;
+
+	if (start_type == FYET_SCALAR)
+		return 0;
+
+	map_nest = 0;
+	seq_nest = 0;
+	if (start_type == FYET_SEQUENCE_START) {
+		end_type = FYET_SEQUENCE_END;
+		seq_nest = 1;
+	} else if (start_type == FYET_MAPPING_START) {
+		end_type = FYET_MAPPING_END;
+		map_nest = 1;
+	} else
+		goto err_out;
+
+	nest = 1;
+	do {
+		fye = fy_parser_parse(fyp);
+		if (!fye)
+			goto err_out;
+
+		switch (fye->type) {
+		case FYET_SEQUENCE_START:
+			seq_nest++;
+			break;
+		case FYET_MAPPING_START:
+			map_nest++;
+			break;
+		case FYET_SEQUENCE_END:
+			seq_nest--;
+			break;
+		case FYET_MAPPING_END:
+			map_nest--;
+			break;
+		default:
+			break;
+		}
+
+		if (fye->type == start_type)
+			nest++;
+		else if (fye->type == end_type)
+			nest--;
+
+		if (map_nest < 0 || seq_nest < 0) {
+			fy_event_report(fyp, fye, FYEP_VALUE, FYET_ERROR,
+					"unbalanced collection while skipping");
+			goto err_out;
+		}
+
+		fy_parser_event_free(fyp, fye);
+		fye = NULL;
+
+	} while (nest > 0);
+
+	return 0;
+
+err_out:
+	fy_parser_event_free(fyp, fye);
+	return -1;
 }
 
 bool fy_parser_get_stream_error(struct fy_parser *fyp)
@@ -6919,7 +7598,7 @@ parse_process_event(struct fy_composer *fyc, struct fy_path *path, struct fy_eve
 	return fyp->fyc_cb(fyp, fye, path, fyp->fyc_userdata);
 }
 
-struct fy_document_builder *
+static struct fy_document_builder *
 parse_create_document_builder(struct fy_composer *fyc)
 {
 	struct fy_parser *fyp = fy_composer_get_cfg_userdata(fyc);
@@ -6957,14 +7636,18 @@ static const struct fy_composer_ops parser_composer_ops = {
 int fy_parse_set_composer(struct fy_parser *fyp, fy_parse_composer_cb cb, void *userdata)
 {
 	struct fy_composer_cfg ccfg;
+	bool can_change_composer;
 
 	if (!fyp)
 		return -1;
 
+	can_change_composer = fyp->state == FYPS_NONE ||
+			      fyp->state == FYPS_END ||
+			      fyp->state == FYPS_DOCUMENT_START;
+
 	/* must not be in the middle of something */
-	fyp_error_check(fyp, fyp->state == FYPS_NONE || fyp->state == FYPS_END,
-			err_out, "cannot change composer state at state '%s'",
-				state_txt[fyp->state]);
+	fyp_error_check(fyp, can_change_composer, err_out,
+			"cannot change composer state at state '%s'", state_txt[fyp->state]);
 
 	/* clear */
 	if (!cb) {
@@ -7025,6 +7708,9 @@ static enum fy_composer_return fy_parse_compose_internal(struct fy_parser *fyp)
 			if (ret != FYCR_OK_CONTINUE)
 				break;
 		}
+		if (fyp->stream_error)
+			fy_composer_halt(fyc, FYCR_ERROR);
+
 		return ret;
 	}
 
@@ -7124,7 +7810,8 @@ int fy_parse_compose(struct fy_parser *fyp, fy_parse_composer_cb cb, void *userd
 		rc_out = 0;
 
 	/* reset the parser; the composer clear must always succeed */
-	fy_parser_reset(fyp);
+	if (ret == FYCR_ERROR)
+		fy_parser_reset(fyp);
 
 	/* clear composer */
 	rc = fy_parse_set_composer(fyp, NULL, NULL);
@@ -7136,3 +7823,1374 @@ int fy_parse_compose(struct fy_parser *fyp, fy_parse_composer_cb cb, void *userd
 err_out:
 	return -1;
 }
+
+struct fy_streaming_alias *
+fy_parser_streaming_alias_lookup(struct fy_parser *fyp, struct fy_token *fyt_anchor)
+{
+	struct fy_streaming_alias *fysa;
+
+	/* XXX todo hashing */
+	for (fysa = fy_streaming_alias_list_head(&fyp->streaming_aliases); fysa != NULL; fysa = fy_streaming_alias_next(&fyp->streaming_aliases, fysa)) {
+		if (fy_token_cmp(fyt_anchor, fysa->anchor) == 0)
+			return fysa;
+	}
+	return NULL;
+}
+
+struct fy_streaming_alias *
+fy_parser_streaming_alias_lookup_pivot(struct fy_parser *fyp, struct fy_streaming_alias *fysa_pivot, struct fy_token *fyt_anchor)
+{
+	struct fy_streaming_alias *fysa;
+
+	assert(fysa_pivot);
+	/* at first do forwards starting at the pivot */
+	for (fysa = fy_streaming_alias_next(&fyp->streaming_aliases, fysa_pivot); fysa != NULL; fysa = fy_streaming_alias_next(&fyp->streaming_aliases, fysa)) {
+		if (fysa->anchor && fy_token_cmp(fyt_anchor, fysa->anchor) == 0)
+			return fysa;
+	}
+	/* not found? do backwards (more recent) */
+	for (fysa = fy_streaming_alias_prev(&fyp->streaming_aliases, fysa_pivot); fysa != NULL; fysa = fy_streaming_alias_prev(&fyp->streaming_aliases, fysa)) {
+		if (fysa->anchor && fy_token_cmp(fyt_anchor, fysa->anchor) == 0)
+			return fysa;
+	}
+	return NULL;
+}
+
+struct fy_streaming_alias *
+fy_parse_streaming_alias_create(struct fy_parser *fyp, struct fy_token *fyt_anchor)
+{
+	struct fy_streaming_alias *fysa;
+
+	fysa = fy_parse_streaming_alias_alloc(fyp);
+	fyp_error_check(fyp, fysa != NULL, err_out,
+			"fy_parse_streaming_alias_alloc() failed!");
+	fysa->anchor = fyt_anchor;
+	fysa->collecting = false;
+	fysa->mapping_nest = 0;
+	fysa->sequence_nest = 0;
+	fy_eventp_list_init(&fysa->events);
+
+	return fysa;
+
+err_out:
+	return NULL;
+}
+
+void
+fy_parse_streaming_alias_clean(struct fy_parser *fyp, struct fy_streaming_alias *fysa)
+{
+	struct fy_eventp *fyep;
+
+	if (!fyp || !fysa)
+		return;
+
+	fy_token_unref(fysa->anchor);
+	fysa->anchor = NULL;
+	fysa->collecting = false;
+	fysa->mapping_nest = 0;
+	fysa->sequence_nest = 0;
+	while ((fyep = fy_eventp_list_pop(&fysa->events)) != NULL)
+		fy_parse_eventp_recycle(fyp, fyep);
+}
+
+void fy_parse_streaming_aliases_reset(struct fy_parser *fyp)
+{
+	struct fy_streaming_alias *fysa;
+	struct fy_eventp *fyep;
+
+	if (!fyp)
+		return;
+
+	while ((fysa = fy_streaming_alias_list_pop(&fyp->streaming_aliases)) != NULL) {
+		fy_parse_streaming_alias_clean(fyp, fysa);
+		fy_parse_streaming_alias_recycle(fyp, fysa);
+	}
+	if (fyp->sas.stack != NULL && fyp->sas.stack != fyp->sas.local)
+		free(fyp->sas.stack);
+	memset(&fyp->sas, 0, sizeof(fyp->sas));
+	if (fyp->cts.stack != NULL && fyp->cts.stack != fyp->cts.local)
+		free(fyp->cts.stack);
+	memset(&fyp->cts, 0, sizeof(fyp->cts));
+
+	while ((fyep = fy_eventp_list_pop(&fyp->mks.args)) != NULL)
+		fy_parse_eventp_recycle(fyp, fyep);
+	memset(&fyp->mks, 0, sizeof(fyp->mks));
+	fy_eventp_list_init(&fyp->mks.args);
+}
+
+struct fy_streaming_alias_state *
+fy_parse_streaming_alias_state_push(struct fy_parser *fyp, struct fy_streaming_alias *fysa)
+{
+	struct fy_streaming_alias_state *new_stack;
+	struct fy_streaming_alias_state *fysas;
+
+	/* if first one, just point to the local area */
+	if (fyp->sas.stack == NULL) {
+		fyp->sas.stack = fyp->sas.local;
+		fyp->sas.top = 0;
+		fyp->sas.alloc = ARRAY_SIZE(fyp->sas.local);
+	}
+	/* grow the stack if required */
+	if (fyp->sas.top >= fyp->sas.alloc) {
+		assert(fyp->sas.alloc > 0);
+		assert(fyp->sas.stack);
+		new_stack = malloc(sizeof(*new_stack) * fyp->sas.alloc * 2);
+		fyp_error_check(fyp, new_stack != NULL, err_out,
+				"realloc() failed!");
+		memcpy(new_stack, fyp->sas.stack, sizeof(*new_stack) * fyp->sas.alloc);
+		fyp->sas.alloc *= 2;
+		if (fyp->sas.stack != fyp->sas.local)
+			free(fyp->sas.stack);
+		fyp->sas.stack = new_stack;
+	}
+	/* finally push it */
+	fysas = &fyp->sas.stack[fyp->sas.top++];
+
+	fysas->fysa = fysa;
+	fysas->next = fy_eventp_list_head(&fysa->events);
+
+	return fysas;
+err_out:
+	return NULL;
+}
+
+struct fy_streaming_alias_state *
+fy_parse_streaming_alias_state_pop(struct fy_parser *fyp)
+{
+	struct fy_streaming_alias_state *fysas;
+
+	if (fyp->sas.top <= 0)
+		return NULL;
+
+	fysas = &fyp->sas.stack[--fyp->sas.top];
+	fysas->fysa = NULL;
+	fysas->next = NULL;
+	if (fyp->sas.top <= 0)
+		return NULL;
+	return &fyp->sas.stack[fyp->sas.top - 1];
+}
+
+struct fy_streaming_alias_state *
+fy_parse_streaming_alias_state_top(struct fy_parser *fyp)
+{
+	if (fyp->sas.top <= 0)
+		return NULL;
+	return &fyp->sas.stack[fyp->sas.top - 1];
+}
+
+void
+fy_parse_streaming_alias_state_next_event(struct fy_parser *fyp)
+{
+	struct fy_streaming_alias_state *fysas;
+
+	fysas = fy_parse_streaming_alias_state_top(fyp);
+	if (!fysas)
+		return;
+
+	fysas->next = fy_eventp_next(&fysas->fysa->events, fysas->next);
+	while (!fysas->next) {
+		fysas = fy_parse_streaming_alias_state_pop(fyp);
+		if (!fysas)
+			break;
+	}
+}
+
+static inline int
+fy_parse_streaming_alias_collection_state_set_top(struct fy_parser *fyp, int cts)
+{
+	int pos, off, old_cts;
+
+	if (fyp->cts.top < 2)
+		return -1;
+
+	cts &= 3;	/* keep 2 bits */
+
+	/* get position and offset */
+	pos = (fyp->cts.top - 2) / (sizeof(*fyp->cts.stack) * 8);
+	off = (fyp->cts.top - 2) % (sizeof(*fyp->cts.stack) * 8);
+
+	old_cts = (int)((fyp->cts.stack[pos] >> off) & 3);
+
+	/* clear the bits first */
+	fyp->cts.stack[pos] &= ~(3 << off);
+	/* set the state */
+	fyp->cts.stack[pos] |= (cts & 3) << off;
+
+	return old_cts;
+}
+
+static inline int
+fy_parse_streaming_alias_collection_state_top(struct fy_parser *fyp)
+{
+	int pos, off;
+
+	if (fyp->cts.top < 2)
+		return -1;
+
+	/* get position and offset */
+	pos = (fyp->cts.top - 2) / (sizeof(*fyp->cts.stack) * 8);
+	off = (fyp->cts.top - 2) % (sizeof(*fyp->cts.stack) * 8);
+
+	return (int)((fyp->cts.stack[pos] >> off) & 3);
+}
+
+static inline bool
+fy_parse_streaming_alias_collection_state_in_map_key(struct fy_parser *fyp)
+{
+	int cts = fy_parse_streaming_alias_collection_state_top(fyp);
+	return cts == FYCTS_MAP_KEY;
+}
+
+static inline void
+fy_parse_streaming_alias_collection_state_toggle_map(struct fy_parser *fyp)
+{
+	int cts = fy_parse_streaming_alias_collection_state_top(fyp);
+	if (cts >= 0 && (cts & FYCTS_MAP))
+		fy_parse_streaming_alias_collection_state_set_top(fyp, cts ^ FYCTS_MAP_TOGGLE);
+}
+
+int
+fy_parse_streaming_alias_collection_state_push(struct fy_parser *fyp, int cts)
+{
+	uint32_t *new_stack;
+	int size;
+
+	assert(cts >= 0);
+
+	/* if first one, just point to the local area */
+	if (fyp->cts.stack == NULL) {
+		fyp->cts.stack = fyp->cts.local;
+		fyp->cts.top = 0;
+		fyp->cts.alloc = sizeof(fyp->cts.local) * 8;	/* in bits */
+	}
+	/* grow the stack if required */
+	if (fyp->cts.top + 2 >= fyp->cts.alloc) {
+		assert(fyp->cts.alloc > 0);
+		assert(fyp->cts.stack);
+		size = fyp->cts.alloc / 8;	/* convert to bytes */
+		new_stack = malloc(size * 2);
+		fyp_error_check(fyp, new_stack != NULL, err_out,
+				"realloc() failed!");
+		memcpy(new_stack, fyp->cts.stack, size);
+		memset((uint8_t *)new_stack + size, 0, size);
+		fyp->cts.alloc *= 2;
+		if (fyp->cts.stack != fyp->cts.local)
+			free(fyp->cts.stack);
+		fyp->cts.stack = new_stack;
+	}
+
+	fyp->cts.top += 2;
+	fy_parse_streaming_alias_collection_state_set_top(fyp, cts);
+	return cts;
+err_out:
+	return -1;
+}
+
+int
+fy_parse_streaming_alias_collection_state_pop(struct fy_parser *fyp)
+{
+	int ret;
+
+	ret = fy_parse_streaming_alias_collection_state_top(fyp);
+	if (ret >= 0)
+		fyp->cts.top -= 2;
+	return ret;
+}
+
+static int
+fy_parser_event_resolve_hook_collect(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	struct fy_eventp *fyep_clone = NULL;
+	struct fy_streaming_alias *fysa;
+	long map_add, seq_add;
+
+	if (!fyp || !fyep)
+		return -1;
+
+	map_add = seq_add = 0;
+	switch (fyep->e.type) {
+	case FYET_MAPPING_START:
+		map_add = 1;
+		break;
+	case FYET_MAPPING_END:
+		map_add = -1;
+		break;
+	case FYET_SEQUENCE_START:
+		seq_add = 1;
+		break;
+	case FYET_SEQUENCE_END:
+		seq_add = -1;
+		break;
+	default:
+		break;
+	}
+
+	/* for all streaming aliases that are collecting... */
+	for (fysa = fy_streaming_alias_list_head(&fyp->streaming_aliases); fysa != NULL; fysa = fy_streaming_alias_next(&fyp->streaming_aliases, fysa)) {
+		if (!fysa->collecting)
+			continue;
+
+		/* clone event, stripping the anchors */
+		fyep_clone = fy_parse_eventp_clone(fyp, fyep, true);
+		fyp_error_check(fyp, fyep_clone != NULL, err_out,
+				"fy_parse_eventp_clone() failed!");
+
+		/* add to the list */
+		fy_eventp_list_add_tail(&fysa->events, fyep_clone);
+		fyep_clone = NULL;
+
+		/* the scalar will be collected every time */
+		fysa->mapping_nest += map_add;
+		fysa->sequence_nest += seq_add;
+
+		if (fysa->mapping_nest == 0 && fysa->sequence_nest == 0)
+			fysa->collecting = false;
+	}
+
+	return 0;
+
+err_out:
+	fy_parse_eventp_recycle(fyp, fyep_clone);
+	fyp->stream_error = true;
+	return -1;
+}
+
+struct fy_eventp *fy_parser_event_resolve_hook_alias(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	struct fy_token *fyt_anchor = NULL;
+	struct fy_streaming_alias *fysa;
+	struct fy_streaming_alias_state *fysas;
+
+	if (!fyp || !fyep)
+		return NULL;
+
+	/* if it's not an alias, continue normal processing */
+	if (fyep->e.type != FYET_ALIAS)
+		return fyep;
+
+	/* it's an alias, get the token and dispose the event */
+	fyt_anchor = fyep->e.alias.anchor;
+	fyep->e.alias.anchor = NULL;
+	fy_parse_eventp_recycle(fyp, fyep);
+	fyep = NULL;
+
+	/* start generation of alias events */
+	fysa = fy_parser_streaming_alias_lookup(fyp, fyt_anchor);
+
+	/* we don't support forward aliases for now like we do in document mode ... */
+	FYP_TOKEN_ERROR_CHECK(fyp, fyt_anchor, FYEM_PARSE,
+			fysa, err_out,
+			"alias not found; note streaming mode does not support forward alias references");
+
+	/* if this is a reference to a collecting alias, then it's recursive */
+	FYP_TOKEN_ERROR_CHECK(fyp, fyt_anchor, FYEM_PARSE,
+			!fysa->collecting, err_out,
+			"Recursive alias reference detected");
+
+	fy_token_unref(fyt_anchor);
+	fyt_anchor = NULL;
+
+	fysas = fy_parse_streaming_alias_state_push(fyp, fysa);
+	fyp_error_check(fyp, fysas, err_out,
+			"fy_parse_streaming_alias_push() failed!");
+	assert(fysas->next);
+
+	fyep = fy_parse_eventp_clone(fyp, fysas->next, true);
+	fyp_error_check(fyp, fyep != NULL, err_out,
+			"fy_parse_eventp_clone() failed!");
+
+	/* advance event */
+	fy_parse_streaming_alias_state_next_event(fyp);
+
+	return fyep;
+
+err_out:
+	fy_token_unref(fyt_anchor);
+	fyp->stream_error = true;
+	return NULL;
+}
+
+struct fy_eventp *fy_parser_event_resolve_hook_anchor_start(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	struct fy_token *fyt_anchor = NULL;
+	struct fy_streaming_alias *fysa = NULL;
+
+	if (!fyep)
+		return NULL;
+
+	/* is there an anchor?, is so get it and clear it */
+	fyt_anchor = fy_event_get_and_clear_anchor_token(&fyep->e);
+	if (!fyt_anchor)
+		return fyep;
+
+	fysa = fy_parse_streaming_alias_create(fyp, fyt_anchor);
+	fyp_error_check(fyp, fysa != NULL, err_out,
+		"fy_parser_streaming_alias_create() failed!");
+	fyt_anchor = NULL;
+
+	/* we just mark that we're collecting
+	 * the collection hook will pick up the first event
+	 * including the scalar one
+	 */
+	fysa->collecting = true;
+	fysa->sequence_nest = 0;
+	fysa->mapping_nest = 0;
+
+	/* always add to the head of the list (overrides what follows with the same name) */
+	fy_streaming_alias_list_add(&fyp->streaming_aliases, fysa);
+
+	return fyep;
+
+err_out:
+	fy_token_unref(fyt_anchor);
+	fy_parse_streaming_alias_clean(fyp, fysa);
+	fy_parse_streaming_alias_recycle(fyp, fysa);
+	fy_parse_eventp_recycle(fyp, fyep);
+	return NULL;
+}
+
+static struct fy_document *
+fy_parser_get_merge_key_argument(struct fy_parser *fyp, struct fy_document_builder *fydb, struct fy_node *fyn)
+{
+	struct fy_streaming_alias *fysa;
+	struct fy_document *fyd_new = NULL;
+	struct fy_document_state *fyds = NULL;
+	int rc;
+
+	if (!fy_node_is_alias(fyn))
+		return NULL;
+
+	/* get the alias */
+	fysa = fy_parser_streaming_alias_lookup(fyp, fyn->scalar);
+	FYP_TOKEN_ERROR_CHECK(fyp, fyn->scalar, FYEM_PARSE,
+			fysa, err_out,
+			"Unable to find merge key argument alias");
+
+	/* if this is a reference to a collecting alias, then it's recursive */
+	FYP_TOKEN_ERROR_CHECK(fyp, fyn->scalar, FYEM_PARSE,
+			!fysa->collecting, err_out,
+			"merge key recursive alias reference detected");
+
+	fyds = fy_parser_get_document_state(fyp);
+	fyp_error_check(fyp, fyds, err_out,
+			"fy_parser_get_document_state() failed");
+
+	rc = fy_document_builder_set_in_document(fydb, fyds, true);
+	fyp_error_check(fyp, !rc, err_out,
+			"fy_document_builder_set_target_document() failed\n");
+
+	/* build a document from the events of the alias (must be the same) */
+	fyd_new = fy_document_builder_event_document(fydb, &fysa->events);
+	fyp_error_check(fyp, fyd_new, err_out,
+			"fy_document_builder_event_document() failed\n");
+
+	FYP_TOKEN_ERROR_CHECK(fyp, fyn->scalar, FYEM_PARSE,
+			fy_node_is_mapping(fyd_new->root), err_out,
+			"alias argument does not refer to mapping");
+
+	return fyd_new;
+
+err_out:
+	fy_document_destroy(fyd_new);
+	return NULL;
+}
+
+static struct fy_document *
+fy_parser_get_merge_key_document(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	struct fy_event *fye;
+	struct fy_document_builder_cfg cfg;
+	struct fy_document_builder *fydb = NULL;
+	struct fy_document *fyd = NULL, *fyd_arg = NULL;
+	struct fy_document_state *fyds;
+	struct fy_node *fyn = NULL, *fyn_src = NULL;
+	struct fy_node *new_root = NULL;
+	struct fy_node_pair *fynp, *fynp_exists;
+	void *iters, *iterm;
+	int rc;
+
+	fye = &fyep->e;
+
+	memset(&cfg, 0, sizeof(cfg));
+	cfg.parse_cfg = fyp->cfg;
+	cfg.diag = fy_diag_ref(fyp->diag);
+
+	fydb = fy_document_builder_create(&cfg);
+	fyp_error_check(fyp, fydb, err_out,
+			"fy_document_builder_create() failed\n");
+
+	fyds = fy_parser_get_document_state(fyp);
+	/* start with this document state */
+	fyds = fy_parser_get_document_state(fyp);
+	rc = fy_document_builder_set_in_document(fydb, fyds, true);
+	fyp_error_check(fyp, !rc, err_out,
+			"fy_document_builder_set_in_document() failed\n");
+
+	fyd = fy_document_builder_load_document(fydb, fyp);
+	fyp_error_check(fyp, fyd, err_out,
+			"fy_document_builder_load_document() failed\n");
+
+	FYP_TOKEN_ERROR_CHECK(fyp, fy_event_get_token(fye), FYEM_PARSE,
+			fyd->root, err_out,
+			"merge key arguments must exist");
+
+	/* single alias, replace */
+	if (fy_node_is_alias(fyd->root)) {
+		fyd_arg = fy_parser_get_merge_key_argument(fyp, fydb, fyd->root);
+		fyp_error_check(fyp, fyd_arg, err_out,
+				"fy_parser_get_merge_key_argument() failed\n");
+		fy_node_free(fyd->root);
+		fyd->root = fy_node_copy(fyd, fyd_arg->root);
+
+		fy_document_destroy(fyd_arg);
+		fyd_arg = NULL;
+
+	} else if (fy_node_is_mapping(fyd->root)) {
+
+		/* nothing, already a mapping */
+
+	} else if (fy_node_is_sequence(fyd->root)) {
+
+		new_root = fy_node_create_mapping(fyd);
+		fyp_error_check(fyp, new_root, err_out,
+				"fy_node_create_mapping() failed\n");
+
+		iters = NULL;
+		while ((fyn_src = fy_node_sequence_iterate(fyd->root, &iters)) != NULL) {
+
+			if (fy_node_is_alias(fyn_src)) {
+				fyd_arg = fy_parser_get_merge_key_argument(fyp, fydb, fyn_src);
+				fyp_error_check(fyp, fyd_arg, err_out,
+						"fy_parser_get_merge_key_argument() failed\n");
+
+				fyn = fy_node_copy(fyd, fyd_arg->root);
+				fyp_error_check(fyp, fyn, err_out,
+						"fy_node_copy() failed\n");
+				fy_document_destroy(fyd_arg);
+				fyd_arg = NULL;
+
+			} else {
+				FYP_NODE_ERROR_CHECK(fyp, fyn_src, FYEM_PARSE,
+						fy_node_is_mapping(fyn_src), err_out,
+						"merge key argument is not a mapping or an alias to such");
+				fyn = fy_node_copy(fyd, fyn_src);
+				fyp_error_check(fyp, fyn, err_out,
+						"fy_node_copy() failed\n");
+			}
+
+			iterm = NULL;
+			while ((fynp = fy_node_mapping_iterate(fyn, &iterm)) != NULL) {
+				fynp_exists = fy_node_mapping_lookup_pair(new_root, fynp->key);
+
+				/* do not override existing keys */
+				if (fynp_exists)
+					continue;
+
+				/* add it to the mapping */
+				rc = fy_node_mapping_append(new_root, fy_node_copy(fyd, fynp->key), fy_node_copy(fyd, fynp->value));
+				fyp_error_check(fyp, !rc, err_out,
+						"fy_node_mapping_append() failed\n");
+			}
+
+			/* and we're done with it */
+			fy_node_free(fyn);
+			fyn = NULL;
+		}
+		fy_node_free(fyd->root);
+		fyd->root = new_root;
+
+	} else {
+		FYP_TOKEN_ERROR(fyp, fy_event_get_token(fye), FYEM_PARSE,
+				"merge key argument is neither an alias or a mapping");
+		goto err_out;
+	}
+
+	fy_document_builder_destroy(fydb);
+	fydb = NULL;
+
+	return fyd;
+
+err_out:
+	fy_node_free(new_root);
+	fy_document_destroy(fyd_arg);
+	fy_document_destroy(fyd);
+	fy_document_builder_destroy(fydb);
+	return NULL;
+}
+
+struct fy_eventp *fy_parser_event_resolve_hook_merge_key_start(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	struct fy_document *fyd = NULL;
+	struct fy_document_iterator *fydi = NULL;
+	struct fy_eventp *fyep_next = NULL;
+	struct fy_event *fye;
+	struct fy_streaming_alias *fysa;
+	struct fy_streaming_alias_state *fysas;
+
+	FYP_TOKEN_ERROR_CHECK(fyp, fyep->e.scalar.value, FYEM_PARSE,
+			!fyp->mks.active, err_out,
+			"No recursive merge key processing is supported");
+
+	fyd = fy_parser_get_merge_key_document(fyp, fyep);
+	FYP_TOKEN_ERROR_CHECK(fyp, fyep->e.scalar.value, FYEM_PARSE,
+			fyd, err_out,
+			"No merge key argument document");
+
+	fysa = fy_parse_streaming_alias_create(fyp, NULL);
+	fyp_error_check(fyp, fysa, err_out,
+			"fy_parse_streaming_alias_create() failed");
+
+	fydi = fy_document_iterator_create();
+	fyp_error_check(fyp, fydi, err_out,
+			"fy_document_iterator_create() failed");
+
+	fy_document_iterator_node_start(fydi, fyd->root);
+
+	/* now append all to the (fake) streaming anchor */
+	while ((fye = fy_document_iterator_body_next(fydi)) != NULL) {
+		fyep_next = fy_container_of(fye, struct fy_eventp, e);
+		fy_eventp_list_add_tail(&fysa->events, fyep_next);
+	}
+
+	fy_document_iterator_destroy(fydi);
+	fy_document_destroy(fyd);
+	fyd = NULL;
+
+	/* and add it to the start of the list */
+	fy_streaming_alias_list_add(&fyp->streaming_aliases, fysa);
+
+	/* OK, trim mapping start and end */
+	fyep_next = fy_eventp_list_head(&fysa->events);
+	fyp_error_check(fyp, fyep_next->e.type == FYET_MAPPING_START, err_out,
+			"not a mapping merge key start");
+	fy_eventp_list_del(&fysa->events, fyep_next);
+	fy_eventp_free(fyep_next);
+
+	fyep_next = fy_eventp_list_tail(&fysa->events);
+	fyp_error_check(fyp, fyep_next->e.type == FYET_MAPPING_END, err_out,
+			"not a mapping merge key end");
+	fy_eventp_list_del(&fysa->events, fyep_next);
+	fy_eventp_free(fyep_next);
+
+	/* OK, push the new state */
+	fysas = fy_parse_streaming_alias_state_push(fyp, fysa);
+	fyp_error_check(fyp, fysas, err_out,
+			"fy_parse_streaming_alias_push() failed!");
+	assert(fysas->next);
+
+	/* dispose of the event */
+	fy_parse_eventp_recycle(fyp, fyep);
+	fyep = NULL;
+
+	fyep = fy_parse_eventp_clone(fyp, fysas->next, true);
+	fyp_error_check(fyp, fyep != NULL, err_out,
+			"fy_parse_eventp_clone() failed!");
+
+	/* advance event */
+	fy_parse_streaming_alias_state_next_event(fyp);
+
+	return fyep;
+
+err_out:
+	fy_document_iterator_destroy(fydi);
+	fy_document_destroy(fyd);
+	fy_parse_eventp_recycle(fyp, fyep_next);
+	fy_parse_eventp_recycle(fyp, fyep);
+	return NULL;
+}
+
+struct fy_eventp *fy_parser_event_resolve_hook_merge_key(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	/* will toggle the map key bit if it is in a mapping */
+	fy_parse_streaming_alias_collection_state_toggle_map(fyp);
+	switch (fyep->e.type) {
+	case FYET_SCALAR:
+		/* if a merge key is detected do the dance */
+		if (fy_parse_streaming_alias_collection_state_in_map_key(fyp) &&
+		    fy_token_scalar_style(fyep->e.scalar.value) == FYSS_PLAIN &&
+		    fy_plain_atom_streq(fy_token_atom(fyep->e.scalar.value), "<<"))
+			return fy_parser_event_resolve_hook_merge_key_start(fyp, fyep);
+		break;
+	case FYET_ALIAS:
+		/* nothing for alias */
+		break;
+	case FYET_MAPPING_START:
+		fy_parse_streaming_alias_collection_state_push(fyp, FYCTS_MAP_VAL);	/* it will toggle to key at the first one */
+		break;
+	case FYET_SEQUENCE_START:
+		fy_parse_streaming_alias_collection_state_push(fyp, FYCTS_SEQ);
+		break;
+	case FYET_MAPPING_END:
+	case FYET_SEQUENCE_END:
+		fy_parse_streaming_alias_collection_state_pop(fyp);
+		break;
+	default:
+		break;
+	}
+
+	return fyep;
+}
+
+/* NOTE: order is _very_ important, do not re-arrange if you're not sure */
+struct fy_eventp *fy_parser_event_resolve_hook(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	int rc;
+
+	/* merge key processing for version 1.1 only! */
+	if (fy_reader_get_mode(fyp->reader) == fyrm_yaml_1_1) {
+		fyep = fy_parser_event_resolve_hook_merge_key(fyp, fyep);
+		fyp_error_check(fyp, fyep != NULL, err_out,
+				"fy_parser_event_resolve_hook_collection_tracking() failed!");
+	}
+
+	/* anchor marking */
+	fyep = fy_parser_event_resolve_hook_anchor_start(fyp, fyep);
+	fyp_error_check(fyp, fyep != NULL, err_out,
+			"fy_parser_event_resolve_hook_anchor_start() failed!");
+
+	/* collect afterwards */
+	rc = fy_parser_event_resolve_hook_collect(fyp, fyep);
+	fyp_error_check(fyp, !rc, err_out,
+			"fy_parser_event_resolve_hook_collect() failed!");
+
+	/* finally do first entry into alias processing */
+	fyep = fy_parser_event_resolve_hook_alias(fyp, fyep);
+	fyp_error_check(fyp, fyep != NULL, err_out,
+			"fy_parser_event_resolve_hook_alias() failed!");
+
+	return fyep;
+
+err_out:
+	return NULL;
+}
+
+struct fy_eventp *fy_parser_parse_resolve_prolog(struct fy_parser *fyp)
+{
+	struct fy_streaming_alias *fysa;
+	struct fy_streaming_alias_state *fysas;
+	struct fy_eventp *fyep, *fyep_src;
+	bool was_merge_key;
+	int rc;
+
+	if (!(fyp->cfg.flags & FYPCF_RESOLVE_DOCUMENT))
+		return NULL;
+
+	fysas = fy_parse_streaming_alias_state_top(fyp);
+	if (!fysas)
+		return NULL;
+
+	was_merge_key = false;
+	for (;;) {
+		fysa = fysas->fysa;
+		assert(fysa);
+
+		assert(fysas->next != NULL);
+
+		/* keep track of it */
+		fyep_src = fysas->next;
+
+		/* merge key entries don't have an anchor */
+		was_merge_key = fysa->anchor == NULL;
+
+		/* advance event */
+		fy_parse_streaming_alias_state_next_event(fyp);
+
+		/* not an alias, continue normally */
+		if (fyep_src->e.type != FYET_ALIAS)
+			break;
+
+		/* get the anchor that was defined closest to this one */
+		fysa = fy_parser_streaming_alias_lookup_pivot(fyp, fysa, fyep_src->e.alias.anchor);
+		fyp_error_check(fyp, fysa, err_out,
+				"fy_parser_streaming_alias_lookup_pivot() failed!");
+
+		/* and push */
+		fysas = fy_parse_streaming_alias_state_push(fyp, fysa);
+		fyp_error_check(fyp, fysas, err_out,
+				"fy_parse_streaming_alias_state_push() failed!");
+	}
+
+	fyep = fy_parse_eventp_clone(fyp, fyep_src, true);
+	fyp_error_check(fyp, fyep != NULL, err_out,
+			"fy_parse_eventp_clone() failed!");
+
+	if (was_merge_key) {
+		rc = fy_parser_event_resolve_hook_collect(fyp, fyep_src);
+		fyp_error_check(fyp, !rc, err_out,
+			"fy_parser_event_resolve_hook_collect() failed!");
+	}
+
+	return fyep;
+
+err_out:
+	fyp->stream_error = true;
+	return NULL;
+}
+
+struct fy_eventp *fy_parser_parse_resolve_epilog(struct fy_parser *fyp, struct fy_eventp *fyep)
+{
+	if (!(fyp->cfg.flags & FYPCF_RESOLVE_DOCUMENT))
+		return fyep;
+
+	fyep = fy_parser_event_resolve_hook(fyp, fyep);
+	if (!fyep)
+		fyp->stream_error = true;
+
+	return fyep;
+}
+
+struct fy_parser_checkpoint *fy_parser_checkpoint_create(struct fy_parser *fyp)
+{
+	struct fy_parser_checkpoint *fypchk = NULL;
+	struct fy_parser *fypc = NULL;
+	struct fy_reader *fyr, *fyrc;
+	struct fy_streaming_alias *fysa, *fysac;
+	struct fy_eventp *fyep, *fyepc;
+	struct fy_indent *fyit, *fyitc;
+	struct fy_simple_key *fysk, *fyskc;
+	struct fy_parse_state_log *fypsl, *fypslc;
+	struct fy_flow *fyf, *fyfc;
+	struct fy_token *fyt;
+	struct fy_input *fyi;
+	int i;
+
+	/* must be a parser, in a document and not a checkpoint of one,
+	 * with no composer or builder, neither in a merge key state */
+	if (!fyp || /* fyp->state != FYPS_DOCUMENT_CONTENT || */
+	    fyp->is_checkpoint || fyp->fydb || fyp->fyc ||
+	    fyp->mks.active) {
+		fyp_parse_debug(fyp, "cannot take checkpoint at this state");
+		return NULL;
+	}
+
+	/* no queued inputs */
+	if (!fy_input_list_empty(&fyp->queued_inputs))
+		return NULL;
+
+	fyp_parse_debug(fyp, "taking checkpoint");
+
+	fypchk = malloc(sizeof(*fypchk));
+	fyp_error_check(fyp, fypchk != NULL, err_out,
+			"fy_parse_input_create() failed!");
+	memset(fypchk, 0, sizeof(*fypchk));
+	fypc = &fypchk->fyp_checkpoint;
+
+	/* copy everything over and then fill out the pointer */
+	*fypc = *fyp;
+
+	fypc->is_checkpoint = true;	/* mark it as a checkpoint */
+
+	/* all recycled lists are initialized */
+	fy_indent_list_init(&fypc->recycled_indent);
+	fy_parse_state_log_list_init(&fypc->recycled_parse_state_log);
+	fy_eventp_list_init(&fypc->recycled_eventp);
+	fy_token_list_init(&fypc->recycled_token);
+	fy_flow_list_init(&fypc->flow_stack);
+	fy_flow_list_init(&fypc->recycled_flow);
+	fy_streaming_alias_list_init(&fypc->recycled_streaming_alias);
+	fy_simple_key_list_init(&fypc->recycled_simple_key);
+	fy_eventp_list_init(&fypc->mks.args);
+	fypc->recycled_eventp_list = NULL;
+	fypc->recycled_token_list = NULL;
+
+	fy_input_list_init(&fypc->queued_inputs);
+	fypc->stream_end_token = fy_token_ref(fyp->stream_end_token);
+
+	fypc->last_comment.fyi = fy_input_ref(fyp->last_comment.fyi);
+	fypc->override_comment.fyi = fy_input_ref(fyp->override_comment.fyi);
+	fypc->current_document_state = fy_document_state_ref(fyp->current_document_state);
+	fypc->default_document_state = fy_document_state_ref(fyp->default_document_state);
+	fypc->next_single_document = fyp->next_single_document;
+	fypc->diag = NULL;
+	fypc->last_event_handle.fyi = fy_input_ref(fyp->last_event_handle.fyi);
+
+	if (fyp->fyep_peek) {
+		fypc->fyep_peek = fy_parse_eventp_clone(fyp, fyp->fyep_peek, false);
+		fyp_parse_debug(fyp, "checkpoint has a peeked event");
+	}
+
+	/* copy the current state of the reader to the builtin reader space */
+	fyr = fyp->reader;
+	assert(fyr);
+	fyrc = &fypc->builtin_reader;
+	fypc->reader = fyrc;
+
+	*fyrc = *fyr;
+	fyrc->current_input = fy_input_ref(fyr->current_input);
+	assert(fyrc->current_input);
+	fyrc->diag = NULL;	/* no diag */
+
+	/* copy the streaming alias list */
+	if (fyp->sas.stack) {
+		fyp_parse_debug(fyp, "checkpoint has a streaming alias list");
+		if (fyp->sas.alloc <= (int)ARRAY_SIZE(fyp->sas.local))
+			fypc->sas.stack = fypc->sas.local;
+		else {
+			fypc->sas.stack = malloc(sizeof(*fyp->sas.stack) * fyp->sas.alloc);
+			assert(fypc->sas.stack);
+			memcpy(fypc->sas.stack, fyp->sas.stack, sizeof(*fyp->sas.stack) * fyp->sas.top);
+		}
+	}
+
+	fy_streaming_alias_list_init(&fypc->streaming_aliases);
+	for (fysa = fy_streaming_alias_list_head(&fyp->streaming_aliases); fysa != NULL;
+	     fysa = fy_streaming_alias_next(&fyp->streaming_aliases, fysa)) {
+
+		fysac = fy_parse_streaming_alias_create(fyp, NULL);
+		assert(fysac);
+		fysac->anchor = fy_token_ref(fysa->anchor);
+		for (fyep = fy_eventp_list_head(&fysa->events); fyep;
+		     fyep = fy_eventp_next(&fysa->events, fyep)) {
+
+			fyepc = fy_parse_eventp_clone(fyp, fyep, false);
+			assert(fyepc);
+			fy_eventp_list_add_tail(&fysac->events, fyepc);
+
+			/* scan stack and replace pointers */
+			for (i = 0; i < fypc->sas.top; i++) {
+				if (fypc->sas.stack[i].fysa == fysa)
+					fypc->sas.stack[i].fysa = fysac;
+				if (fypc->sas.stack[i].next == fyep)
+					fypc->sas.stack[i].next = fyepc;
+			}
+		}
+	}
+
+	if (fyp->cts.stack) {
+		fyp_parse_debug(fyp, "checkpoint has a cts stack");
+		if (fyp->cts.alloc <= (int)ARRAY_SIZE(fyp->cts.local))
+			fypc->cts.stack = fypc->cts.local;
+		else {
+			fypc->cts.stack = malloc(sizeof(*fyp->cts.stack) * fyp->cts.alloc);
+			assert(fypc->cts.stack);
+			memcpy(fypc->cts.stack, fyp->cts.stack, sizeof(*fyp->cts.stack) * fyp->cts.top);
+		}
+	}
+
+	/* copy all remaining lists */
+	fy_indent_list_init(&fypc->indent_stack);
+	for (fyit = fy_indent_list_head(&fyp->indent_stack); fyit != NULL;
+	     fyit = fy_indent_next(&fyp->indent_stack, fyit)) {
+
+		fyitc = fy_parse_indent_alloc(fyp);
+		assert(fyitc);
+
+		*fyitc = *fyit;
+
+		fy_indent_list_add_tail(&fypc->indent_stack, fyitc);
+	}
+
+	fy_parse_state_log_list_init(&fypc->state_stack);
+	for (fypsl = fy_parse_state_log_list_head(&fyp->state_stack); fypsl != NULL;
+	     fypsl = fy_parse_state_log_next(&fyp->state_stack, fypsl)) {
+
+		fypslc = fy_parse_parse_state_log_alloc(fyp);
+		assert(fypslc);
+
+		fypslc->state = fypsl->state;
+
+		fyp_parse_debug(fyp, "checkpoint saving parse_state %s\n", state_txt[fypslc->state]);
+
+		fy_parse_state_log_list_add_tail(&fypc->state_stack, fypslc);
+	}
+
+	/* queued tokens and simple keys are 'special' */
+	fy_token_list_init(&fypc->queued_tokens);
+	/* count, and take refs */
+	for (fyt = fy_token_list_head(&fyp->queued_tokens), i = 0; fyt != NULL;
+	     fyt = fy_token_next(&fyp->queued_tokens, fyt), i++) { }
+	fypchk->queued_token_count = i;
+	fypchk->queued_tokens = malloc(i * sizeof(*fypchk->queued_tokens));
+	assert(fypchk->queued_tokens);
+	for (fyt = fy_token_list_head(&fyp->queued_tokens), i = 0; fyt != NULL;
+	     fyt = fy_token_next(&fyp->queued_tokens, fyt), i++) {
+		fypchk->queued_tokens[i] = fy_token_ref(fyt);
+	}
+	fyp_parse_debug(fyp, "checkpoint has #%d queued tokens", fypchk->queued_token_count);
+
+	fy_simple_key_list_init(&fypc->simple_keys);
+
+	if (!fy_simple_key_list_empty(&fyp->simple_keys))
+		fyp_parse_debug(fyp, "checkpoint has pending simple keys");
+
+	for (fysk = fy_simple_key_list_head(&fyp->simple_keys); fysk != NULL;
+	     fysk = fy_simple_key_next(&fyp->simple_keys, fysk)) {
+
+		fyskc = fy_parse_simple_key_alloc(fyp);
+		assert(fyskc);
+
+		*fyskc = *fysk;
+		fyskc->token = fy_token_ref(fysk->token);
+
+		fy_simple_key_list_add_tail(&fypc->simple_keys, fyskc);
+	}
+
+	fy_input_list_init(&fypc->queued_inputs);
+	/* count, and take refs */
+	for (fyi = fy_input_list_head(&fyp->queued_inputs), i = 0; fyi != NULL;
+	     fyi = fy_input_next(&fyp->queued_inputs, fyi), i++) { }
+	fypchk->queued_input_count = i;
+	fypchk->queued_inputs = malloc(i * sizeof(*fypchk->queued_inputs));
+	assert(fypchk->queued_inputs);
+	for (fyi = fy_input_list_head(&fyp->queued_inputs), i = 0; fyi != NULL;
+	     fyi = fy_input_next(&fyp->queued_inputs, fyi), i++) {
+		fypchk->queued_inputs[i] = fy_input_ref(fyi);
+	}
+
+	fyp_parse_debug(fyp, "checkpoint flow_level=%d", fypc->flow_level);
+	fypc->flow = fyp->flow;
+	if (!fy_flow_list_empty(&fyp->flow_stack))
+		fyp_parse_debug(fyp, "checkpoint has flow state");
+
+	for (fyf = fy_flow_list_head(&fyp->flow_stack); fyf != NULL;
+	     fyf = fy_flow_next(&fyp->flow_stack, fyf)) {
+
+		fyfc = fy_parse_flow_alloc(fyp);
+		assert(fyfc);
+
+		*fyfc = *fyf;
+
+		fy_flow_list_add_tail(&fypc->flow_stack, fyfc);
+	}
+
+	fypchk->diag_on_error = fyp->diag && fyp->diag->on_error;
+
+	fyp_parse_debug(fyp, "took checkpoint");
+	return fypchk;
+
+err_out:
+	if (fypchk)
+		free(fypchk);
+	return NULL;
+}
+
+void fy_parser_checkpoint_destroy(struct fy_parser_checkpoint *fypchk)
+{
+	struct fy_parser *fypc;
+	int i;
+
+	if (!fypchk)
+		return;
+
+	if (fypchk->queued_inputs) {
+		for (i = 0; i < fypchk->queued_input_count; i++)
+			fy_input_unref(fypchk->queued_inputs[i]);
+		free(fypchk->queued_inputs);
+	}
+
+	if (fypchk->queued_tokens) {
+		for (i = 0; i < fypchk->queued_token_count; i++)
+			fy_token_unref(fypchk->queued_tokens[i]);
+		free(fypchk->queued_tokens);
+	}
+
+	fypc = &fypchk->fyp_checkpoint;
+
+	fy_parse_cleanup(fypc);
+
+	free(fypchk);
+}
+
+int fy_parser_rollback(struct fy_parser *fyp, struct fy_parser_checkpoint *fypchk)
+{
+	struct fy_parser *fypc = NULL;
+	struct fy_reader *fyr, *fyrc;
+	struct fy_indent *fyit, *fyitc;
+	struct fy_flow *fyf, *fyfc;
+	struct fy_parse_state_log *fypsl, *fypslc;
+	struct fy_input *fyi, *fyic;
+	struct fy_token *fyt;
+	int i;
+
+	if (!fypchk)
+		return -1;
+
+	fyp_parse_debug(fyp, "rolling back checkpoint");
+
+	fypc = &fypchk->fyp_checkpoint;
+
+	if (fyp->diag)
+		fyp->diag->on_error = fypchk->diag_on_error;
+
+	/* reader restore */
+	fyr = fyp->reader;
+	fyrc = fypc->reader;
+
+	assert(fyr->ops == fyrc->ops);
+	fy_input_unref(fyr->current_input);
+	fyr->current_input = fy_input_ref(fyrc->current_input);
+	fyr->mode = fyrc->mode;
+	fyr->this_input_start = fyrc->this_input_start;
+	fyr->current_ptr = fyrc->current_ptr;
+	fyr->current_ptr_start =fyrc->current_ptr_start;
+	fyr->current_ptr_end =fyrc->current_ptr_end;
+	fyr->line = fyrc->line;
+	fyr->column = fyrc->column;
+	fyr->tabsize = fyrc->tabsize;
+	fyr->json_mode = fyrc->json_mode;
+	fyr->lb_mode = fyrc->lb_mode;
+	fyr->fws_mode = fyrc->fws_mode;
+	fyr->directive0_mode = fyrc->directive0_mode;
+
+	fy_token_unref(fyp->stream_end_token);
+	fyp->stream_end_token = fy_token_ref(fypc->stream_end_token);
+
+	/* inputs restore */
+	while ((fyi = fy_input_list_pop(&fyp->queued_inputs)) != NULL)
+		fy_input_unref(fyi);
+	for (i = 0; i < fypchk->queued_input_count; i++) {
+		fyic = fypchk->queued_inputs[i];
+		fy_input_list_add_tail(&fyp->queued_inputs, fy_input_ref(fyic));
+	}
+	fyp->token_activity_counter = fypc->token_activity_counter;
+
+	fy_input_unref(fyp->last_comment.fyi);
+	fyp->last_comment = fypc->last_comment;
+	fyp->last_comment.fyi = fy_input_ref(fypc->last_comment.fyi);
+
+	fy_input_unref(fyp->override_comment.fyi);
+	fyp->override_comment = fypc->override_comment;
+	fyp->override_comment.fyi = fy_input_ref(fypc->override_comment.fyi);
+
+	/* indents */
+	while ((fyit = fy_indent_list_pop(&fyp->indent_stack)) != NULL)
+		fy_parse_indent_recycle(fyp, fyit);
+	for (fyitc = fy_indent_list_head(&fypc->indent_stack); fyitc != NULL;
+	     fyitc = fy_indent_next(&fypc->indent_stack, fyitc)) {
+
+		fyit = fy_parse_indent_alloc(fyp);
+		assert(fyit);
+
+		*fyit = *fyitc;
+
+		fy_indent_list_add_tail(&fyp->indent_stack, fyit);
+	}
+	fyp->indent = fypc->indent;
+	fyp->parent_indent = fypc->parent_indent;
+	fyp->indent_line = fypc->indent_line;
+	fyp->starting_indent = fypc->starting_indent;
+
+	/* parse state */
+	fyp->state = fypc->state;
+	while ((fypsl = fy_parse_state_log_list_pop(&fyp->state_stack)) != NULL)
+		fy_parse_parse_state_log_recycle(fyp, fypsl);
+	for (fypslc = fy_parse_state_log_list_head(&fypc->state_stack); fypslc != NULL;
+	     fypslc = fy_parse_state_log_next(&fypc->state_stack, fypslc)) {
+
+		fypsl = fy_parse_parse_state_log_alloc(fyp);
+		assert(fypsl);
+
+		fypsl->state = fypslc->state;
+
+		fy_parse_state_log_list_add_tail(&fyp->state_stack, fypsl);
+	}
+
+#ifndef NDEBUG
+	for (fypsl = fy_parse_state_log_list_head(&fyp->state_stack); fypsl != NULL;
+	     fypsl = fy_parse_state_log_next(&fyp->state_stack, fypsl)) {
+		fyp_parse_debug(fyp, "checkpoint restored parse_state %s\n", state_txt[fypsl->state]);
+	}
+#endif
+
+	while ((fyt = fy_token_list_pop(&fyp->queued_tokens)) != NULL)
+		fy_token_unref(fyt);
+	for (i = 0; i < fypchk->queued_token_count; i++) {
+		fyt = fypchk->queued_tokens[i];
+		fy_token_list_add_tail(&fyp->queued_tokens, fy_token_ref(fyt));
+	}
+	assert(fy_simple_key_list_empty(&fypc->simple_keys));
+	assert(fy_streaming_alias_list_empty(&fypc->streaming_aliases));
+
+	fyp->default_version = fypc->default_version;
+	fyp->stream_version = fypc->stream_version;
+	fyp->parser_bitflags = fypc->parser_bitflags;
+	fyp->is_checkpoint = false;
+
+	fyp_parse_debug(fyp, "checkpoint restoring flow_level=%d", fypc->flow_level);
+
+	fyp->flow_level = fypc->flow_level;
+	fyp->flow = fypc->flow;
+	while ((fyf = fy_flow_list_pop(&fyp->flow_stack)) != NULL)
+		fy_parse_flow_recycle(fyp, fyf);
+	for (fyfc = fy_flow_list_head(&fypc->flow_stack); fyfc != NULL;
+	     fyfc = fy_flow_next(&fypc->flow_stack, fyfc)) {
+
+		fyf = fy_parse_flow_alloc(fyp);
+		assert(fyf);
+
+		*fyf = *fyfc;
+
+		fy_flow_list_add_tail(&fyp->flow_stack, fyf);
+	}
+
+	fyp->pending_complex_key_column = fypc->pending_complex_key_column;
+	fyp->pending_complex_key_mark = fypc->pending_complex_key_mark;
+	fyp->last_block_mapping_key_line = fypc->last_block_mapping_key_line;
+	fyp->last_comma_mark = fypc->last_comma_mark;
+	fyp->last_tab_used_for_ws_mark = fypc->last_tab_used_for_ws_mark;
+
+	fy_document_state_unref(fyp->current_document_state);
+	fyp->current_document_state = fy_document_state_ref(fypc->current_document_state);
+	fy_document_state_unref(fyp->default_document_state);
+	fyp->default_document_state = fy_document_state_ref(fypc->default_document_state);
+
+	fyp->next_single_document = fypc->next_single_document;
+	fyp->last_event_handle = fypc->last_event_handle;
+	fy_input_unref(fyp->last_event_handle.fyi);
+	fyp->last_event_handle.fyi = fy_input_ref(fypc->last_event_handle.fyi);
+
+	fy_parse_eventp_recycle(fyp, fyp->fyep_peek);
+	fyp->fyep_peek = NULL;
+	if (fypc->fyep_peek) {
+		fyp->fyep_peek = fy_parse_eventp_clone(fyp, fypc->fyep_peek, false);
+		assert(fypc->fyep_peek);
+	}
+
+	assert(fyp->sas.top == 0);
+
+	return 0;
+}
+
+enum fy_parser_mode
+fy_parser_get_mode(struct fy_parser *fyp)
+{
+	struct fy_version *versp;
+	int major, minor;
+
+	if (!fyp)
+		return fypm_invalid;
+
+	versp = fyp->current_document_state ? &fyp->current_document_state->version : &fyp->stream_version;
+
+	switch (fy_reader_get_mode(fyp->reader)) {
+	case fyrm_yaml:
+	case fyrm_yaml_1_1:
+		major = versp->major;
+		minor = versp->minor;
+		/* 1.1, 1.2, 1.3 */
+		if (major != 1 || minor < 1 || minor > 3)
+			break;
+		return fypm_yaml_1_1 + (minor - 1);
+
+	case fyrm_json:
+		return fypm_json;
+	}
+
+	return fypm_none;
+}
+
+int fy_parser_count_sequence_items(struct fy_parser *fyp)
+{
+	const struct fy_event *fye_peek;
+	struct fy_parser_checkpoint *fypchk = NULL;
+	int rc, count;
+
+	if (!fyp)
+		return -1;
+
+	/* take a checkpoint and race ahead to find the size */
+	fypchk = fy_parser_checkpoint_create(fyp);
+	fyp_error_check(fyp, fypchk != NULL, err_out,
+			"fy_parser_checkpoint_create() failed!");
+	count = 0;
+	for (;;) {
+		fye_peek = fy_parser_parse_peek(fyp);
+		if (!fye_peek)
+			goto err_out;
+		if (fye_peek->type != FYET_SCALAR &&
+		    fye_peek->type != FYET_MAPPING_START &&
+		    fye_peek->type != FYET_SEQUENCE_START &&
+		    fye_peek->type != FYET_SEQUENCE_END)
+			goto err_out;
+
+		if (fye_peek->type == FYET_SEQUENCE_END)
+			break;
+
+		/* skip the item */
+		rc = fy_parser_skip(fyp);
+		fyp_error_check(fyp, !rc, err_out,
+				"fy_parser_skip() failed!");
+		count++;
+	}
+
+	rc = fy_parser_rollback(fyp, fypchk);
+	fyp_error_check(fyp, !rc, err_out,
+			"fy_parser_rollback() failed!");
+out:
+	fy_parser_checkpoint_destroy(fypchk);
+	return count;
+
+err_out:
+	count = -1;
+	goto out;
+}
+
+int fy_parser_count_mapping_items(struct fy_parser *fyp)
+{
+	const struct fy_event *fye_peek;
+	struct fy_parser_checkpoint *fypchk = NULL;
+	int rc, count;
+
+	if (!fyp)
+		return -1;
+
+	/* take a checkpoint and race ahead to find the size */
+	fypchk = fy_parser_checkpoint_create(fyp);
+	fyp_error_check(fyp, fypchk != NULL, err_out,
+			"fy_parser_checkpoint_create() failed!");
+	count = 0;
+	for (;;) {
+		fye_peek = fy_parser_parse_peek(fyp);
+		if (!fye_peek)
+			goto err_out;
+		if (fye_peek->type != FYET_SCALAR &&
+		    fye_peek->type != FYET_MAPPING_START &&
+		    fye_peek->type != FYET_SEQUENCE_START &&
+		    fye_peek->type != FYET_MAPPING_END)
+			goto err_out;
+
+		if (fye_peek->type == FYET_MAPPING_END)
+			break;
+
+		/* skip the key item */
+		rc = fy_parser_skip(fyp);
+		fyp_error_check(fyp, !rc, err_out,
+				"fy_parser_skip() failed!");
+
+		/* skip the value item */
+		rc = fy_parser_skip(fyp);
+		fyp_error_check(fyp, !rc, err_out,
+				"fy_parser_skip() failed!");
+		count++;
+	}
+
+	rc = fy_parser_rollback(fyp, fypchk);
+	fyp_error_check(fyp, !rc, err_out,
+			"fy_parser_rollback() failed!");
+out:
+	fy_parser_checkpoint_destroy(fypchk);
+	return count;
+
+err_out:
+	count = -1;
+	goto out;
+}
+
+// just for LLVMShutdown
+#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG
+// llvm-c/Core.h include removed for YDB vendoring (HAVE_LIBCLANG=0)
+#endif
+
+void fy_shutdown(void)
+{
+#if defined(HAVE_LIBCLANG) && HAVE_LIBCLANG
+	LLVMShutdown();
+#endif
+}
+
+#ifdef FY_HAS_DESTRUCTOR
+FY_DESTRUCTOR void fy_do_cleanup(void)
+{
+	fy_shutdown();
+}
+#endif

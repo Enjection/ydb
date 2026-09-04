@@ -99,7 +99,7 @@
 #define PACKAGE_NAME "libfyaml"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "libfyaml 0.8"
+#define PACKAGE_STRING "libfyaml 0.9.4"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "libfyaml"
@@ -108,7 +108,7 @@
 #define PACKAGE_URL ""
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "0.8"
+#define PACKAGE_VERSION "0.9.4"
 
 /* Define to necessary symbol if this constant uses a non-standard name on
    your system. */
@@ -214,8 +214,40 @@
 #endif
 
 
+/* Define to 1 if you have alloca.h */
+#define HAVE_ALLOCA_H 1
+
+/* Define to 1 if you have byteswap.h */
+#define HAVE_BYTESWAP_H 1
+
+/* Define to 1 if you have __builtin_bswap16 */
+#define HAVE___BUILTIN_BSWAP16 1
+
+/* Define to 1 if you have __builtin_bswap32 */
+#define HAVE___BUILTIN_BSWAP32 1
+
+/* Define to 1 if you have __builtin_bswap64 */
+#define HAVE___BUILTIN_BSWAP64 1
+
+/* Define to 1 if you have mremap available */
+#define HAVE_MREMAP 1
+
+/* Blake3 SIMD support — portable only for now */
+#define TARGET_HAS_SSE2 0
+#define TARGET_HAS_SSE41 0
+#define TARGET_HAS_AVX2 0
+#define TARGET_HAS_AVX512 0
+#define TARGET_HAS_NEON 0
+
+/* Not available / not needed */
+#define HAVE_LIBCLANG 0
+#define HAVE_HEAP_TRAMPOLINES 0
+/* #undef HAVE_PORTABLE_TARGET */
+/* #undef HAVE_CLANG_BLOCKS */
+/* #undef HAVE_STATIC_TOOLS */
+
 /* Version number of package */
-#define VERSION "0.8"
+#define VERSION "0.9.4"
 
 /* Define WORDS_BIGENDIAN to 1 if your processor stores words with the most
    significant byte first (like Motorola and SPARC, unlike Intel). */

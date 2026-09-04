@@ -38,14 +38,31 @@ extern "C" {
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <unistd.h>
-#define FY_ALLOCA(x) alloca(x)
-#elif defined(_MSC_VER)
-#include <BaseTsd.h>
-typedef SSIZE_T ssize_t;
-#define FY_ALLOCA(x) _alloca(x)
+#include <sys/uio.h>
+#elif defined(_WIN32)
+/* Windows compatibility definitions */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#ifdef _WIN64
+typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif
+#endif
+/* Windows doesn't have sys/uio.h, provide iovec definition */
+#ifndef _FY_IOVEC_DEFINED
+#define _FY_IOVEC_DEFINED
+struct iovec {
+	void *iov_base;
+	size_t iov_len;
+};
+#endif
+#else
+#include <sys/uio.h>
 #endif
 
 /* opaque types for the user */
@@ -65,8 +82,9 @@ struct fy_path_expr;
 struct fy_path_exec;
 struct fy_path_component;
 struct fy_path;
+struct fy_composer;
 struct fy_document_iterator;
-
+struct fy_document_builder;
 
 #ifndef FY_BIT
 #define FY_BIT(x) (1U << (x))
@@ -75,14 +93,22 @@ struct fy_document_iterator;
 /* NULL terminated string length specifier */
 #define FY_NT	((size_t)-1)
 
+/* DLL export/import macros
+ * Note: On Windows, a .def file (src/lib/fyaml.def) is used to export
+ * public API symbols. The FY_EXPORT macro is kept for GCC visibility.
+ */
 #if defined(__GNUC__) && __GNUC__ >= 4
-#define FY_ATTRIBUTE(attr) __attribute ((attr))
 #define FY_EXPORT __attribute__ ((visibility ("default")))
 #define FY_DEPRECATED __attribute__ ((deprecated))
+#define FY_FORMAT(_t, _x, _y) __attribute__ ((format(_t, _x, _y)))
+#elif defined(_MSC_VER)
+#define FY_EXPORT /* nothing - exports handled via .def file */
+#define FY_DEPRECATED /* nothing - MSVC __declspec must be prefix */
+#define FY_FORMAT(_t, _x, _y) /* nothing */
 #else
-#define FY_ATTRIBUTE(attr) /* nothing */
 #define FY_EXPORT /* nothing */
 #define FY_DEPRECATED /* nothing */
+#define FY_FORMAT(_t, x, y)	/* nothing */
 #endif
 
 /* make a copy of an allocated string and return it on stack
@@ -91,32 +117,63 @@ struct fy_document_iterator;
  * If the _str pointer is NULL, then NULL will be returned
  */
 #ifndef FY_ALLOCA_COPY_FREE
-#define FY_ALLOCA_COPY_FREE(_str, _len, _res)			\
-	do {							\
-		char *__res, *__str = (char*)(_str);		\
-	        size_t __len = (size_t)(_len);			\
-		__res = NULL;					\
+#ifdef _MSC_VER
+/*
+ * MSVC doesn't support GCC statement expressions, so we provide
+ * function-based alternatives using thread-local storage.
+ */
+#define FY_ALLOCA_COPY_FREE_BUFSZ 8192
+static __declspec(thread) char fy_alloca_copy_free_buf[FY_ALLOCA_COPY_FREE_BUFSZ];
+
+static __inline const char *fy_alloca_copy_free_impl(char *str, size_t len)
+{
+	size_t actual_len;
+	if (!str)
+		return NULL;
+	actual_len = (len == FY_NT) ? strlen(str) : len;
+	if (actual_len >= FY_ALLOCA_COPY_FREE_BUFSZ)
+		actual_len = FY_ALLOCA_COPY_FREE_BUFSZ - 1;
+	memcpy(fy_alloca_copy_free_buf, str, actual_len);
+	fy_alloca_copy_free_buf[actual_len] = '\0';
+	free(str);
+	return fy_alloca_copy_free_buf;
+}
+
+#define FY_ALLOCA_COPY_FREE(_str, _len) \
+	fy_alloca_copy_free_impl((_str), (size_t)(_len))
+
+#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len) \
+	(fy_alloca_copy_free_impl((_str), (size_t)(_len)) ? fy_alloca_copy_free_buf : "")
+
+#else
+/* GCC/Clang version with statement expressions */
+#define FY_ALLOCA_COPY_FREE(_str, _len)				\
+        ({							\
+                char *__str = (_str), *__stra = NULL;		\
+                size_t __len = (size_t)(_len);			\
 								\
 		if (__str) {					\
-			if (__len == FY_NT)			\
+			if (__len == FY_NT) 			\
 				__len = strlen(__str);		\
-			__res = FY_ALLOCA(__len + 1);		\
-			memcpy(__res, __str, __len);		\
-			(__res[__len]) = '\0';			\
+			__stra = alloca(__len + 1);		\
+			memcpy(__stra, __str, __len);		\
+			__stra[__len] = '\0';			\
 			free(__str);				\
 		}						\
-	        *(_res) = __res;				\
-	} while(false)
-#endif
+                (const char *)__stra;				\
+        })
 
 /* same as above but when _str == NULL return "" */
-#ifndef FY_ALLOCA_COPY_FREE_NO_NULL
-#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len, _res)		\
-	do {							\
-		FY_ALLOCA_COPY_FREE(_str, _len, _res);  	\
-		if (!*(_res))					\
-			*(_res) = "";				\
-	} while(false)
+#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len)			\
+        ({							\
+                const char *__strb;				\
+								\
+		__strb = FY_ALLOCA_COPY_FREE(_str, _len);	\
+		if (!__strb)					\
+			__strb = "";				\
+		__strb;						\
+        })
+#endif
 #endif
 
 /**
@@ -200,11 +257,24 @@ fy_version_supported_iterate(void **prevp)
 	FY_EXPORT;
 
 /**
+ * fy_shutdown() - Final cleanup before exit
+ *
+ * Some libraries *cough*libclang** need explicit cleanup calls
+ * at the end of program execution, even if you've never called
+ * any of their functions.
+ *
+ * This method will make sure it calls their cleanup functions
+ * so that no memory leaks are reported in valgrind etc.
+ */
+void
+fy_shutdown(void)
+	FY_EXPORT;
+
+/**
  * struct fy_tag - The YAML tag structure.
  *
- * @handle: Handle of the tag (i.e. `"!!"` )
- * @prefix: The prefix of the tag (i.e. `"tag:yaml.org,2002:"`
- *
+ * @handle: Handle of the tag (i.e. `"!!"`)
+ * @prefix: The prefix of the tag (i.e. `"tag:yaml.org,2002:"`)
  * The parser fills it according to the \%TAG directives
  * encountered during parsing.
  */
@@ -258,6 +328,10 @@ enum fy_error_type {
  * @FYEM_BUILD: Build document module (after tree is constructed)
  * @FYEM_INTERNAL: Internal error/diagnostic module
  * @FYEM_SYSTEM: System error/diagnostic module
+ * @FYEM_EMIT: Emitter module
+ * @FYEM_TYPESET: Prepare types module (C reflection)
+ * @FYEM_DECODE: Decode, serialization -> internal form module
+ * @FYEM_ENCODE: Encode, internal form -> serialized form module
  * @FYEM_MAX: Non inclusive maximum fy_error_module value
  */
 enum fy_error_module {
@@ -269,6 +343,10 @@ enum fy_error_module {
 	FYEM_BUILD,
 	FYEM_INTERNAL,
 	FYEM_SYSTEM,
+	FYEM_EMIT,
+	FYEM_TYPESET,
+	FYEM_DECODE,
+	FYEM_ENCODE,
 	FYEM_MAX,
 };
 
@@ -447,6 +525,22 @@ fy_event_type_get_text(enum fy_event_type type)
 	FY_EXPORT;
 
 /**
+ * enum fy_collection_style - Collection styles supported by the parser/emitter
+ *
+ * @FYCS_ANY: Any collection style, not generated by the parser.
+ * 	      Lets the emitter to choose
+ * @FYCS_BLOCK: Block style (not {}[])
+ * @FYCS_FLOW: Flow style {}[]
+ * @FYCS_MAX: marks end of scalar styles
+ */
+enum fy_collection_style {
+	FYCS_ANY = -1,
+	FYCS_BLOCK,
+	FYCS_FLOW,
+	FYCS_MAX,
+};
+
+/**
  * enum fy_scalar_style - Scalar styles supported by the parser/emitter
  *
  * @FYSS_ANY: Any scalar style, not generated by the parser.
@@ -477,7 +571,7 @@ struct fy_event_stream_start_data {
 	struct fy_token *stream_start;
 };
 
-/*
+/**
  * struct fy_event_stream_end_data - stream end event data
  *
  * @stream_end: The token that ended the stream
@@ -486,7 +580,7 @@ struct fy_event_stream_end_data {
 	struct fy_token *stream_end;
 };
 
-/*
+/**
  * struct fy_event_document_start_data - doument start event data
  *
  * @document_start: The token that started the document, or NULL if
@@ -501,7 +595,7 @@ struct fy_event_document_start_data {
 	bool implicit;
 };
 
-/*
+/**
  * struct fy_event_document_end_data - doument end event data
  *
  * @document_end: The token that ended the document, or NULL if the
@@ -513,7 +607,7 @@ struct fy_event_document_end_data {
 	bool implicit;
 };
 
-/*
+/**
  * struct fy_event_alias_data - alias event data
  *
  * @anchor: The anchor token definining this alias.
@@ -522,10 +616,10 @@ struct fy_event_alias_data {
 	struct fy_token *anchor;
 };
 
-/*
+/**
  * struct fy_event_scalar_data - scalar event data
  *
- * @.anchor: anchor token or NULL
+ * @anchor: anchor token or NULL
  * @tag: tag token or NULL
  * @value: scalar value token (cannot be NULL)
  * @tag_implicit: true if the tag was implicit or explicit
@@ -537,7 +631,7 @@ struct fy_event_scalar_data {
 	bool tag_implicit;
 };
 
-/*
+/**
  * struct fy_event_sequence_start_data - sequence start event data
  *
  * @anchor: anchor token or NULL
@@ -551,7 +645,7 @@ struct fy_event_sequence_start_data {
 	struct fy_token *sequence_start;
 };
 
-/*
+/**
  * struct fy_event_sequence_end_data - sequence end event data
  *
  * @sequence_end: The token that ended the sequence, or NULL if
@@ -561,7 +655,7 @@ struct fy_event_sequence_end_data {
 	struct fy_token *sequence_end;
 };
 
-/*
+/**
  * struct fy_event_mapping_start_data - mapping start event data
  *
  * @anchor: anchor token or NULL
@@ -575,7 +669,7 @@ struct fy_event_mapping_start_data {
 	struct fy_token *mapping_start;
 };
 
-/*
+/**
  * struct fy_event_mapping_end_data - mapping end event data
  *
  * @mapping_end: The token that ended the mapping, or NULL if
@@ -630,6 +724,35 @@ struct fy_event {
 		struct fy_event_mapping_end_data mapping_end;
 	};
 };
+
+/**
+ * enum fy_event_part - Select part of the event
+ *
+ * @FYEP_VALUE: The value of the event (the main token)
+ * @FYEP_TAG: The tag of the event
+ * @FYEP_ANCHOR: The anchor of the event
+ */
+enum fy_event_part {
+	FYEP_VALUE,
+	FYEP_TAG,
+	FYEP_ANCHOR,
+};
+
+/**
+ * fy_event_get_type() - Get the event's type
+ *
+ * Return the type of the event
+ *
+ * @fye: The event
+ *
+ * Returns:
+ * The event type, or FYET_NONE when the event is invalid
+ */
+static inline enum fy_event_type
+fy_event_get_type(const struct fy_event *fye)
+{
+	return fye ? fye->type : FYET_NONE;
+}
 
 /**
  * fy_event_data() - Get a pointer to the event data
@@ -942,7 +1065,7 @@ int fy_parser_set_input_callback(struct fy_parser *fyp, void *user,
 	FY_EXPORT;
 
 /**
- * fy_parser_set_input_db() - Set the parser to process the given file descriptor
+ * fy_parser_set_input_fd() - Set the parser to process the given file descriptor
  *
  * Point the parser to use @fd for processing.
  *
@@ -974,6 +1097,75 @@ fy_parser_parse(struct fy_parser *fyp)
 	FY_EXPORT;
 
 /**
+ * fy_parser_parse_peek() - Parse and peek at the next event.
+ *
+ * It will return the next event that a call to fy_parser_parse
+ * would generate, but as read-only.
+ *
+ * You must not free this event.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * A peek at the next event in the stream or NULL.
+ */
+const struct fy_event *
+fy_parser_parse_peek(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_parser_skip() - Skip the current scalar/collection
+ *
+ * Skips the current scalar or collection.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_parser_skip(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_parser_count_sequence_items() - Count the sequence items
+ *
+ * Counts the number of sequence items. Parser must already
+ * be in a sequence state.
+ * Note that this uses backtracking so it might not be very
+ * efficient.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * The number of sequence items on success, -1 on error
+ * Note if the number of items exceeds INT_MAX, INT_MAX will
+ * be returned.
+ */
+int
+fy_parser_count_sequence_items(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_parser_count_mapping_items() - Count the mapping items
+ *
+ * Counts the number of mapping items. Parser must already
+ * be in a mapping state.
+ * Note that this uses backtracking so it might not be very
+ * efficient.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * The number of mapping items on success, -1 on error
+ * Note if the number of items exceeds INT_MAX, INT_MAX will
+ * be returned.
+ */
+int
+fy_parser_count_mapping_items(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
  * fy_parser_event_free() - Free an event
  *
  * Free a previously returned event from fy_parser_parse().
@@ -997,6 +1189,150 @@ bool
 fy_parser_get_stream_error(struct fy_parser *fyp)
 	FY_EXPORT;
 
+enum fy_parser_mode {
+	fypm_invalid = -1,
+	fypm_none,	/* scanning for mode, not committed yet */
+	fypm_yaml_1_1,
+	fypm_yaml_1_2,
+	fypm_yaml_1_3,	/* experimental */
+	fypm_json,
+};
+
+static inline bool
+fy_parser_mode_is_yaml(enum fy_parser_mode mode)
+{
+	return mode >= fypm_yaml_1_1 && mode <= fypm_yaml_1_3;
+}
+
+/**
+ * fy_parser_get_mode() - Get the parser mode
+ *
+ * Retrieve the current mode of the parser, which indicates the YAML version
+ * or format being parsed (YAML 1.1, 1.2, 1.3, or JSON).
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * The parser mode
+ */
+enum fy_parser_mode
+fy_parser_get_mode(struct fy_parser *fyp)
+	FY_EXPORT;
+
+static inline bool
+fy_parser_is_in_yaml_mode(struct fy_parser *fyp)
+{
+	return fy_parser_mode_is_yaml(fy_parser_get_mode(fyp));
+}
+
+static inline bool
+fy_parser_is_in_json_mode(struct fy_parser *fyp)
+{
+	return fy_parser_get_mode(fyp) == fypm_json;
+}
+
+/**
+ * fy_parser_vlog() - Log using the parsers diagnostics printf style (va_arg)
+ *
+ * Output a log on the parser diagnostic output
+ *
+ * @fyp: The parser
+ * @type: The error type
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_parser_vlog(struct fy_parser *fyp, enum fy_error_type type, const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_parser_log() - Log using the parsers diagnostics printf style
+ *
+ * Output a report on the parser's diagnostics
+ *
+ * @fyp: The parser
+ * @type: The error type
+ * @fmt: The printf format string
+ * @...: The extra arguments
+ */
+void
+fy_parser_log(struct fy_parser *fyp, enum fy_error_type type, const char *fmt, ...)
+	FY_FORMAT(printf, 3, 4)
+	FY_EXPORT;
+
+#ifndef NDEBUG
+
+#define fy_parser_debug(_fyp, _fmt, ...) \
+	fy_parser_log((_fyp), FYET_DEBUG, (_fmt) , ## __VA_ARGS__)
+#else
+
+#define fy_parser_debug(_fyp, _fmt, ...) \
+	do { } while(0)
+
+#endif
+
+#define fy_parser_info(_fyp, _fmt, ...) \
+	fy_parser_log((_fyp), FYET_INFO, (_fmt) , ## __VA_ARGS__)
+#define fy_parser_notice(_fyp, _fmt, ...) \
+	fy_parser_log((_fyp), FYET_NOTICE, (_fmt) , ## __VA_ARGS__)
+#define fy_parser_warning(_fyp, _fmt, ...) \
+	fy_parser_log((_fyp), FYET_WARNING, (_fmt) , ## __VA_ARGS__)
+#define fy_parser_error(_fyp, _fmt, ...) \
+	fy_parser_log((_fyp), FYET_ERROR, (_fmt) , ## __VA_ARGS__)
+
+/**
+ * fy_parser_vreport() - Report using the parsers diagnostics printf style and mark token (va_arg)
+ *
+ * Output a report on the parser and indicate the token's position
+ *
+ * @fyp: The parser
+ * @type: The error type
+ * @fyt: The token
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_parser_vreport(struct fy_parser *fyp, enum fy_error_type type, struct fy_token *fyt,
+		  const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_parser_report() - Report using the parsers diagnostics printf style and mark token
+ *
+ * Output a report on the parser and indicate the token's position
+ *
+ * @fyp: The parser
+ * @type: The error type
+ * @fyt: The token
+ * @fmt: The printf format string
+ * @...: The extra arguments
+ */
+void
+fy_parser_report(struct fy_parser *fyp, enum fy_error_type type, struct fy_token *fyt,
+		 const char *fmt, ...)
+	FY_FORMAT(printf, 4, 5)
+	FY_EXPORT;
+
+#ifndef NDEBUG
+
+#define fy_parser_report_debug(_fyp, _fyt, _fmt, ...) \
+	fy_parser_report((_fyp), FYET_DEBUG, (_fyt), (_fmt) , ## __VA_ARGS__)
+#else
+
+#define fy_parser_report_debug(_fyp, _fyt, _fmt, ...) \
+	do { } while(0)
+
+#endif
+
+#define fy_parser_report_info(_fyp, _fyt, _fmt, ...) \
+	fy_parser_report((_fyp), FYET_INFO, (_fyt), (_fmt) , ## __VA_ARGS__)
+#define fy_parser_report_notice(_fyp, _fyt, _fmt, ...) \
+	fy_parser_report((_fyp), FYET_NOTICE, (_fyt), (_fmt) , ## __VA_ARGS__)
+#define fy_parser_report_warning(_fyp, _fyt, _fmt, ...) \
+	fy_parser_report((_fyp), FYET_WARNING, (_fyt), (_fmt) , ## __VA_ARGS__)
+#define fy_parser_report_error(_fyp, _fyt, _fmt, ...) \
+	fy_parser_report((_fyp), FYET_ERROR, (_fyt), (_fmt) , ## __VA_ARGS__)
+
 /**
  * fy_token_scalar_style() - Get the style of a scalar token
  *
@@ -1011,10 +1347,23 @@ fy_token_scalar_style(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
+ * fy_token_collection_style() - Get the style of a collection token
+ *
+ * @fyt: The collection token to get it's style. Note that a NULL
+ *       token is a &enum FYCS_ANY.
+ *
+ * Returns:
+ * The collection style of the token, or FYCS_ANY
+ */
+enum fy_collection_style
+fy_token_collection_style(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
  * fy_token_scalar_is_null() - Test whether the scalar is null (content)
  *
  * @fyt: The scalar token to check for NULLity.
- *  
+ *
  * Note that this is different than null of the YAML type system.
  * It is null as in null content. It is also different than an
  * empty scalar.
@@ -1094,22 +1443,6 @@ fy_token_get_text_length(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
- * fy_token_get_utf8_length() - Get length of the text of a token
- *
- * This method will return the length of the text representation
- * of a token as a utf8 string.
- *
- * @fyt: The token
- *
- * Returns:
- * The size of the utf8 text representation of a token, -1 in case of an error.
- * Note that the NULL token will return a length of zero.
- */
-size_t
-fy_token_get_utf8_length(struct fy_token *fyt)
-	FY_EXPORT;
-
-/**
  * enum fy_comment_placement - Comment placement relative to token
  *
  * @fycp_top: Comment on top of token
@@ -1126,9 +1459,10 @@ enum fy_comment_placement {
 /**
  * fy_token_get_comment() - Get zero terminated comment of a token
  *
+ * Get the comment that is attached at a token having the given
+ * placement.
+ *
  * @fyt: The token out of which the comment text will be returned.
- * @buf: The buffer to be filled with the contents of the token
- * @maxsz: The maximum size of the comment buffer
  * @which: The comment placement
  *
  * Returns:
@@ -1136,8 +1470,86 @@ enum fy_comment_placement {
  * NULL in case of an error or if the token has no comment.
  */
 const char *
-fy_token_get_comment(struct fy_token *fyt, char *buf, size_t maxsz,
-		     enum fy_comment_placement which)
+fy_token_get_comment(struct fy_token *fyt, enum fy_comment_placement which)
+	FY_EXPORT;
+
+/**
+ * fy_token_get_comments() - Get all comments of a token
+ *
+ * Get all the comments that are attached on a token
+ *
+ * @fyt: The token
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ */
+const char *
+fy_token_get_comments(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
+ * fy_token_set_comment() - Attach a comment to a token
+ *
+ * Attach the given comment on the token at the specified placement.
+ * If another comment is already present it will be overriden.
+ * If text is NULL the comment is removed.
+ *
+ * @fyt: The token out of which the comment text will be attached
+ * @which: The placement
+ * @text: The text of the comment
+ * @len: The length of the comment (FY_NT means the length of text)
+ *
+ * Returns:
+ * 0 on success, -1 on failure.
+ */
+int
+fy_token_set_comment(struct fy_token *fyt, enum fy_comment_placement which,
+		     const char *text, size_t len)
+	FY_EXPORT;
+
+/**
+ * fy_event_get_comments() - Get all comments of an event
+ *
+ * @fye: The event
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ * The pointer must be free'ed if it's not NULL via a call to free()
+ */
+const char *
+fy_event_get_comments(struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_comment() - Get comment of a node
+ *
+ * @fyn: The node
+ * @placement: The placement of the comment
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of the comment.
+ * NULL in case of an error or if the event has no such comments.
+ */
+const char *
+fy_node_get_comment(struct fy_node *fyn, enum fy_comment_placement which)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_comments() - Get all comments of a node
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * A pointer to a zero terminated text representation of all the comments.
+ * The comments of all the placements are concatenated and returned as one.
+ * NULL in case of an error or if the event has no comments.
+ */
+const char *
+fy_node_get_comments(struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -1487,7 +1899,7 @@ struct fy_document *
 fy_node_document(struct fy_node *fyn)
 	FY_EXPORT;
 
-/*
+/**
  * enum fy_emitter_write_type - Type of the emitted output
  *
  * Describes the kind of emitted output, which makes it
@@ -1514,7 +1926,24 @@ fy_node_document(struct fy_node *fyn)
  * @fyewt_single_quoted_scalar_key: Output chunk is an single quoted scalar key
  * @fyewt_double_quoted_scalar_key: Output chunk is an double quoted scalar key
  * @fyewt_comment: Output chunk is a comment
- *
+ * @fyewt_indicator_question_mark: ? indicator
+ * @fyewt_indicator_colon: : indicator
+ * @fyewt_indicator_dash: - indicator
+ * @fyewt_indicator_left_bracket: [ indicator
+ * @fyewt_indicator_right_bracket: ] indicator
+ * @fyewt_indicator_left_brace: { indicator
+ * @fyewt_indicator_right_brace: } indicator
+ * @fyewt_indicator_comma: , indicator
+ * @fyewt_indicator_bar: | indicator
+ * @fyewt_indicator_greater: > indicator
+ * @fyewt_indicator_single_quote_start: ' indicator
+ * @fyewt_indicator_single_quote_end: ' indicator
+ * @fyewt_indicator_double_quote_start: " indicator
+ * @fyewt_indicator_double_quote_end: " indicator
+ * @fyewt_indicator_ambersand: & indicator
+ * @fyewt_indicator_star: * indicator
+ * @fyewt_indicator_chomp: chomp indicator (- or +)
+ * @fyewt_indicator_explicit_indent: explicit indent indicator (0-9)
  */
 enum fy_emitter_write_type {
 	fyewt_document_indicator,
@@ -1537,7 +1966,31 @@ enum fy_emitter_write_type {
 	fyewt_single_quoted_scalar_key,
 	fyewt_double_quoted_scalar_key,
 	fyewt_comment,
+	/* extended indicators */
+	fyewt_indicator_question_mark,
+	fyewt_indicator_colon,
+	fyewt_indicator_dash,
+	fyewt_indicator_left_bracket,
+	fyewt_indicator_right_bracket,
+	fyewt_indicator_left_brace,
+	fyewt_indicator_right_brace,
+	fyewt_indicator_comma,
+	fyewt_indicator_bar,
+	fyewt_indicator_greater,
+	fyewt_indicator_single_quote_start,
+	fyewt_indicator_single_quote_end,
+	fyewt_indicator_double_quote_start,
+	fyewt_indicator_double_quote_end,
+	fyewt_indicator_ambersand,
+	fyewt_indicator_star,
+	fyewt_indicator_chomp,
+	fyewt_indicator_explicit_indent,
 };
+#define FYEWT_EXTENDED_INDICATORS_FIRST fyewt_indicator_question_mark
+#define FYEWT_EXTENDED_INDICATORS_LAST 	fyewt_indicator_explicit_indent
+
+#define FYEWT_EXTENDED_START 	fyewt_indicator_question_mark
+#define FYEWT_COUNT 		(fyewt_indicator_explicit_indent + 1)
 
 #define FYECF_INDENT_SHIFT	8
 #define FYECF_INDENT_MASK	0xf
@@ -1579,6 +2032,7 @@ enum fy_emitter_write_type {
  * @FYECF_STRIP_DOC: Strip document tags and markers when emitting
  * @FYECF_NO_ENDING_NEWLINE: Do not output ending new line (useful for single line mode)
  * @FYECF_STRIP_EMPTY_KV: Remove all keys with empty values from the output (not available in streaming mode)
+ * @FYECF_EXTENDED_CFG: Extend configuration, this config structure is embedded in a fy_emitter_xcfg.
  * @FYECF_INDENT_DEFAULT: Default emit output indent
  * @FYECF_INDENT_1: Output indent is 1
  * @FYECF_INDENT_2: Output indent is 2
@@ -1603,6 +2057,8 @@ enum fy_emitter_write_type {
  * @FYECF_MODE_DEJSON: Emit YAML trying to pretify JSON
  * @FYECF_MODE_PRETTY: Emit YAML that tries to look good
  * @FYECF_MODE_MANUAL: Emit YAML respecting all manual style hints (reformats if needed)
+ * @FYECF_MODE_FLOW_COMPACT: Emit using only the flow mode in as much as possible compact form
+ * @FYECF_MODE_JSON_COMPACT: Emit using JSON compact form
  * @FYECF_DOC_START_MARK_AUTO: Automatically generate document start markers if required
  * @FYECF_DOC_START_MARK_OFF: Do not generate document start markers
  * @FYECF_DOC_START_MARK_ON: Always generate document start markers
@@ -1625,6 +2081,7 @@ enum fy_emitter_cfg_flags {
 	FYECF_STRIP_DOC			= FY_BIT(4),
 	FYECF_NO_ENDING_NEWLINE		= FY_BIT(5),
 	FYECF_STRIP_EMPTY_KV		= FY_BIT(6),
+	FYECF_EXTENDED_CFG		= FY_BIT(7),
 	FYECF_INDENT_DEFAULT		= FYECF_INDENT(0),
 	FYECF_INDENT_1			= FYECF_INDENT(1),
 	FYECF_INDENT_2			= FYECF_INDENT(2),
@@ -1649,6 +2106,8 @@ enum fy_emitter_cfg_flags {
 	FYECF_MODE_DEJSON 		= FYECF_MODE(7),
 	FYECF_MODE_PRETTY 		= FYECF_MODE(8),
 	FYECF_MODE_MANUAL 		= FYECF_MODE(9),
+	FYECF_MODE_FLOW_COMPACT		= FYECF_MODE(10),
+	FYECF_MODE_JSON_COMPACT		= FYECF_MODE(11),
 	FYECF_DOC_START_MARK_AUTO	= FYECF_DOC_START_MARK(0),
 	FYECF_DOC_START_MARK_OFF	= FYECF_DOC_START_MARK(1),
 	FYECF_DOC_START_MARK_ON		= FYECF_DOC_START_MARK(2),
@@ -1684,6 +2143,80 @@ struct fy_emitter_cfg {
 		      const char *str, int len, void *userdata);
 	void *userdata;
 	struct fy_diag *diag;
+};
+
+/* Shift amount of the color settings */
+#define FYEXCF_COLOR_SHIFT	0
+/* Mask of the color */
+#define FYEXCF_COLOR_MASK	((1U << 2) - 1)
+/* Build a color version */
+#define FYEXCF_COLOR(x)	(((unsigned int)(x) & FYEXCF_COLOR_MASK) << FYEXCF_COLOR_SHIFT)
+
+/* Shift amount of the output settings */
+#define FYEXCF_OUTPUT_SHIFT	2
+/* Mask of the output */
+#define FYEXCF_OUTPUT_MASK	((1U << 3) - 1)
+/* Build an output */
+#define FYEXCF_OUTPUT(x)	(((unsigned int)(x) & FYEXCF_OUTPUT_MASK) << FYEXCF_OUTPUT_SHIFT)
+
+/**
+ * enum fy_emitter_xcfg_flags - Emitter extended configuration flags
+ *
+ * These flags control the operation of the emitter.
+ * If no extended configuration mode is enabled all the flags are assumed 0.
+ *
+ * @FYEXCF_COLOR_AUTO: Automatically colorize if on a terminal
+ * @FYEXCF_COLOR_NONE: Do not colorize output
+ * @FYEXCF_COLOR_FORCE: Force color generation
+ * @FYEXCF_VISIBLE_WS: Make white space visible
+ * @FYEXCF_EXTENDED_INDICATORS: Extend the indicators generated
+ * @FYEXCF_INDENTED_SEQ_IN_MAP: Indent block sequences that are mapping values
+ * @FYEXCF_PRESERVE_FLOW_LAYOUT: Preserve oneline flow collections in streaming mode
+ * @FYEXCF_OUTPUT_STDOUT: Output to stdout (default)
+ * @FYEXCF_OUTPUT_STDERR: Output to stderr, instead of stdout
+ * @FYEXCF_OUTPUT_FILE: Output to the fp FILE pointer
+ * @FYEXCF_OUTPUT_FD: Output to the fd file descriptor
+ * @FYEXCF_NULL_OUTPUT: No output
+ * @FYEXCF_OUTPUT_FILENAME: Output to the given filename
+ */
+enum fy_emitter_xcfg_flags {
+	FYEXCF_COLOR_AUTO		= FYEXCF_COLOR(0),
+	FYEXCF_COLOR_NONE		= FYEXCF_COLOR(1),
+	FYEXCF_COLOR_FORCE		= FYEXCF_COLOR(2),
+	FYEXCF_OUTPUT_STDOUT		= FYEXCF_OUTPUT(0),
+	FYEXCF_OUTPUT_STDERR		= FYEXCF_OUTPUT(1),
+	FYEXCF_OUTPUT_FILE		= FYEXCF_OUTPUT(2),
+	FYEXCF_OUTPUT_FD		= FYEXCF_OUTPUT(2),
+	FYEXCF_NULL_OUTPUT		= FYEXCF_OUTPUT(3),
+	FYEXCF_OUTPUT_FILENAME		= FYEXCF_OUTPUT(4),
+	FYEXCF_VISIBLE_WS		= FY_BIT(5),
+	FYEXCF_EXTENDED_INDICATORS	= FY_BIT(6),
+	FYEXCF_INDENTED_SEQ_IN_MAP	= FY_BIT(7),
+	FYEXCF_PRESERVE_FLOW_LAYOUT	= FY_BIT(8),
+};
+
+/**
+ * struct fy_emitter_xcfg - emitter extended configuration structure.
+ *
+ * Argument to the fy_emitter create when FYECF_EXTENDED_CFG bit is
+ * set.
+ *
+ * @cfg: The standard emitter configuration
+ * @xflags: Extra configuration flags
+ * @colors: ANSI color overrides for the default output method
+ * @output_fp: The output FILE \*, FYEXCF\_FILE\_OUTPUT must be set
+ * @output_fd: The output file descriptor, FYEXCF\_FD\_OUTPUT must be set
+ * @output_filename: The output filename, FYEXCF\_FILENAME\_OUTPUT must be set
+ */
+struct fy_emitter_xcfg {
+	struct fy_emitter_cfg cfg;
+	enum fy_emitter_xcfg_flags xflags;
+	const char *colors[FYEWT_COUNT];
+	union {
+		FILE *output_fp;
+		int output_fd;
+		const char *output_filename;
+	};
 };
 
 /**
@@ -1841,6 +2374,107 @@ fy_emit_event(struct fy_emitter *emit, struct fy_event *fye)
 	FY_EXPORT;
 
 /**
+ * fy_emit_vevent() - Queue (and possibly emit) an event using varargs
+ *
+ * Queue and output using the emitter. The format is identical to
+ * the one used in fy_emit_event_vcreate().
+ *
+ * @emit: The emitter to use
+ * @type: The event type to create
+ * @ap: The variable argument list pointer.
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_vevent(struct fy_emitter *emit, enum fy_event_type type, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_emit_eventf() - Queue (and possibly emit) an event using variable args
+ *
+ * Queue and output using the emitter. The format is identical to
+ * the one used in fy_emit_event_create().
+ *
+ * @emit: The emitter to use
+ * @type: The event type to create
+ * @...: The optional extra arguments
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_eventf(struct fy_emitter *emit, enum fy_event_type type, ...)
+	FY_EXPORT;
+
+/**
+ * fy_emit_scalar_write() - Emit a scalar with write semantics
+ *
+ * Queue and output using the emitter a scalar using a standard
+ * write interface.
+ *
+ * @fye: The emitter to use
+ * @style: The scalar style to use
+ * @anchor: The anchor or NULL
+ * @tag: The tag or NULL
+ * @buf: Pointer to the buffer
+ * @count: The number of bytes to write
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_scalar_write(struct fy_emitter *fye, enum fy_scalar_style style,
+		     const char *anchor, const char *tag,
+		     const char *buf, size_t count)
+	FY_EXPORT;
+
+/**
+ * fy_emit_scalar_vprintf() - Emit a scalar with vprintf semantics
+ *
+ * Queue and output using the emitter a scalar using a standard
+ * vprintf interface.
+ *
+ * @fye: The emitter to use
+ * @style: The scalar style to use
+ * @anchor: The anchor or NULL
+ * @tag: The tag or NULL
+ * @fmt: The printf like format string
+ * @ap: The argument list
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_scalar_vprintf(struct fy_emitter *fye, enum fy_scalar_style style,
+		       const char *anchor, const char *tag,
+		       const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_emit_scalar_printf() - Emit a scalar with printf semantics
+ *
+ * Queue and output using the emitter a scalar using a standard
+ * printf interface.
+ *
+ * @fye: The emitter to use
+ * @style: The scalar style to use
+ * @anchor: The anchor or NULL
+ * @tag: The tag or NULL
+ * @fmt: The printf like format string
+ * @...: The extra arguments
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_scalar_printf(struct fy_emitter *fye, enum fy_scalar_style style,
+		      const char *anchor, const char *tag,
+		      const char *fmt, ...)
+	FY_FORMAT(printf, 5, 6)
+	FY_EXPORT;
+
+/**
  * fy_emit_event_from_parser() - Queue (and possibly emit) an event
  * 			  	 generated by the parser.
  *
@@ -1937,6 +2571,23 @@ fy_emit_node(struct fy_emitter *emit, struct fy_node *fyn)
  */
 int
 fy_emit_root_node(struct fy_emitter *emit, struct fy_node *fyn)
+	FY_EXPORT;
+
+/**
+ * fy_emit_body_node() - Emit a single body node using the emitter
+ *
+ * Emits a single body node using the emitter. This is used in case
+ * you need finer control over the emitting output.
+ * No stream and document events will be generated at all.
+ *
+ * @emit: The emitter
+ * @fyn: The body node to emit
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_emit_body_node(struct fy_emitter *emit, struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -2045,8 +2696,8 @@ fy_emit_document_to_string(struct fy_document *fyd,
 			   enum fy_emitter_cfg_flags flags)
 	FY_EXPORT;
 
-#define fy_emit_document_to_string_alloca(_fyd, _flags, _res) \
-	FY_ALLOCA_COPY_FREE(fy_emit_document_to_string((_fyd), (_flags)), FY_NT, (_res))
+#define fy_emit_document_to_string_alloca(_fyd, _flags) \
+	FY_ALLOCA_COPY_FREE(fy_emit_document_to_string((_fyd), (_flags)), FY_NT)
 
 /**
  * fy_emit_node_to_buffer() - Emit a node (recursively) to a buffer
@@ -2084,8 +2735,8 @@ char *
 fy_emit_node_to_string(struct fy_node *fyn, enum fy_emitter_cfg_flags flags)
 	FY_EXPORT;
 
-#define fy_emit_node_to_string_alloca(_fyn, _flags, _res) \
-	FY_ALLOCA_COPY_FREE(fy_emit_node_to_string((_fyn), (_flags)), FY_NT, (_res))
+#define fy_emit_node_to_string_alloca(_fyn, _flags) \
+	FY_ALLOCA_COPY_FREE(fy_emit_node_to_string((_fyn), (_flags)), FY_NT)
 
 /**
  * fy_emit_to_buffer() - Create an emitter for buffer output.
@@ -2244,6 +2895,29 @@ fy_document_clone(struct fy_document *fydsrc)
  */
 int
 fy_node_insert(struct fy_node *fyn_to, struct fy_node *fyn_from)
+	FY_EXPORT;
+
+/**
+ * fy_node_delete() - Delete a node from a document
+ *
+ * Delete the given node.
+ * If it's part of a sequence it will be removed from it.
+ * If it's the value of a node key value pair, it will
+ * be removed from the mapping.
+ *
+ * This is an alias for fy_document_insert_at(fyn, NULL)
+ *
+ * Note that it is expected this node is attached to a document.
+ * Do not call this to free a node, because if it's part of
+ * a collection it will not be properly removed.
+ *
+ * @fyn: The node to delete.
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_node_delete(struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -2692,7 +3366,7 @@ fy_document_vbuildf(const struct fy_parse_cfg *cfg,
  */
 struct fy_document *
 fy_document_buildf(const struct fy_parse_cfg *cfg, const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 2, 3))
+	FY_FORMAT(printf, 2, 3)
 	FY_EXPORT;
 
 /**
@@ -2724,6 +3398,34 @@ fy_document_buildf(const struct fy_parse_cfg *cfg, const char *fmt, ...)
  */
 struct fy_document *
 fy_flow_document_build_from_string(const struct fy_parse_cfg *cfg,
+				   const char *str, size_t len, size_t *consumed)
+	FY_EXPORT;
+
+/**
+ * fy_block_document_build_from_string() - Create a document using the provided YAML source.
+ *
+ * Create a document parsing the provided string as a YAML source.
+ *
+ * The document is a block document, and it terminates when indentation
+ * appears to do so.
+ *
+ * Example of block documents::
+ *
+ *   this-is-yaml
+ *     foo: bar    <- starts here
+ *     baz: [1, 2]
+ *   this-is-yaml-no-more
+ *
+ * @cfg: The parse configuration to use or NULL for the default.
+ * @str: The YAML source to use.
+ * @len: The length of the string (or -1 if '\0' terminated)
+ * @consumed: A pointer to the consumed amount
+ *
+ * Returns:
+ * The created document, or NULL on error.
+ */
+struct fy_document *
+fy_block_document_build_from_string(const struct fy_parse_cfg *cfg,
 				   const char *str, size_t len, size_t *consumed)
 	FY_EXPORT;
 
@@ -2792,16 +3494,50 @@ fy_node_get_style(struct fy_node *fyn)
 /**
  * fy_node_set_style() - Set the node style
  *
- * Set the node rendering style.
- * If current node style is alias it won't be changed
- * to save document structure
+ * Try to set the node rendering style of a node.
+ * If the style of node is illegal (for example
+ * you can't set an arbitrary scalar that contains
+ * zeroes to plain) then the actual style that was
+ * set will be returned.
  *
  * @fyn: The node
- * @style: The node style
+ *
+ * Returns:
+ * The final node style
  */
-void
+enum fy_node_style
 fy_node_set_style(struct fy_node *fyn, enum fy_node_style style)
-       FY_EXPORT;
+	FY_EXPORT;
+
+/**
+ * fy_node_get_start_token() - Get the node start token
+ *
+ * Retrieve the node start token.
+ *
+ * For scalars, this is the same as the end token.
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * The node start token
+ */
+struct fy_token * fy_node_get_start_token(struct fy_node *fyn)
+        FY_EXPORT;
+
+/**
+ * fy_node_get_end_token() - Get the node end token
+ *
+ * Retrieve the node end token.
+ *
+ * For scalars, this is the same as the start token.
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * The node end token
+ */
+ struct fy_token * fy_node_get_end_token(struct fy_node *fyn)
+        FY_EXPORT;
 
 /**
  * fy_node_is_scalar() - Check whether the node is a scalar
@@ -3091,7 +3827,7 @@ fy_node_vbuildf(struct fy_document *fyd, const char *fmt, va_list ap)
  */
 struct fy_node *
 fy_node_buildf(struct fy_document *fyd, const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 2, 3))
+	FY_FORMAT(printf, 2, 3)
 	FY_EXPORT;
 
 /**
@@ -3105,18 +3841,18 @@ fy_node_buildf(struct fy_document *fyd, const char *fmt, ...)
  * mappings, or indexes in brackets for traversing sequences.
  * Path specs may start with '/' which is silently ignored.
  *
- * A few examples will make this clear
+ * A few examples will make this clear::
  *
- * fyn = { foo: bar } - fy_node_by_path(fyn, "/foo") -> bar
- * fyn = [ foo, bar ] - fy_node_by_path(fyn, "1") -> bar
- * fyn = { { foo: bar }: baz } - fy_node_by_path(fyn, "{foo: bar}") -> baz
- * fyn = [ foo, { bar: baz } } - fy_node_by_path(fyn, "1/bar") -> baz
+ *   fyn = { foo: bar } - fy_node_by_path(fyn, "/foo") -> bar
+ *   fyn = [ foo, bar ] - fy_node_by_path(fyn, "1") -> bar
+ *   fyn = { { foo: bar }: baz } - fy_node_by_path(fyn, "{foo: bar}") -> baz
+ *   fyn = [ foo, { bar: baz } } - fy_node_by_path(fyn, "1/bar") -> baz
  *
  * Note that the special characters /{}[] are not escaped in plain style,
  * so you will not be able to use them as path traversal keys.
- * In that case you can easily use either the single, or double quoted forms:
+ * In that case you can easily use either the single, or double quoted forms::
  *
- * fyn = { foo/bar: baz } - fy_node_by_path(fyn, "'foo/bar'") -> baz
+ *   fyn = { foo/bar: baz } - fy_node_by_path(fyn, "'foo/bar'") -> baz
  *
  * @fyn: The node to use as start of the traversal operation
  * @path: The path spec to use in the traversal operation
@@ -3147,8 +3883,8 @@ char *
 fy_node_get_path(struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_path_alloca(_fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_path((_fyn)), FY_NT, (_res))
+#define fy_node_get_path_alloca(_fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_path((_fyn)), FY_NT)
 
 /**
  * fy_node_get_parent() - Get the parent node of a node
@@ -3199,12 +3935,12 @@ char *
 fy_node_get_parent_address(struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_parent_address_alloca(_fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_parent_address((_fyn)), FY_NT, (_res))
+#define fy_node_get_parent_address_alloca(_fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_parent_address((_fyn)), FY_NT)
 
 /**
- * fy_node_get_path_relative_to() - Get a path address of a node
- *                                  relative to one of it's parents
+ * fy_node_get_path_relative_to() - Get a path address of a node relative
+ *                                  to one of it's parents
  *
  * Retrieve the given node's path address relative to an arbitrary
  * parent in the tree.
@@ -3221,26 +3957,27 @@ char *
 fy_node_get_path_relative_to(struct fy_node *fyn_parent, struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_path_relative_to_alloca(_fynp, _fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_path_relative_to((_fynp), (_fyn)), FY_NT, (_res))
+#define fy_node_get_path_relative_to_alloca(_fynp, _fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_path_relative_to((_fynp), (_fyn)), FY_NT)
 
 /**
- * fy_node_get_short_path() - Get a path address of a node in the shortest
- *                            path possible
+ * fy_node_get_short_path() - Get a path address of a node in the shortest path possible
  *
- * Retrieve the given node's short path address relative to the
- * closest anchor (either on this node, or it's parent).
+ * Retrieve the given nodes short path address relative to the
+ * closest anchor (either on this node, or its parent).
  * If no such parent is found then returns the absolute path
  * from the start of the document.
+ *
+ * Example::
  *
  *   --- &foo
  *   foo: &bar
  *       bar
  *   baz
  *
- * - The short path of /foo is \*foo
- * - The short path of /foo/bar is \*bar
- * - The short path of /baz is \*foo/baz
+ *   - The short path of /foo is \*foo
+ *   - The short path of /foo/bar is \*bar
+ *   - The short path of /baz is \*foo/baz
  *
  * The address is dynamically allocated and should be freed when
  * you're done with it.
@@ -3254,8 +3991,8 @@ char *
 fy_node_get_short_path(struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_short_path_alloca(_fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_short_path((_fyn)), FY_NT, (_res))
+#define fy_node_get_short_path_alloca(_fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_short_path((_fyn)), FY_NT)
 
 /**
  * fy_node_get_reference() - Get a textual reference to a node
@@ -3277,8 +4014,8 @@ char *
 fy_node_get_reference(struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_reference_alloca(_fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_reference((_fyn)), FY_NT, (_res))
+#define fy_node_get_reference_alloca(_fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_reference((_fyn)), FY_NT)
 
 /**
  * fy_node_create_reference() - Create an alias reference node
@@ -3321,8 +4058,8 @@ char *
 fy_node_get_relative_reference(struct fy_node *fyn_base, struct fy_node *fyn)
 	FY_EXPORT;
 
-#define fy_node_get_relative_reference_alloca(_fynb, _fyn, _res) \
-	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_relative_reference((_fynb), (_fyn)), FY_NT, (_res))
+#define fy_node_get_relative_reference_alloca(_fynb, _fyn) \
+	FY_ALLOCA_COPY_FREE_NO_NULL(fy_node_get_relative_reference((_fynb), (_fyn)), FY_NT)
 
 /**
  * fy_node_create_relative_reference() - Create an alias reference node
@@ -3425,8 +4162,8 @@ fy_node_create_vscalarf(struct fy_document *fyd, const char *fmt, va_list ap)
  */
 struct fy_node *
 fy_node_create_scalarf(struct fy_document *fyd, const char *fmt, ...)
-	FY_EXPORT
-	FY_ATTRIBUTE(format(printf, 2, 3));
+	FY_FORMAT(printf, 2, 3)
+	FY_EXPORT;
 
 /**
  * fy_node_create_sequence() - Create an empty sequence node.
@@ -3509,6 +4246,37 @@ fy_node_remove_tag(struct fy_node *fyn)
  */
 const char *
 fy_node_get_tag(struct fy_node *fyn, size_t *lenp)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_tag0() - Get the tag of the node
+ *
+ * This method will return a pointer to the text of a tag,
+ * which will be NULL terminated.
+ *
+ * @fyn: The node
+ *
+ * Returns:
+ * A pointer to the null terminated tag of the node.
+ * A NULL will be returned in case of an error.
+ */
+const char *
+fy_node_get_tag0(struct fy_node *fyn)
+	FY_EXPORT;
+
+/**
+ * fy_node_get_tag_length() - Get the length of the tag of the node
+ *
+ * This method will return the size of the tag of the node.
+ * If the node is not tagged it will return 0.
+ *
+ * @fyn: The tagged node
+ *
+ * Returns:
+ * The size of the tag, or 0 if node is not tagged.
+ */
+size_t
+fy_node_get_tag_length(struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -4198,6 +4966,23 @@ fy_node_mapping_remove(struct fy_node *fyn_map, struct fy_node_pair *fynp)
 	FY_EXPORT;
 
 /**
+ * fy_node_mapping_sort() - Sort a single mapping's keys
+ *
+ * Sort the keys of a single mapping node using the given comparison method (if NULL use the default one).
+ * Unlike fy_node_sort(), this does not recurse into child nodes.
+ *
+ * @fyn_map: The mapping node to sort
+ * @key_cmp: The comparison method
+ * @arg: An opaque user pointer for the comparison method
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_node_mapping_sort(struct fy_node *fyn_map, fy_node_mapping_sort_fn key_cmp, void *arg)
+	FY_EXPORT;
+
+/**
  * fy_node_mapping_remove_by_key() - Remove a node pair from a mapping returning the value
  *
  * Remove node pair from a mapping using the supplied key.
@@ -4275,7 +5060,7 @@ int fy_node_vscanf(struct fy_node *fyn, const char *fmt, va_list ap);
  */
 int
 fy_node_scanf(struct fy_node *fyn, const char *fmt, ...)
-	FY_ATTRIBUTE(format(scanf, 2, 3))
+	FY_FORMAT(scanf, 2, 3)
 	FY_EXPORT;
 
 /**
@@ -4326,7 +5111,7 @@ fy_document_vscanf(struct fy_document *fyd, const char *fmt, va_list ap)
  */
 int
 fy_document_scanf(struct fy_document *fyd, const char *fmt, ...)
-	FY_ATTRIBUTE(format(scanf, 2, 3))
+	FY_FORMAT(scanf, 2, 3)
 	FY_EXPORT;
 
 /**
@@ -4622,7 +5407,8 @@ fy_node_set_vanchorf(struct fy_node *fyn, const char *fmt, va_list ap)
  */
 int
 fy_node_set_anchorf(struct fy_node *fyn, const char *fmt, ...)
-	FY_EXPORT FY_ATTRIBUTE(format(printf, 2, 3));
+	FY_FORMAT(printf, 2, 3)
+	FY_EXPORT;
 
 /**
  * fy_node_remove_anchor() - Remove an anchor
@@ -4810,27 +5596,20 @@ fy_document_unregister_meta(struct fy_document *fyd)
 	FY_EXPORT;
 
 /**
- * fy_document_get_userdata() - Get the userdata pointer of a document
+ * typedef fy_document_on_destroy_fn - Document destroy callback
  *
- * Return the userdata pointer of a document.
+ * This is the callback called when a document is destroyed.
  *
- * @fyn: The document to get userdata from
- *
- * Returns:
- * The stored userdata pointer
+ * @fyd: The document being destroyed
+ * @userdata: The user data pointer registered via fy_document_set_userdata()
  */
-void *
-fy_document_get_userdata(struct fy_document *fyd)
-	FY_EXPORT;
+typedef void (*fy_document_on_destroy_fn)(struct fy_document *fyd, void *userdata);
 
 /**
- * fy_document_set_userdata() - Set the userdata pointer of a document
+ * fy_document_set_userdata() - Set user data on a document
  *
- * Set the userdata pointer of a document. If @userdata is NULL
- * then clear the userdata.
- *
- * @fyd: The document to set userdata
- * @userdata: The userdata pointer
+ * @fyd: The document
+ * @userdata: The user data pointer to set
  *
  * Returns:
  * 0 on success, -1 on error
@@ -4840,44 +5619,38 @@ fy_document_set_userdata(struct fy_document *fyd, void *userdata)
 	FY_EXPORT;
 
 /**
- * typedef fy_document_on_destroy_fn - Userdata clear method
+ * fy_document_get_userdata() - Get user data from a document
  *
- * This is the callback called just before document is destroyed.
- *
- * @fyd: The document which will be destroyed
- * @userdata: The userdata pointer of a document
- *
- */
-typedef void (*fy_document_on_destroy_fn)(struct fy_document *fyd, void *userdata);
-
-/**
- * fy_document_register_on_destroy() - Register an on_destroy hook
- *
- * Register an on_destroy hook, to be called when
- * the document is freed via a final call to fy_document_destroy().
- *
- * @fyd: The document which the hook is registered to
- * @on_destroy_fn: The on_destroy hook method
+ * @fyd: The document
  *
  * Returns:
- * 0 on success, -1 if another hook is already registered.
+ * The user data pointer, or NULL on error
  */
-int
-fy_document_register_on_destroy(struct fy_document *fyd,
-				fy_document_on_destroy_fn on_destroy_fn)
+void *
+fy_document_get_userdata(struct fy_document *fyd)
 	FY_EXPORT;
 
 /**
- * fy_document_unregister_on_destroy() - Unregister an on_destroy hook
+ * fy_document_register_on_destroy() - Register a document destroy callback
  *
- * Unregister the currently active on_destroy hook.
+ * @fyd: The document
+ * @on_destroy_fn: The callback to register
  *
- * @fyd: The document to unregister it's on_destroy hook.
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_document_register_on_destroy(struct fy_document *fyd, fy_document_on_destroy_fn on_destroy_fn)
+	FY_EXPORT;
+
+/**
+ * fy_document_unregister_on_destroy() - Unregister the document destroy callback
+ *
+ * @fyd: The document
  */
 void
 fy_document_unregister_on_destroy(struct fy_document *fyd)
 	FY_EXPORT;
-
 
 /**
  * fy_node_set_marker() - Set a marker of a node
@@ -4960,7 +5733,7 @@ fy_node_vreport(struct fy_node *fyn, enum fy_error_type type,
 void
 fy_node_report(struct fy_node *fyn, enum fy_error_type type,
 	       const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 3, 4))
+	FY_FORMAT(printf, 3, 4)
 	FY_EXPORT;
 
 /**
@@ -5011,7 +5784,46 @@ void
 fy_node_override_report(struct fy_node *fyn, enum fy_error_type type,
 			const char *file, int line, int column,
 			const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 6, 7))
+	FY_FORMAT(printf, 6, 7)
+	FY_EXPORT;
+
+/**
+ * fy_event_vreport() - Report about an event vprintf style
+ *
+ * Output a report about the given event via the specific
+ * error type, focusing at the given event part.
+ *
+ * @fyp: The parser of which the event was generated from
+ * @fye: The event
+ * @fyep: The event part which the report is about
+ * @type: The error type
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_event_vreport(struct fy_parser *fyp, struct fy_event *fye,
+		 enum fy_event_part fyep, enum fy_error_type type,
+		 const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_event_report() - Report about an event printf style
+ *
+ * Output a report about the given event via the specific
+ * error type, focusing at the given event part.
+ *
+ * @fyp: The parser of which the event was generated from
+ * @fye: The event
+ * @fyep: The event part which the report is about
+ * @type: The error type
+ * @fmt: The printf format string
+ * @...: The extra arguments.
+ */
+void
+fy_event_report(struct fy_parser *fyp, struct fy_event *fye,
+		enum fy_event_part fyep, enum fy_error_type type,
+		const char *fmt, ...)
+	FY_FORMAT(printf, 5, 6)
 	FY_EXPORT;
 
 typedef void (*fy_diag_output_fn)(struct fy_diag *diag, void *user,
@@ -5195,6 +6007,18 @@ fy_diag_got_error(struct fy_diag *diag)
 	FY_EXPORT;
 
 /**
+ * fy_diag_set_error() - Sets the error produced state
+ *
+ * Sets the error produced state
+ *
+ * @diag: The diagnostic object
+ * @on_error: The set error state
+ */
+void
+fy_diag_set_error(struct fy_diag *diag, bool on_error)
+	FY_EXPORT;
+
+/**
  * fy_diag_reset_error() - Reset the error flag of
  * 			   the diagnostic object
  *
@@ -5219,6 +6043,20 @@ fy_diag_reset_error(struct fy_diag *diag)
  */
 void
 fy_diag_set_collect_errors(struct fy_diag *diag, bool collect_errors)
+	FY_EXPORT;
+
+/**
+ * fy_diag_get_collect_errors() - Get collect errors state
+ *
+ * Get the collect errors mode.
+ *
+ * @diag: The diagnostic object
+ *
+ * Returns:
+ * true collecting errors, false otherwise
+ */
+bool
+fy_diag_get_collect_errors(struct fy_diag *diag)
 	FY_EXPORT;
 
 /**
@@ -5290,8 +6128,8 @@ fy_diag_vprintf(struct fy_diag *diag, const char *fmt, va_list ap)
  */
 int
 fy_diag_printf(struct fy_diag *diag, const char *fmt, ...)
-	FY_EXPORT
-	FY_ATTRIBUTE(format(printf, 2, 3));
+	FY_FORMAT(printf, 2, 3)
+	FY_EXPORT;
 
 /**
  * struct fy_diag_ctx - The diagnostics context
@@ -5357,10 +6195,38 @@ fy_vdiag(struct fy_diag *diag, const struct fy_diag_ctx *fydc,
 int
 fy_diagf(struct fy_diag *diag, const struct fy_diag_ctx *fydc,
 	 const char *fmt, ...)
-	FY_EXPORT
-	FY_ATTRIBUTE(format(printf, 3, 4));
+	FY_FORMAT(printf, 3, 4)
+	FY_EXPORT;
 
-int fy_diag_diag(struct fy_diag *diag, enum fy_error_type level, const char* fmt, ...);
+#ifdef _MSC_VER
+/* MSVC doesn't support GCC statement expressions, use do-while(0) instead */
+#define fy_diag_diag(_diag, _level, _fmt, ...) \
+	do { \
+		struct fy_diag_ctx _ctx; \
+		memset(&_ctx, 0, sizeof(_ctx)); \
+		_ctx.level = (_level); \
+		_ctx.module = FYEM_UNKNOWN; \
+		_ctx.source_func = __func__; \
+		_ctx.source_file = __FILE__; \
+		_ctx.source_line = __LINE__; \
+		fy_diagf((_diag), &_ctx, (_fmt) , ## __VA_ARGS__); \
+	} while(0)
+#else
+#define fy_diag_diag(_diag, _level, _fmt, ...) \
+	({ \
+		struct fy_diag_ctx _ctx = { \
+			.level = (_level), \
+			.module = FYEM_UNKNOWN, \
+			.source_func = __func__, \
+			.source_file = __FILE__, \
+			.source_line = __LINE__, \
+			.file = NULL, \
+			.line = 0, \
+			.column = 0, \
+		}; \
+		fy_diagf((_diag), &_ctx, (_fmt) , ## __VA_ARGS__); \
+	})
+#endif
 
 #ifndef NDEBUG
 
@@ -5381,6 +6247,100 @@ int fy_diag_diag(struct fy_diag *diag, enum fy_error_type level, const char* fmt
 	fy_diag_diag((_diag), FYET_WARNING, (_fmt) , ## __VA_ARGS__)
 #define fy_error(_diag, _fmt, ...) \
 	fy_diag_diag((_diag), FYET_ERROR, (_fmt) , ## __VA_ARGS__)
+
+/**
+ * fy_diag_token_vreport() - Report about a token vprintf style using
+ *                          the given diagnostic object
+ *
+ * Output a report about the given token via the specific
+ * error type, and using the reporting configuration of the token's
+ * document.
+ *
+ * @diag: The diag object
+ * @fyt: The token
+ * @type: The error type
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_diag_token_vreport(struct fy_diag *diag, struct fy_token *fyt,
+		     enum fy_error_type type, const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_diag_token_report() - Report about a token printf style using
+ *                          the given diagnostic object
+ *
+ * Output a report about the given token via the specific
+ * error type, and using the reporting configuration of the token's
+ * document.
+ *
+ * @diag: The diag object
+ * @fye: The token
+ * @type: The error type
+ * @fmt: The printf format string
+ * @...: The extra arguments.
+ */
+void
+fy_diag_token_report(struct fy_diag *diag, struct fy_token *fye,
+		    enum fy_error_type type, const char *fmt, ...)
+	FY_FORMAT(printf, 4, 5)
+	FY_EXPORT;
+
+/**
+ * fy_diag_token_override_vreport() - Report about a token vprintf style,
+ * 				     overriding file, line and column info using
+ * 				     the given diagnostic object
+ *
+ * Output a report about the given token via the specific
+ * error type, and using the reporting configuration of the token's
+ * document. This method will use the overrides provided in order
+ * to massage the reporting information.
+ * If @file is NULL, no file location will be reported.
+ * If either @line or @column is negative no location will be reported.
+ *
+ * @diag: The diag object
+ * @fyt: The token
+ * @type: The error type
+ * @file: The file override
+ * @line: The line override
+ * @column: The column override
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_diag_token_override_vreport(struct fy_diag *diag, struct fy_token *fyt,
+			      enum fy_error_type type, const char *file,
+			      int line, int column, const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_diag_token_override_report() - Report about a token printf style,
+ * 				    overriding file, line and column info using
+ * 				    the given diagnostic object
+ *
+ * Output a report about the given token via the specific
+ * error type, and using the reporting configuration of the token's
+ * document. This method will use the overrides provided in order
+ * to massage the reporting information.
+ * If @file is NULL, no file location will be reported.
+ * If either @line or @column is negative no location will be reported.
+ *
+ * @diag: The diag object
+ * @fyt: The token
+ * @type: The error type
+ * @file: The file override
+ * @line: The line override
+ * @column: The column override
+ * @fmt: The printf format string
+ * @...: The extra arguments.
+ */
+void
+fy_diag_token_override_report(struct fy_diag *diag, struct fy_token *fyt,
+			     enum fy_error_type type, const char *file,
+			     int line, int column, const char *fmt, ...)
+	FY_FORMAT(printf, 7, 8)
+	FY_EXPORT;
 
 /**
  * fy_diag_node_vreport() - Report about a node vprintf style using
@@ -5418,7 +6378,7 @@ fy_diag_node_vreport(struct fy_diag *diag, struct fy_node *fyn,
 void
 fy_diag_node_report(struct fy_diag *diag, struct fy_node *fyn,
 		    enum fy_error_type type, const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 4, 5))
+	FY_FORMAT(printf, 4, 5)
 	FY_EXPORT;
 
 /**
@@ -5473,7 +6433,48 @@ void
 fy_diag_node_override_report(struct fy_diag *diag, struct fy_node *fyn,
 			     enum fy_error_type type, const char *file,
 			     int line, int column, const char *fmt, ...)
-	FY_ATTRIBUTE(format(printf, 7, 8))
+	FY_FORMAT(printf, 7, 8)
+	FY_EXPORT;
+
+/**
+ * fy_diag_event_vreport() - Report about an event vprintf style using
+ *                          the given diagnostic object
+ *
+ * Output a report about the given event part via the specific
+ * error type.
+ *
+ * @diag: The diag object
+ * @fye: The event
+ * @fyep: The event part
+ * @type: The error type
+ * @fmt: The printf format string
+ * @ap: The argument list
+ */
+void
+fy_diag_event_vreport(struct fy_diag *diag, struct fy_event *fye,
+		      enum fy_event_part fyep, enum fy_error_type type,
+		      const char *fmt, va_list ap)
+	FY_EXPORT;
+
+/**
+ * fy_diag_event_report() - Report about a event printf style using
+ *                          the given diagnostic object
+ *
+ * Output a report about the given event part via the specific
+ * error type.
+ *
+ * @diag: The diag object
+ * @fye: The event
+ * @fyep: The event part
+ * @type: The error type
+ * @fmt: The printf format string
+ * @...: The extra arguments.
+ */
+void
+fy_diag_event_report(struct fy_diag *diag, struct fy_event *fye,
+		     enum fy_event_part fyep, enum fy_error_type type,
+		     const char *fmt, ...)
+	FY_FORMAT(printf, 5, 6)
 	FY_EXPORT;
 
 /**
@@ -5529,6 +6530,7 @@ struct fy_path_parse_cfg {
  * Creates a path parser with its configuration @cfg
  * The path parser may be destroyed by a corresponding call to
  * fy_path_parser_destroy().
+ * If @cfg is NULL a default yaml parser is created.
  *
  * @cfg: The configuration for the path parser
  *
@@ -5767,64 +6769,64 @@ fy_path_exec_results_iterate(struct fy_path_exec *fypx, void **prevp)
 /**
  * enum fy_token_type - Token types
  *
- * The available token types that the tokenizer produces.
- *
  * @FYTT_NONE: No token
- * @FYTT_STREAM_START: Stream start
- * @FYTT_STREAM_END: Stream end
- * @FYTT_VERSION_DIRECTIVE: Version directive
- * @FYTT_TAG_DIRECTIVE: Tag directive
- * @FYTT_DOCUMENT_START: Document start
- * @FYTT_DOCUMENT_END: Document end
- * @FYTT_BLOCK_SEQUENCE_START: Start of a block sequence
- * @FYTT_BLOCK_MAPPING_START: Start of a block mapping
- * @FYTT_BLOCK_END: End of a block mapping or a sequence
- * @FYTT_FLOW_SEQUENCE_START: Start of a flow sequence
- * @FYTT_FLOW_SEQUENCE_END: End of a flow sequence
- * @FYTT_FLOW_MAPPING_START: Start of a flow mapping
- * @FYTT_FLOW_MAPPING_END: End of a flow mapping
- * @FYTT_BLOCK_ENTRY: A block entry
- * @FYTT_FLOW_ENTRY: A flow entry
- * @FYTT_KEY: A key of a mapping
- * @FYTT_VALUE: A value of a mapping
- * @FYTT_ALIAS: An alias
- * @FYTT_ANCHOR: An anchor
- * @FYTT_TAG: A tag
- * @FYTT_SCALAR: A scalar
- * @FYTT_INPUT_MARKER: Internal input marker token
- * @FYTT_PE_SLASH: A slash
- * @FYTT_PE_ROOT: A root
- * @FYTT_PE_THIS: A this
- * @FYTT_PE_PARENT: A parent
- * @FYTT_PE_MAP_KEY: A map key
- * @FYTT_PE_SEQ_INDEX: A sequence index
- * @FYTT_PE_SEQ_SLICE: A sequence slice
- * @FYTT_PE_SCALAR_FILTER: A scalar filter
- * @FYTT_PE_COLLECTION_FILTER: A collection filter
- * @FYTT_PE_SEQ_FILTER: A sequence filter
- * @FYTT_PE_MAP_FILTER: A mapping filter
- * @FYTT_PE_UNIQUE_FILTER: Filters out duplicates
- * @FYTT_PE_EVERY_CHILD: Every child
- * @FYTT_PE_EVERY_CHILD_R: Every child recursive
- * @FYTT_PE_ALIAS: An alias
- * @FYTT_PE_SIBLING: A sibling marker
- * @FYTT_PE_COMMA: A comma
- * @FYTT_PE_BARBAR: A ||
- * @FYTT_PE_AMPAMP: A &&
- * @FYTT_PE_LPAREN: A left parenthesis
- * @FYTT_PE_RPAREN: A right parenthesis
- * @FYTT_PE_EQEQ: Equality operator
- * @FYTT_PE_NOTEQ: Non-equality operator
- * @FYTT_PE_LT: Less than operator
- * @FYTT_PE_GT: Greater than operator
- * @FYTT_PE_LTE: Less or equal than operator
- * @FYTT_PE_GTE: Greater or equal than operator
- * @FYTT_SE_PLUS: Plus operator
- * @FYTT_SE_MINUS: Minus operator
- * @FYTT_SE_MULT: Multiply operator
- * @FYTT_SE_DIV: Divide operator
- * @FYTT_PE_METHOD: Path expression method (chained)
- * @FYTT_SE_METHOD: Scalar expression method (non chained)
+ * @FYTT_STREAM_START: Stream start token
+ * @FYTT_STREAM_END: Stream end token
+ * @FYTT_VERSION_DIRECTIVE: Version directive token
+ * @FYTT_TAG_DIRECTIVE: Tag directive token
+ * @FYTT_DOCUMENT_START: Document start token
+ * @FYTT_DOCUMENT_END: Document end token
+ * @FYTT_BLOCK_SEQUENCE_START: Block sequence start token
+ * @FYTT_BLOCK_MAPPING_START: Block mapping start token
+ * @FYTT_BLOCK_END: Block end token
+ * @FYTT_FLOW_SEQUENCE_START: Flow sequence start token
+ * @FYTT_FLOW_SEQUENCE_END: Flow sequence end token
+ * @FYTT_FLOW_MAPPING_START: Flow mapping start token
+ * @FYTT_FLOW_MAPPING_END: Flow mapping end token
+ * @FYTT_BLOCK_ENTRY: Block entry token
+ * @FYTT_FLOW_ENTRY: Flow entry token
+ * @FYTT_KEY: Key token
+ * @FYTT_VALUE: Value token
+ * @FYTT_ALIAS: Alias token
+ * @FYTT_ANCHOR: Anchor token
+ * @FYTT_TAG: Tag token
+ * @FYTT_SCALAR: Scalar token
+ * @FYTT_INPUT_MARKER: Input marker token
+ * @FYTT_PE_SLASH: Path expression slash token
+ * @FYTT_PE_ROOT: Path expression root token
+ * @FYTT_PE_THIS: Path expression this token
+ * @FYTT_PE_PARENT: Path expression parent token
+ * @FYTT_PE_MAP_KEY: Path expression map key token
+ * @FYTT_PE_SEQ_INDEX: Path expression sequence index token
+ * @FYTT_PE_SEQ_SLICE: Path expression sequence slice token
+ * @FYTT_PE_SCALAR_FILTER: Path expression scalar filter token
+ * @FYTT_PE_COLLECTION_FILTER: Path expression collection filter token
+ * @FYTT_PE_SEQ_FILTER: Path expression sequence filter token
+ * @FYTT_PE_MAP_FILTER: Path expression map filter token
+ * @FYTT_PE_UNIQUE_FILTER: Path expression unique filter token
+ * @FYTT_PE_EVERY_CHILD: Path expression every child token
+ * @FYTT_PE_EVERY_CHILD_R: Path expression every child recursive token
+ * @FYTT_PE_ALIAS: Path expression alias token
+ * @FYTT_PE_SIBLING: Path expression sibling token
+ * @FYTT_PE_COMMA: Path expression comma token
+ * @FYTT_PE_BARBAR: Path expression || token
+ * @FYTT_PE_AMPAMP: Path expression && token
+ * @FYTT_PE_LPAREN: Path expression ( token
+ * @FYTT_PE_RPAREN: Path expression ) token
+ * @FYTT_PE_EQEQ: Path expression == token
+ * @FYTT_PE_NOTEQ: Path expression != token
+ * @FYTT_PE_LT: Path expression < token
+ * @FYTT_PE_GT: Path expression > token
+ * @FYTT_PE_LTE: Path expression <= token
+ * @FYTT_PE_GTE: Path expression >= token
+ * @FYTT_SE_PLUS: Scalar expression + token
+ * @FYTT_SE_MINUS: Scalar expression - token
+ * @FYTT_SE_MULT: Scalar expression \* token
+ * @FYTT_SE_DIV: Scalar expression / token
+ * @FYTT_PE_METHOD: Path expression method token
+ * @FYTT_SE_METHOD: Scalar expression method token
+ * @FYTT_PE_BANG: Path expression ! token
+ * @FYTT_PE_AT: Path expression \@ token
  */
 enum fy_token_type {
 	/* non-content token types */
@@ -5879,12 +6881,12 @@ enum fy_token_type {
 	FYTT_PE_RPAREN,
 
 	/* comparison operators */
-	FYTT_PE_EQEQ,		/* == */
-	FYTT_PE_NOTEQ,		/* != */
-	FYTT_PE_LT,		/* <  */
-	FYTT_PE_GT,		/* >  */
-	FYTT_PE_LTE,		/* <= */
-	FYTT_PE_GTE,		/* >= */
+	FYTT_PE_EQEQ,
+	FYTT_PE_NOTEQ,
+	FYTT_PE_LT,
+	FYTT_PE_GT,
+	FYTT_PE_LTE,
+	FYTT_PE_GTE,
 
 	/* scalar expression tokens */
 	FYTT_SE_PLUS,
@@ -5892,12 +6894,15 @@ enum fy_token_type {
 	FYTT_SE_MULT,
 	FYTT_SE_DIV,
 
-	FYTT_PE_METHOD,		/* path expr method (chained) */
-	FYTT_SE_METHOD,		/* scalar expr method (non chained) */
+	FYTT_PE_METHOD,
+	FYTT_SE_METHOD,
+
+	FYTT_PE_BANG,
+	FYTT_PE_AT,
 };
 
 /* The number of token types available */
-#define FYTT_COUNT	(FYTT_SE_METHOD+1)
+#define FYTT_COUNT	(FYTT_PE_AT+1)
 
 /**
  * fy_token_type_is_valid() - Check token type validity
@@ -6029,6 +7034,38 @@ fy_token_end_mark(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
+ * fy_token_style_start_mark() - Get token's start marker (style)
+ *
+ * Return the token's start marker if it exists, including the style
+ * indicators. Note it is permissable for some token types to have no
+ * start marker because they are without content.
+ *
+ * @fyt: The token to get its style start marker
+ *
+ * Returns:
+ * The token's style start marker, NULL if not available.
+ */
+const struct fy_mark *
+fy_token_style_start_mark(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
+ * fy_token_style_end_mark() - Get token's end marker (style
+ *
+ * Return the token's end marker if it exists, including the
+ * style indicators. Note it is permissable for some token types to
+ * have no end marker because they are without content.
+ *
+ * @fyt: The token to get its style end marker
+ *
+ * Returns:
+ * The token's style end marker, NULL if not available.
+ */
+const struct fy_mark *
+fy_token_style_end_mark(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
  * fy_scan() - Low level access to the scanner
  *
  * Return the next scanner token. Note this is a very
@@ -6140,6 +7177,26 @@ fy_tag_token_suffix(struct fy_token *fyt, size_t *lenp)
 	FY_EXPORT;
 
 /**
+ * fy_tag_token_short() - Get the short tag of the tag token
+ *
+ * Retrieve the short tag contents. The short tag is the same
+ * one that will need to be emitted.
+ * Will fail if token is not a tag token, or if a memory error happens.
+ *
+ * @fyt: The tag token out of which the short pointer
+ *       will be returned.
+ * @lenp: Pointer to a variable that will hold the returned length
+ *
+ * Returns:
+ * A pointer to the text representation of the short tag, while
+ * @lenp will be assigned the character length of said representation.
+ * NULL in case of an error.
+ */
+const char *
+fy_tag_token_short(struct fy_token *fyt, size_t *lenp)
+	FY_EXPORT;
+
+/**
  * fy_tag_token_handle0() - Get the handle contained in the
  * 			    tag token as zero terminated string
  *
@@ -6156,6 +7213,24 @@ fy_tag_token_suffix(struct fy_token *fyt, size_t *lenp)
  */
 const char *
 fy_tag_token_handle0(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
+ * fy_tag_token_short0() - Get the short tag of the tag token as zero
+ *                         terminated string.
+ *
+ * Retrieve the short tag contents. The short tag is the same
+ * one that will need to be emitted.
+ * Will fail if token is not a tag token, or if a memory error happens.
+ *
+ * @fyt: The tag token out of which the short pointer will be returned.
+ *
+ * Returns:
+ * A pointer to the null terminated text representation of the short tag.
+ * NULL in case of an error.
+ */
+const char *
+fy_tag_token_short0(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
@@ -6308,6 +7383,38 @@ fy_event_start_mark(struct fy_event *fye)
  */
 const struct fy_mark *
 fy_event_end_mark(struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * fy_event_style_start_mark() - Get event's start marker (style)
+ *
+ * Return the event's style start marker if it exists. The
+ * start marker is the one of the event's main token, including
+ * the style marks. But if the event contains a tag then the
+ * start mark is the start of the tag token.
+ *
+ * @fye: The event to get its style start marker
+ *
+ * Returns:
+ * The event's start marker, NULL if not available.
+ */
+const struct fy_mark *
+fy_event_style_start_mark(struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * fy_event_style_end_mark() - Get event's end marker (style)
+ *
+ * Return the event's style end marker if it exists. The
+ * end marker is the one of the event's main token.
+ *
+ * @fye: The event to get its end marker
+ *
+ * Returns:
+ * The event's end marker, NULL if not available.
+ */
+const struct fy_mark *
+fy_event_style_end_mark(struct fy_event *fye)
 	FY_EXPORT;
 
 /**
@@ -6486,6 +7593,23 @@ fy_document_state_json_mode(struct fy_document_state *fyds)
  */
 const struct fy_tag *
 fy_document_state_tag_directive_iterate(struct fy_document_state *fyds, void **prevp)
+	FY_EXPORT;
+
+/**
+ * fy_document_state_tag_directives() - Get all the tag directives in a
+ *                                      malloc'ed array
+ *
+ * Return all the tag directives in a dynamically allocated area.
+ * Must be free()'d when not in use.
+ *
+ * @fyds: The document state
+ *
+ * Returns:
+ * An array of fy_tag pointer structures, terminated with a NULL pointer
+ * NULL on error
+ */
+struct fy_tag **
+fy_document_state_tag_directives(struct fy_document_state *fyds)
 	FY_EXPORT;
 
 /**
@@ -6755,6 +7879,7 @@ fy_emitter_get_document_state(struct fy_emitter *emit)
  *
  * @emit: The emitter
  * @type: The event type to create
+ * @...: The optional extra arguments
  *
  * Returns:
  * The created event or NULL in case of an error
@@ -6997,8 +8122,8 @@ char *
 fy_path_component_get_text(struct fy_path_component *fypc)
 	FY_EXPORT;
 
-#define fy_path_component_get_text_alloca(_fypc, _res) \
-	FY_ALLOCA_COPY_FREE(fy_path_component_get_text((_fypc)), FY_NT, (_res))
+#define fy_path_component_get_text_alloca(_fypc) \
+	FY_ALLOCA_COPY_FREE(fy_path_component_get_text((_fypc)), FY_NT)
 /**
  * fy_path_depth() - Get the depth of a path
  *
@@ -7045,8 +8170,8 @@ char *
 fy_path_get_text(struct fy_path *fypp)
 	FY_EXPORT;
 
-#define fy_path_get_text_alloca(_fypp, _res) \
-	FY_ALLOCA_COPY_FREE(fy_path_get_text((_fypp)), FY_NT, (_res))
+#define fy_path_get_text_alloca(_fypp) \
+	FY_ALLOCA_COPY_FREE(fy_path_get_text((_fypp)), FY_NT)
 
 /**
  * fy_path_in_root() - Check if the path is in the root of the document
@@ -7222,6 +8347,54 @@ fy_path_component_set_sequence_user_data(struct fy_path_component *fypc, void *d
 	FY_EXPORT;
 
 /**
+ * fy_path_get_parent_user_data() - Return the userdata of the parent collection
+ *
+ * @path: The path
+ *
+ * Returns:
+ * The user data associated with the parent collection of the path, or NULL if no path
+ */
+void *
+fy_path_get_parent_user_data(struct fy_path *path)
+	FY_EXPORT;
+
+/**
+ * fy_path_set_parent_user_data() - Set the user data associated with the parent collection
+ *
+ * Note, no error condition if not a path
+ *
+ * @path: The path
+ * @data: The data to set as parent collection data
+ */
+void
+fy_path_set_parent_user_data(struct fy_path *path, void *data)
+	FY_EXPORT;
+
+/**
+ * fy_path_get_last_user_data() - Return the userdata of the last collection
+ *
+ * @path: The path
+ *
+ * Returns:
+ * The user data associated with the last collection of the path, or NULL if no path
+ */
+void *
+fy_path_get_last_user_data(struct fy_path *path)
+	FY_EXPORT;
+
+/**
+ * fy_path_set_last_user_data() - Set the user data associated with the last collection
+ *
+ * Note, no error condition if not a path
+ *
+ * @path: The path
+ * @data: The data to set as last collection data
+ */
+void
+fy_path_set_last_user_data(struct fy_path *path, void *data)
+	FY_EXPORT;
+
+/**
  * fy_path_last_component() - Get the very last component of a path
  *
  * Returns the last component of a path.
@@ -7255,6 +8428,204 @@ fy_path_last_not_collection_root_component(struct fy_path *fypp)
 	FY_EXPORT;
 
 /**
+ * struct fy_composer_ops - Composer operation callbacks
+ *
+ * Callbacks used by the composer to process events and create document builders.
+ *
+ * @process_event: Callback for processing a single YAML event with path context
+ * @create_document_builder: Callback for creating a document builder instance
+ */
+struct fy_composer_ops {
+	/* single process event callback */
+	enum fy_composer_return (*process_event)(struct fy_composer *fyc, struct fy_path *path, struct fy_event *fye);
+	struct fy_document_builder *(*create_document_builder)(struct fy_composer *fyc);
+};
+
+/**
+ * struct fy_composer_cfg - Composer configuration structure
+ *
+ * Configuration structure for creating a composer instance.
+ *
+ * @ops: Pointer to composer operation callbacks
+ * @userdata: Opaque user data pointer passed to callbacks
+ * @diag: Optional diagnostic interface to use, NULL for default
+ */
+struct fy_composer_cfg {
+	const struct fy_composer_ops *ops;
+	void *userdata;
+	struct fy_diag *diag;
+};
+
+/**
+ * fy_composer_create() - Create a composer
+ *
+ * Creates a composer with the given configuration. The composer processes
+ * YAML events using callback methods and maintains path information for
+ * intelligent document composition. The composer may be destroyed by a
+ * corresponding call to fy_composer_destroy().
+ *
+ * @cfg: The configuration for the composer
+ *
+ * Returns:
+ * A pointer to the composer or NULL in case of an error.
+ */
+struct fy_composer *
+fy_composer_create(struct fy_composer_cfg *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_composer_destroy() - Destroy the given composer
+ *
+ * Destroy a composer created earlier via fy_composer_create().
+ *
+ * @fyc: The composer to destroy
+ */
+void fy_composer_destroy(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_process_event() - Process a YAML event through the composer
+ *
+ * Process a YAML event by calling the configured process_event callback
+ * with path context. The composer maintains the current path and provides
+ * it to the callback for intelligent processing decisions.
+ *
+ * @fyc: The composer
+ * @fye: The event to process
+ *
+ * Returns:
+ * A fy_composer_return code indicating how to proceed (continue, stop, skip, or error)
+ */
+enum fy_composer_return
+fy_composer_process_event(struct fy_composer *fyc, struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_cfg() - Get the configuration of a composer
+ *
+ * @fyc: The composer
+ *
+ * Returns:
+ * The configuration of the composer
+ */
+struct fy_composer_cfg *
+fy_composer_get_cfg(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_cfg_userdata() - Get the userdata from composer configuration
+ *
+ * Retrieve the opaque userdata pointer from the composer's configuration.
+ *
+ * @fyc: The composer
+ *
+ * Returns:
+ * The userdata pointer from the configuration
+ */
+void *
+fy_composer_get_cfg_userdata(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_diag() - Get the diagnostic object of a composer
+ *
+ * Return a pointer to the diagnostic object of a composer object.
+ * Note that the returned diag object has a reference taken so
+ * you should fy_diag_unref() it when you're done with it.
+ *
+ * @fyc: The composer to get the diagnostic object
+ *
+ * Returns:
+ * A pointer to a ref'ed diagnostic object or NULL in case of an error.
+ */
+struct fy_diag *
+fy_composer_get_diag(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_path() - Get the current path of the composer
+ *
+ * Retrieve the current path being processed by the composer.
+ * The path represents the location in the YAML document structure
+ * where the composer is currently positioned.
+ *
+ * @fyc: The composer
+ *
+ * Returns:
+ * The current path, or NULL if no path is active
+ */
+struct fy_path *
+fy_composer_get_path(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_root_path() - Get the root path of the composer
+ *
+ * Retrieve the root path of the composer's path hierarchy.
+ *
+ * @fyc: The composer
+ *
+ * Returns:
+ * The root path, or NULL if no root exists
+ */
+struct fy_path *
+fy_composer_get_root_path(struct fy_composer *fyc)
+	FY_EXPORT;
+
+/**
+ * fy_composer_get_next_path() - Get the next path in the composer's path list
+ *
+ * Iterate through the composer's path list. Pass NULL to get the first path,
+ * or pass the previous path to get the next one.
+ *
+ * @fyc: The composer
+ * @fypp: The previous path, or NULL to get the first path
+ *
+ * Returns:
+ * The next path in the list, or NULL if no more paths exist
+ */
+struct fy_path *
+fy_composer_get_next_path(struct fy_composer *fyc, struct fy_path *fypp)
+	FY_EXPORT;
+
+/* Shift amount of the want mode */
+#define FYDICF_WANT_SHIFT		0
+/* Mask of the WANT mode */
+#define FYDICF_WANT_MASK			((1U << 2) - 1)
+/* Build a WANT mode option */
+#define FYDICF_WANT(x)			(((unsigned int)(x) & FYDICF_WANT_MASK) << FYDICF_WANT_SHIFT)
+
+/**
+ * enum fy_document_iterator_cfg_flags - Document iterator configuration flags
+ *
+ * These flags control the operation of the document iterator
+ *
+ * @FYDICF_WANT_BODY_EVENTS: Generate body events
+ * @FYDICF_WANT_DOCUMENT_BODY_EVENTS: Generate document and body events
+ * @FYDICF_WANT_STREAM_DOCUMENT_BODY_EVENTS: Generate stream, document and body events
+ */
+enum fy_document_iterator_cfg_flags {
+	FYDICF_WANT_BODY_EVENTS			= FYDICF_WANT(0),
+	FYDICF_WANT_DOCUMENT_BODY_EVENTS	= FYDICF_WANT(1),
+	FYDICF_WANT_STREAM_DOCUMENT_BODY_EVENTS	= FYDICF_WANT(2),
+};
+
+/**
+ * struct fy_document_iterator_cfg - document iterator configuration structure.
+ *
+ * Argument to the fy_document_iterator_create_cfg() method.
+ *
+ * @flags: The document iterator flags
+ * @fyd: The document to iterate on (or NULL if iterate_root is set)
+ * @iterate_root: The root of iteration (NULL when fyd is not NULL)
+ */
+struct fy_document_iterator_cfg {
+	enum fy_document_iterator_cfg_flags flags;
+	struct fy_document *fyd;
+	struct fy_node *iterate_root;
+};
+
+/**
  * fy_document_iterator_create() - Create a document iterator
  *
  * Creates a document iterator, that can trawl through a document
@@ -7265,6 +8636,50 @@ fy_path_last_not_collection_root_component(struct fy_path *fypp)
  */
 struct fy_document_iterator *
 fy_document_iterator_create(void)
+	FY_EXPORT;
+
+/**
+ * fy_document_iterator_create_cfg() - Create a document iterator using config
+ *
+ * Creates a document iterator, that can trawl through a document
+ * without using recursion. The iterator will generate all the events
+ * that created the given document starting at iterator root.
+ *
+ * @cfg: The document iterator to destroy
+ *
+ * Returns:
+ * The newly created document iterator or NULL on error
+ */
+struct fy_document_iterator *
+fy_document_iterator_create_cfg(const struct fy_document_iterator_cfg *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_document_iterator_create_on_document() - Create a document iterator on document
+ *
+ * Creates a document iterator, starting at the root of the given document.
+ *
+ * @fyd: The document to iterate on
+ *
+ * Returns:
+ * The newly created document iterator or NULL on error
+ */
+struct fy_document_iterator *
+fy_document_iterator_create_on_document(struct fy_document *fyd)
+	FY_EXPORT;
+
+/**
+ * fy_document_iterator_create_on_node() - Create a document iterator on node
+ *
+ * Creates a document iterator, starting at the given node
+ *
+ * @fyn: The node to iterate on
+ *
+ * Returns:
+ * The newly created document iterator or NULL on error
+ */
+struct fy_document_iterator *
+fy_document_iterator_create_on_node(struct fy_node *fyn)
 	FY_EXPORT;
 
 /**
@@ -7407,6 +8822,24 @@ fy_document_iterator_node_next(struct fy_document_iterator *fydi)
 	FY_EXPORT;
 
 /**
+ * fy_document_iterator_generate_next() - Create events from document iterator
+ *
+ * This is a method that will handle the complex state of generating
+ * stream, document and body events on the given iterator.
+ *
+ * When generation is complete a NULL event will be generated.
+ *
+ * @fydi: The document iterator to create the event
+ *
+ * Returns:
+ * The newly created event or NULL at an error, or an end of the
+ * event stream. Use fy_document_iterator_get_error() to check if an error occured.
+ */
+struct fy_event *
+fy_document_iterator_generate_next(struct fy_document_iterator *fydi)
+	FY_EXPORT;
+
+/**
  * fy_document_iterator_get_error() - Get the error state of the document iterator
  *
  * Returns the error state of the iterator. If it's in error state, return true
@@ -7419,6 +8852,1288 @@ fy_document_iterator_node_next(struct fy_document_iterator *fydi)
  */
 bool
 fy_document_iterator_get_error(struct fy_document_iterator *fydi)
+	FY_EXPORT;
+
+/**
+ * struct fy_document_builder_cfg - document builder configuration structure.
+ *
+ * Argument to the fy_document_builder_create() method
+ *
+ * @parse_cfg: Parser configuration
+ * @userdata: Opaque user data pointer
+ * @diag: Optional diagnostic interface to use
+ */
+struct fy_document_builder_cfg {
+	struct fy_parse_cfg parse_cfg;
+	void *userdata;
+	struct fy_diag *diag;
+};
+
+/**
+ * fy_document_builder_create() - Create a document builder
+ *
+ * Creates a document builder with its configuration @cfg
+ * The document builder may be destroyed by a corresponding call to
+ * fy_document_builder_destroy().
+ *
+ * @cfg: The configuration for the document builder
+ *
+ * Returns:
+ * A pointer to the document builder or NULL in case of an error.
+ */
+struct fy_document_builder *
+fy_document_builder_create(const struct fy_document_builder_cfg *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_create_on_parser() - Create a document builder
+ * 					    pulling state from the parser
+ *
+ * Creates a document builder pulling state from the given parser
+ *
+ * @fyp: The parser to associate with
+ *
+ * Returns:
+ * A pointer to the document builder or NULL in case of an error.
+ */
+struct fy_document_builder *
+fy_document_builder_create_on_parser(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_reset() - Reset a document builder
+ *
+ * Resets a document builder without destroying it
+ *
+ * @fydb: The document builder
+ */
+void
+fy_document_builder_reset(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_destroy() - Destroy a document builder
+ *
+ * Destroy a document builder
+ *
+ * @fydb: The document builder
+ */
+void
+fy_document_builder_destroy(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_get_document() - Get the document of a builder
+ *
+ * Retrieve the document of a document builder. This document
+ * may be incomplete. If you need to take ownership use
+ * fy_document_builder_take_document().
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * The document that the builder built, or NULL in case of an error
+ */
+struct fy_document *
+fy_document_builder_get_document(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_is_in_stream() - Test document builder in stream
+ *
+ * Find out if the document builder is in 'stream' state,
+ * i.e. after stream start but before stream end events are generated.
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * true if in stream, false otherwise
+ */
+bool
+fy_document_builder_is_in_stream(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_is_in_document() - Test document builder in document
+ *
+ * Find out if the document builder is in 'document' state,
+ * i.e. after document start but before document end events are generated.
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * true if in document, false otherwise
+ */
+bool
+fy_document_builder_is_in_document(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_is_document_complete() - Test document builder complete
+ *
+ * Find out if the document of the builder is complete.
+ * If it is complete then a call to fy_document_builder_take_document() will
+ * transfer ownership of the document to the caller.
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * true if document complete, false otherwise
+ */
+bool
+fy_document_builder_is_document_complete(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_take_document() - Take ownership the document of a builder
+ *
+ * Take ownership of the document of a document builder.
+ * The document builder's document must be complete.
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * The document that the builder built, or NULL in case of an error
+ */
+struct fy_document *
+fy_document_builder_take_document(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_peek_document() - Peek at the document of a builder
+ *
+ * Peek at the document of a document builder.
+ * Ownership still remains with the builder.
+ *
+ * @fydb: The document builder
+ *
+ * Returns:
+ * A peek to the document that the builder built, or NULL in case of an error
+ */
+struct fy_document *
+fy_document_builder_peek_document(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_set_in_stream() - Set the builders state in 'stream'
+ *
+ * Set the document builders state to in 'stream'
+ *
+ * @fydb: The document builder
+ */
+void
+fy_document_builder_set_in_stream(struct fy_document_builder *fydb)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_set_in_document() - Set the builders state in 'document'
+ *
+ * Set the document builders state to in 'document'
+ *
+ * @fydb: The document builder
+ * @fyds: The document state
+ * @single: Single document mode
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_document_builder_set_in_document(struct fy_document_builder *fydb, struct fy_document_state *fyds, bool single)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_load_document() - Create a document from parser events
+ *
+ * Load a document by pumping the parser for events and then processing them
+ * with the builder.
+ *
+ * @fydb: The document builder
+ * @fyp: The parser
+ *
+ * Returns:
+ * The document that results from the parser, or NULL in case of an error (or EOF)
+ */
+struct fy_document *
+fy_document_builder_load_document(struct fy_document_builder *fydb, struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_parse_load_document_with_builder() - Parse a document via built-in builder
+ *
+ * Load a document by pumping the parser for events and then processing them
+ * with the in-parser builder.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * The document that results from the parser, or NULL in case of an error (or EOF)
+ */
+struct fy_document *
+fy_parse_load_document_with_builder(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_document_builder_process_event() - Process an event with a builder
+ *
+ * Pump an event to a document builder for processing.
+ *
+ * @fydb: The document builder
+ * @fye: The event
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_document_builder_process_event(struct fy_document_builder *fydb, struct fy_event *fye)
+	FY_EXPORT;
+
+/**
+ * enum fy_parser_event_generator_flags - The parser event generator flags
+ *
+ * @FYPEGF_GENERATE_DOCUMENT_EVENTS: generate document events
+ * @FYPEGF_GENERATE_STREAM_EVENTS: generate stream events
+ * @FYPEGF_GENERATE_ALL_EVENTS: generate all events
+ */
+enum fy_parser_event_generator_flags {
+	FYPEGF_GENERATE_DOCUMENT_EVENTS	= FY_BIT(0),
+	FYPEGF_GENERATE_STREAM_EVENTS	= FY_BIT(1),
+	FYPEGF_GENERATE_ALL_EVENTS	= FYPEGF_GENERATE_STREAM_EVENTS | FYPEGF_GENERATE_DOCUMENT_EVENTS,
+};
+
+/**
+ * fy_parser_set_document_iterator() - Associate a parser with a document iterator
+ *
+ * Associate a parser with a document iterator, that is instead of parsing the events
+ * will be generated by the document iterator.
+ *
+ * @fyp: The parser
+ * @flags: The event generation flags
+ * @fydi: The document iterator to associate
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_parser_set_document_iterator(struct fy_parser *fyp, enum fy_parser_event_generator_flags flags,
+				struct fy_document_iterator *fydi)
+	FY_EXPORT;
+
+/*
+ * The libfyaml's push-pull thread implementation
+ *
+ */
+
+/* opaque types for the user */
+struct fy_thread_pool;
+struct fy_thread;
+struct fy_work_pool;
+
+/**
+ * typedef fy_work_exec_fn - Work exec function
+ *
+ * The callback executed on work submission
+ *
+ * @arg: The argument to the method
+ *
+ */
+typedef void (*fy_work_exec_fn)(void *arg);
+
+/**
+ * typedef fy_work_check_fn - Work check function
+ *
+ * Work checker function to decide if it's worth to
+ * offload to a thread.
+ *
+ * @arg: The argument to the method
+ *
+ * Returns:
+ * true if it should offload to thread, false otherwise
+ *
+ */
+typedef bool (*fy_work_check_fn)(const void *arg);
+
+/**
+ * struct fy_thread_work - Work submitted to a thread for execution
+ *
+ * @fn: The execution function for this work
+ * @arg: The argument to the fn
+ * @wp: Used internally, must be set to NULL on entry
+ *
+ * This is the structure describing the work submitted
+ * to a thread for execution.
+ */
+struct fy_thread_work {
+	fy_work_exec_fn fn;
+	void *arg;
+	struct fy_work_pool *wp;
+};
+
+/**
+ * enum fy_thread_pool_cfg_flags - Thread pool configuration flags
+ *
+ * These flags control the operation of the thread pool.
+ * For now only the steal mode flag is defined.
+ *
+ * @FYTPCF_STEAL_MODE: Enable steal mode for the thread pool
+ */
+enum fy_thread_pool_cfg_flags {
+	FYTPCF_STEAL_MODE	= FY_BIT(0),
+};
+
+/**
+ * struct fy_thread_pool_cfg - thread pool configuration structure.
+ *
+ * Argument to the fy_thread_pool_create() method.
+ *
+ * @flags: Thread pool configuration flags
+ * @num_threads: Number of threads, if 0 == online CPUs
+ * @userdata: A userdata pointer
+ */
+struct fy_thread_pool_cfg {
+	enum fy_thread_pool_cfg_flags flags;
+	unsigned int num_threads;
+	void *userdata;
+};
+
+/**
+ * fy_thread_pool_create() - Create a thread pool
+ *
+ * Creates a thread pool with its configuration @cfg
+ * The thread pool may be destroyed by a corresponding call to
+ * fy_thread_pool_destroy().
+ *
+ * @cfg: The configuration for the thread pool
+ *
+ * Returns:
+ * A pointer to the thread pool or NULL in case of an error.
+ */
+struct fy_thread_pool *
+fy_thread_pool_create(const struct fy_thread_pool_cfg *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_thread_pool_destroy() - Destroy the given thread pool
+ *
+ * Destroy a thread pool created earlier via fy_thread_pool_create().
+ * Note that this function will block until all threads
+ * of the pool are destroyed.
+ *
+ * @tp: The thread pool to destroy
+ */
+void
+fy_thread_pool_destroy(struct fy_thread_pool *tp)
+	FY_EXPORT;
+
+/**
+ * fy_thread_pool_get_num_threads() - Get the number of threads
+ *
+ * Returns the actual number of created threads.
+ *
+ * @tp: The thread pool
+ *
+ * Returns:
+ * > 0 for the number of actual threads created,
+ * -1 on error
+ */
+int
+fy_thread_pool_get_num_threads(struct fy_thread_pool *tp)
+	FY_EXPORT;
+
+/**
+ * fy_thread_pool_get_cfg() - Get the configuration of a thread pool
+ *
+ * @tp: The thread pool
+ *
+ * Returns:
+ * The configuration of the thread pool
+ */
+const struct fy_thread_pool_cfg *
+fy_thread_pool_get_cfg(struct fy_thread_pool *tp)
+	FY_EXPORT;
+
+/**
+ * fy_thread_reserve() - Reserve a thread from the pool.
+ *
+ * Reserve a thread from the pool and return it.
+ * Note this is only valid for a non-work stealing thread pool.
+ * You release the thread again via a call to fy_thread_unreserve.
+ *
+ * @tp: The thread pool
+ *
+ * Returns:
+ * A reserved thread if not NULL, NULL if no threads are available.
+ */
+struct fy_thread *
+fy_thread_reserve(struct fy_thread_pool *tp)
+	FY_EXPORT;
+
+/**
+ * fy_thread_unreserve() - Unreserve a previously reserved thread
+ *
+ * Unreserve a thread previously reserved via a call to fy_thread_reserve()
+ * Note this is only valid for a non-work stealing thread pool.
+ *
+ * @t: The thread
+ */
+void
+fy_thread_unreserve(struct fy_thread *t)
+	FY_EXPORT;
+
+/**
+ * fy_thread_submit_work() - Submit work for execution
+ *
+ * Submit work for execution. If successful the thread
+ * will start executing the work in parallel with the
+ * calling thread. You can wait for the thread to
+ * terminate via a call to fy_thread_wait_work().
+ * The thread must have been reserved earlier via fy_thread_reserve()
+ *
+ * Note this is only valid for a non-work stealing thread pool.
+ *
+ * @t: The thread
+ * @work: The work
+ *
+ * Returns:
+ * 0 if work has been submitted, -1 otherwise.
+ */
+int
+fy_thread_submit_work(struct fy_thread *t, struct fy_thread_work *work)
+	FY_EXPORT;
+
+/**
+ * fy_thread_wait_work() - Wait for completion of submitted work
+ *
+ * Wait until submitted work to the thread has finished.
+ * Note this is only valid for a non-work stealing thread pool.
+ *
+ * @t: The thread
+ *
+ * Returns:
+ * 0 if work finished, -1 on error.
+ */
+int
+fy_thread_wait_work(struct fy_thread *t)
+	FY_EXPORT;
+
+/**
+ * fy_thread_work_join() - Submit works for execution and wait
+ *
+ * Submit works for possible parallel execution. If no offloading
+ * is possible at the time execute in the current context.
+ * It is possible to use in both stealing and non-stealing mode
+ * with the difference being that stealing mode is about 30% faster.
+ *
+ * @tp: The thread pool
+ * @works: Pointer to an array of works sized @work_count
+ * @work_count: The size of the @works array
+ * @check_fn: Pointer to a check function, or NULL for no checks
+ */
+void
+fy_thread_work_join(struct fy_thread_pool *tp,
+		    struct fy_thread_work *works, size_t work_count,
+		    fy_work_check_fn check_fn)
+	FY_EXPORT;
+
+/**
+ * fy_thread_args_join() - Execute function in parallel using arguments as pointers
+ *
+ * Execute @fn possibly in parallel using the threads in the thread pool.
+ * The arguments of the function are provided by the args array.
+ *
+ * @tp: The thread pool
+ * @fn: The function to execute in parallel
+ * @check_fn: Pointer to a check function, or NULL for no checks
+ * @args: An args array sized @count of argument pointers
+ * @count: The count of the args array items
+ */
+void
+fy_thread_args_join(struct fy_thread_pool *tp,
+		    fy_work_exec_fn fn, fy_work_check_fn check_fn,
+		    void **args, size_t count)
+	FY_EXPORT;
+
+/**
+ * fy_thread_arg_array_join() - Execute function in parallel using argument array
+ *
+ * Execute @fn possibly in parallel using the threads in the thread pool.
+ * The arguments of the function are provided by the args array.
+ *
+ * @tp: The thread pool
+ * @fn: The function to execute in parallel
+ * @check_fn: Pointer to a check function, or NULL for no checks
+ * @args: An args array of @argsize items
+ * @argsize: The size of each argument array item
+ * @count: The count of the args array items
+ */
+void
+fy_thread_arg_array_join(struct fy_thread_pool *tp,
+			 fy_work_exec_fn fn, fy_work_check_fn check_fn,
+			 void *args, size_t argsize, size_t count)
+	FY_EXPORT;
+
+/**
+ * fy_thread_arg_join() - Execute function in parallel with the same argument
+ *
+ * Execute @fn possibly in parallel using the threads in the thread pool.
+ * The argument of the functions is the same.
+ *
+ * @tp: The thread pool
+ * @fn: The function to execute in parallel
+ * @check_fn: Pointer to a check function, or NULL for no checks
+ * @arg: The common argument
+ * @count: The count of executions
+ */
+void
+fy_thread_arg_join(struct fy_thread_pool *tp,
+		   fy_work_exec_fn fn, fy_work_check_fn check_fn,
+		   void *arg, size_t count)
+	FY_EXPORT;
+
+/*
+ * Minimal exposing of internal BLAKE3 implementation
+ *
+ */
+
+/* BLAKE3 key length */
+#define FY_BLAKE3_KEY_LEN 32
+/* BLAKE3 output length */
+#define FY_BLAKE3_OUT_LEN 32
+
+/* opaque BLAKE3 hasher type for the user*/
+struct fy_blake3_hasher;
+
+/**
+ * fy_blake3_backend_iterate() - Iterate over the supported BLAKE3 backends
+ *
+ * This method iterates over the supported BLAKE3 backends.
+ * The start of the iteration is signalled by a NULL in \*prevp.
+ *
+ * The default backend is always the last in sequence, so for
+ * example if the order is [ "portable", "sse2", NULL ] the
+ * default is "sse2".
+ *
+ * @prevp: The previous backend pointer, or NULL at start
+ *
+ * Returns:
+ * The next backend or NULL at the end.
+ */
+const char *
+fy_blake3_backend_iterate(const char **prevp)
+	FY_EXPORT;
+
+/**
+ * struct fy_blake3_hasher_cfg - BLAKE3 hasher configuration
+ *
+ * Argument to the fy_blake3_hasher_create() method which
+ * is the fyaml's user facing BLAKE3 API.
+ * It is very minimal, on purpose, since it's meant to be
+ * exposing a full blown BLAKE3 API.
+ *
+ * @backend: NULL for default, or a specific backend name
+ * @file_buffer: Use this amount of buffer for buffering, zero for default
+ * @mmap_min_chunk: Minimum chunk size for mmap case
+ * @mmap_max_chunk: Maximum chunk size for mmap case
+ * @no_mmap: Disable mmap for file access
+ * @key: pointer to a FY_BLAKE3_KEY_LEN area when in keyed mode.
+ *       NULL otherwise.
+ * @context: pointer to a context when in key derivation mode.
+ *           NULL otherwise.
+ * @context_len: The size of the context when in key derivation mode.
+ *               0 otherwise.
+ * @tp: The thread pool to use, if NULL, create a private one
+ * @num_threads: Number of threads to use
+ *               - 0 means default: NUM_CPUS * 3 / 2
+ *               - > 0 specific number of threads
+ *               - -1 disable threading entirely
+ */
+struct fy_blake3_hasher_cfg {
+	const char *backend;
+	size_t file_buffer;
+	size_t mmap_min_chunk;
+	size_t mmap_max_chunk;
+	bool no_mmap;
+	const uint8_t *key;
+	const void *context;
+	size_t context_len;
+	struct fy_thread_pool *tp;
+	int num_threads;
+};
+
+/**
+ * fy_blake3_hasher_create() - Create a BLAKE3 hasher object.
+ *
+ * Creates a BLAKE3 hasher with its configuration @cfg
+ * The hasher may be destroyed by a corresponding call to
+ * fy_blake3_hasher_destroy().
+ *
+ * @cfg: The configuration for the BLAKE3 hasher
+ *
+ * Returns:
+ * A pointer to the BLAKE3 hasher or NULL in case of an error.
+ */
+struct fy_blake3_hasher *
+fy_blake3_hasher_create(const struct fy_blake3_hasher_cfg *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hasher_destroy() - Destroy the given BLAKE3 hasher
+ *
+ * Destroy a BLAKE3 hasher created earlier via fy_blake3_hasher_create().
+ *
+ * @fyh: The BLAKE3 hasher to destroy
+ */
+void
+fy_blake3_hasher_destroy(struct fy_blake3_hasher *fyh)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hasher_update() - Update the BLAKE3 hasher state with the given input
+ *
+ * Updates the BLAKE3 hasher state by hashing the given input.
+ *
+ * @fyh: The BLAKE3 hasher
+ * @input: Pointer to the input
+ * @input_len: Size of the input in bytes
+ */
+void
+fy_blake3_hasher_update(struct fy_blake3_hasher *fyh, const void *input, size_t input_len)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hasher_finalize() - Finalize the hash and get output
+ *
+ * Finalizes the BLAKE3 hasher and returns the output
+ *
+ * @fyh: The BLAKE3 hasher
+ *
+ * Returns:
+ * A pointer to the BLAKE3 output (sized FY_BLAKE3_OUT_LEN), or NULL
+ * in case of an error.
+ */
+const uint8_t *
+fy_blake3_hasher_finalize(struct fy_blake3_hasher *fyh)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hasher_reset() - Resets the hasher
+ *
+ * Resets the hasher for re-use
+ *
+ * @fyh: The BLAKE3 hasher
+ */
+void
+fy_blake3_hasher_reset(struct fy_blake3_hasher *fyh)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hash() - BLAKE3 hash a memory area
+ *
+ * Hash a memory area and return the BLAKE3 output.
+ *
+ * @fyh: The BLAKE3 hasher
+ * @mem: Pointer to the memory to use
+ * @size: The size of the memory in bytes
+ *
+ * Returns:
+ * A pointer to the BLAKE3 output (sized FY_BLAKE3_OUT_LEN), or NULL
+ * in case of an error.
+ */
+const uint8_t *
+fy_blake3_hash(struct fy_blake3_hasher *fyh, const void *mem, size_t size)
+	FY_EXPORT;
+
+/**
+ * fy_blake3_hash_file() - BLAKE3 hash a file.
+ *
+ * Hash the given file (possibly using mmap)
+ *
+ * @fyh: The BLAKE3 hasher
+ * @filename: The filename
+ *
+ * Returns:
+ * A pointer to the BLAKE3 output (sized FY_BLAKE3_OUT_LEN), or NULL
+ * in case of an error.
+ */
+const uint8_t *
+fy_blake3_hash_file(struct fy_blake3_hasher *fyh, const char *filename)
+	FY_EXPORT;
+
+/* forward decl of allocator interfaces */
+struct fy_allocator;
+
+/* A tag that represents the default tag */
+#define FY_ALLOC_TAG_DEFAULT	0
+/* A tag that denotes error */
+#define FY_ALLOC_TAG_ERROR	-1
+/* A tag that represents 'none' */
+#define FY_ALLOC_TAG_NONE	-2
+
+/**
+ * fy_allocator_iterate() - Iterate over available allocator names
+ *
+ * This method iterates over all the available allocator names.
+ * The start of the iteration is signalled by a NULL in \*prevp.
+ *
+ * @prevp: The previous allocator iterator pointer
+ *
+ * Returns:
+ * The next allocator name in sequence or NULL at the end.
+ */
+const char *
+fy_allocator_iterate(const char **prevp)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_is_available() - Check if an allocator is available
+ *
+ * Check if the named allocator is available.
+ *
+ * @name: The name of the allocator to check
+ *
+ * Returns:
+ * true if the allocator is available, false otherwise
+ */
+bool
+fy_allocator_is_available(const char *name)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_create() - Create an allocator.
+ *
+ * Creates an allocator of the given type, using the configuration
+ * argument provided.
+ * The allocator may be destroyed by a corresponding call to
+ * fy_allocator_destroy().
+ *
+ * You can retrieve the names of available allocators
+ * with the fy_allocator_get_names() method.
+ *
+ * @name: The name of the allocator
+ * @cfg: The type specific configuration for the allocator, or NULL
+ *       for the default.
+ *
+ * Returns:
+ * A pointer to the allocator or NULL in case of an error.
+ */
+struct fy_allocator *
+fy_allocator_create(const char *name, const void *cfg)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_destroy() - Destroy the given allocator
+ *
+ * Destroy an allocator created earlier via fy_allocator_create().
+ * Tracking allocators will release all memory allocated using them.
+ *
+ * @a: The allocator to destroy
+ */
+void
+fy_allocator_destroy(struct fy_allocator *a)
+	FY_EXPORT;
+
+/** The minimum amount of memory for an inplace linear allocator */
+#define FY_LINEAR_ALLOCATOR_IN_PLACE_MIN_SIZE	256
+
+/**
+ * fy_linear_allocator_create_in_place() - Create a linear allocator in place
+ *
+ * Creates a linear allocator in place, using the buffer provided.
+ * No memory allocations will be performed, so it's safe to embed.
+ * There is no need to call fy_allocator_destroy for this allocator.
+ *
+ * @buffer: The memory buffer to use for both storage and the allocator
+ * @size: The size of the memory buffer
+ *
+ * Returns:
+ * A pointer to the allocator, or NULL if there is no space
+ */
+struct fy_allocator *
+fy_linear_allocator_create_in_place(void *buffer, size_t size)
+	FY_EXPORT;
+
+/** The minimum amount of memory for an inplace dedup allocator */
+#define FY_DEDUP_ALLOCATOR_IN_PLACE_MIN_SIZE	4096
+
+/**
+ * fy_dedup_allocator_create_in_place() - Create a dedp allocator in place
+ *
+ * Creates a dedup allocator in place, using the buffer provided.
+ * No memory allocations will be performed, so it's safe to embed.
+ * There is no need to call fy_allocator_destroy for this allocator.
+ * The parent allocator of this will be a linear allocator.
+ *
+ * @buffer: The memory buffer to use for both storage and the allocator
+ * @size: The size of the memory buffer
+ *
+ * Returns:
+ * A pointer to the allocator, or NULL if there is no space
+ */
+struct fy_allocator *
+fy_dedup_allocator_create_in_place(void *buffer, size_t size)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_get_tag() - Get a tag from an allocator
+ *
+ * The allocator interface requires all allocation to belong
+ * to a tag. This call creates a tag and returns its value,
+ * or an error if not available.
+ *
+ * If an allocator only provides a single tag (like the linear
+ * allocator for instance), the same tag number, usually 0, is
+ * returned.
+ *
+ * @a: The allocator
+ *
+ * Returns:
+ * The created tag or -1 in case of an error.
+ */
+int
+fy_allocator_get_tag(struct fy_allocator *a)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_release_tag() - Release a tag from an allocator
+ *
+ * Releases a tag from an allocator and frees all memory it
+ * allocated (if such an operation is provided by the allocator).
+ *
+ * @a: The allocator
+ * @tag: The tag to release
+ */
+void
+fy_allocator_release_tag(struct fy_allocator *a, int tag)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_get_tag_count() - Get the maximum number of tags a
+ * 				  allocator supports
+ *
+ * Get the maximum amount of tags an allocator supports.
+ *
+ * If an allocator only provides a single tag (like the linear
+ * allocator for instance), 1 will be returned.
+ *
+ * @a: The allocator
+ *
+ * Returns:
+ * The number of tags, or -1 on error
+ */
+int
+fy_allocator_get_tag_count(struct fy_allocator *a)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_set_tag_count() - Set the maximum number of tags a
+ * 				  allocator supports
+ *
+ * Sets the maximum amount of tags an allocator supports.
+ * If the set allocator tag count is less than the current
+ * the additional tags will be released.
+ *
+ * @a: The allocator
+ * @count: The amount of tags the allocator should support
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_allocator_set_tag_count(struct fy_allocator *a, unsigned int count)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_trim_tag() - Trim a tag
+ *
+ * Trim a tag, that is free any excess memory it allocator, fitting
+ * it to the size of the content it carries.
+ * Allocators that cannot perform this operation treat it as a NOP.
+ *
+ * @a: The allocator
+ * @tag: The tag to trim
+ */
+void
+fy_allocator_trim_tag(struct fy_allocator *a, int tag)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_reset_tag() - Reset a tag
+ *
+ * Reset a tag, that is free any content it carries, but do not
+ * release the tag.
+ *
+ * @a: The allocator
+ * @tag: The tag to reset
+ */
+void
+fy_allocator_reset_tag(struct fy_allocator *a, int tag)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_alloc() - Allocate memory from an allocator
+ *
+ * Allocate memory from the given allocator tag, satisfying the
+ * size and align restrictions.
+ *
+ * @a: The allocator
+ * @tag: The tag to allocate from
+ * @size: The size of the memory to allocate
+ * @align: The alignment of the object
+ *
+ * Returns:
+ * A pointer to the allocated memory or NULL
+ */
+void *
+fy_allocator_alloc(struct fy_allocator *a, int tag, size_t size, size_t align)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_free() - Free memory allocated from an allocator
+ *
+ * Attempt to free the memory allocated previously by fy_allocator_alloc()
+ * Note that non per object tracking allocators treat this as a NOP
+ *
+ * @a: The allocator
+ * @tag: The tag used to allocate the memory
+ * @ptr: The pointer to the memory to free
+ */
+void
+fy_allocator_free(struct fy_allocator *a, int tag, void *ptr)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_store() - Store an object to an allocator
+ *
+ * Store an object to an allocator and return a pointer to the location
+ * it was stored. When using a deduplicating allocator no new allocation
+ * will take place and a pointer to the object already stored will be
+ * returned.
+ *
+ * The return pointer must not be modified, the objects stored are idempotent.
+ *
+ * @a: The allocator
+ * @tag: The tag used to allocate the memory
+ * @data: The pointer to object to store
+ * @size: The size of the object
+ * @align: The alignment restriction of the object
+ *
+ * Returns:
+ * A constant pointer to the object stored, or NULL in case of an error
+ */
+const void *
+fy_allocator_store(struct fy_allocator *a, int tag, const void *data, size_t size, size_t align)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_storev() - Store an object to an allocator (scatter gather)
+ *
+ * Store an object to an allocator and return a pointer to the location
+ * it was stored. When using a deduplicating allocator no new allocation
+ * will take place and a pointer to the object already stored will be
+ * returned.
+ *
+ * The object is created linearly from the scatter gather io vector provided.
+ *
+ * The return pointer must not be modified, the objects stored are immutable.
+ *
+ * @a: The allocator
+ * @tag: The tag used to allocate the memory from
+ * @iov: The I/O scatter gather vector
+ * @iovcnt: The number of vectors
+ * @align: The alignment restriction of the object
+ *
+ * Returns:
+ * A constant pointer to the object stored, or NULL in case of an error
+ */
+const void *
+fy_allocator_storev(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_lookup() - Lookup for object in an allocator.
+ *
+ * Lookup for the exact contents of an object stored in an allocator
+ * and return a pointer to the location it was stored.
+ * The allocator must have the FYACF_CAN_LOOKUP capability.
+ *
+ * @a: The allocator
+ * @tag: The tag used to locate the memory
+ * @data: The pointer to object to store
+ * @size: The size of the object
+ * @align: The alignment restriction of the object
+ *
+ * Returns:
+ * A constant pointer to the object stored, or NULL if the object does not exist
+ */
+const void *
+fy_allocator_lookup(struct fy_allocator *a, int tag, const void *data, size_t size, size_t align)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_lookupv() - Lookup for object in an allocator (scatter gather)
+ *
+ * Lookup for the exact contents of an object stored in an allocator
+ * and return a pointer to the location it was stored.
+ * The allocator must have the FYACF_CAN_LOOKUP capability.
+ *
+ * The scatter gather vector is used to recreate the object.
+ *
+ * @a: The allocator
+ * @tag: The tag used to search into
+ * @iov: The I/O scatter gather vector
+ * @iovcnt: The number of vectors
+ * @align: The alignment restriction of the object
+ *
+ * Returns:
+ * A constant pointer to the object stored, or NULL in case the object does not exist
+ */
+const void *
+fy_allocator_lookupv(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_dump() - Dump internal allocator state
+ *
+ * @a: The allocator
+ */
+void
+fy_allocator_dump(struct fy_allocator *a)
+	FY_EXPORT;
+
+/**
+ * enum fy_allocator_cap_flags - Allocator capability flags
+ *
+ * @FYACF_CAN_FREE_INDIVIDUAL: Allocator supports freeing individual allocations
+ * @FYACF_CAN_FREE_TAG: Allocator supports releasing entire tags
+ * @FYACF_CAN_DEDUP: Allocator supports deduplication
+ * @FYACF_HAS_CONTAINS: Allocator can report if it contains a pointer (even if inefficiently)
+ * @FYACF_HAS_EFFICIENT_CONTAINS: Allocator can report if it contains a pointer (efficiently)
+ * @FYACF_HAS_TAGS: Allocator has individual tags or not
+ * @FYACF_CAN_LOOKUP: Allocator supports lookup for content
+ *
+ * These flags describe what operations an allocator supports.
+ */
+enum fy_allocator_cap_flags {
+	FYACF_CAN_FREE_INDIVIDUAL		= FY_BIT(0),
+	FYACF_CAN_FREE_TAG			= FY_BIT(1),
+	FYACF_CAN_DEDUP				= FY_BIT(2),
+	FYACF_HAS_CONTAINS			= FY_BIT(3),
+	FYACF_HAS_EFFICIENT_CONTAINS		= FY_BIT(4),
+	FYACF_HAS_TAGS				= FY_BIT(5),
+	FYACF_CAN_LOOKUP			= FY_BIT(6),
+};
+
+/**
+ * fy_allocator_get_caps() - Get allocator capabilities
+ *
+ * Retrieve the capabilities of an allocator.
+ *
+ * @a: The allocator
+ *
+ * Returns:
+ * The capabilities of the allocator
+ */
+enum fy_allocator_cap_flags
+fy_allocator_get_caps(struct fy_allocator *a)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_contains() - Check if a allocator contains a pointer
+ *
+ * Report if an allocator contains the pointer
+ *
+ * @a: The allocator
+ * @tag: Tag to search in, -1 for all
+ * @ptr: The object pointer
+ *
+ * Returns:
+ * true if the pointer ptr is contained in the allocator, false otherwise
+ */
+bool
+fy_allocator_contains(struct fy_allocator *a, int tag, const void *ptr)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_get_tag_linear_size() - Get the linear size of an allocator tag
+ *
+ * Retrieve the linear size of the content of a tag.
+ * That is the size of a buffer if one was to copy the content of the tag in
+ * that buffer in a linear manner.
+ *
+ * @a: The allocator
+ * @tag: The tag
+ *
+ * Returns:
+ * The linear size of the content stored in the tag or -1 in case of an error.
+ */
+ssize_t
+fy_allocator_get_tag_linear_size(struct fy_allocator *a, int tag)
+	FY_EXPORT;
+
+/**
+ * fy_allocator_get_tag_single_linear() - Get the linear extend of a tag
+ *
+ * If a tag stores it's content in a single linear buffer, retrieve it
+ * directly. This is possible only under careful arrangement of allocator
+ * configuration, but it is an important optimization case.
+ *
+ * @a: The allocator
+ * @tag: The tag
+ * @sizep: Pointer to a variable that will be filled with the size.
+ *
+ * Returns:
+ * A pointer to the linear content of the tag, or NULL if othersize.
+ */
+const void *
+fy_allocator_get_tag_single_linear(struct fy_allocator *a, int tag, size_t *sizep)
+	FY_EXPORT;
+
+/**
+ * struct fy_linear_allocator_cfg - linear allocator configuration
+ *
+ * @buf: A pointer to a buffer that will be used, or NULL in order to allocate
+ * @size: Size of the buffer in bytes
+ */
+struct fy_linear_allocator_cfg {
+	void *buf;
+	size_t size;
+};
+
+/**
+ * enum fy_mremap_arena_type - The mremap allocator arena types
+ *
+ * @FYMRAT_DEFAULT: Use what's optimal for this platform
+ * @FYMRAT_MALLOC: Use malloc/realloc arena type (not recommended)
+ * @FYMRAT_MMAP: Use mmap/mremap arena type
+ *
+ */
+enum fy_mremap_arena_type {
+	FYMRAT_DEFAULT,
+	FYMRAT_MALLOC,
+	FYMRAT_MMAP,
+};
+
+/**
+ * struct fy_mremap_allocator_cfg - mremap allocator configuration
+ *
+ * If any of the fields is zero, then the system will provide (somewhat)
+ * reasonable defaults.
+ *
+ * @big_alloc_threshold: Threshold for immediately creating a new arena.
+ * @empty_threshold: The threshold under which an arena is moved to the full list.
+ * @minimum_arena_size: The minimum (and starting size) of an arena.
+ * @grow_ratio: The ratio which an arena will try to grow if full (>1.0)
+ * @balloon_ratio: The multiplier for the vm area first allocation
+ * @arena_type: The arena type
+ */
+struct fy_mremap_allocator_cfg {
+	size_t big_alloc_threshold;
+	size_t empty_threshold;
+	size_t minimum_arena_size;
+	float grow_ratio;
+	float balloon_ratio;
+	enum fy_mremap_arena_type arena_type;
+};
+
+/* malloc allocator has no configuration data, pass NULL */
+
+/**
+ * struct fy_dedup_allocator_cfg - dedup allocator configuration
+ *
+ * @parent_allocator: The parent allocator (required)
+ * @bloom_filter_bits: Number of bits of the bloom filter (or 0 for default)
+ * @bucket_count_bits: Number of bits for the bucket count (or 0 for default)
+ * @dedup_threshold: Number of bytes over which dedup takes place (default 0=always)
+ * @chain_length_grow_trigger: Chain length of a bucket over which a grow takes place (or 0 for auto)
+ * @estimated_content_size: Estimated content size (or 0 for don't know)
+ * @minimum_bucket_occupancy: The minimum amount that a tag bucket must be full before
+ * 			      growth is allowed (default 50%, or 0.0)
+ */
+struct fy_dedup_allocator_cfg {
+	struct fy_allocator *parent_allocator;
+	unsigned int bloom_filter_bits;
+	unsigned int bucket_count_bits;
+	size_t dedup_threshold;
+	unsigned int chain_length_grow_trigger;
+	size_t estimated_content_size;
+	float minimum_bucket_occupancy;
+};
+
+/**
+ * enum fy_auto_allocator_scenario_type - auto allocator scenario type
+ *
+ * @FYAST_PER_TAG_FREE: only per tag freeing, no individual obj free
+ * @FYAST_PER_TAG_FREE_DEDUP: per tag freeing, dedup obj store
+ * @FYAST_PER_OBJ_FREE:	object freeing allowed, tag freeing still works
+ * @FYAST_PER_OBJ_FREE_DEDUP: per obj freeing, dedup obj store
+ * @FYAST_SINGLE_LINEAR_RANGE: just a single linear range, no frees at all
+ * @FYAST_SINGLE_LINEAR_RANGE_DEDUP: single linear range, with dedup
+ */
+enum fy_auto_allocator_scenario_type {
+	FYAST_PER_TAG_FREE,
+	FYAST_PER_TAG_FREE_DEDUP,
+	FYAST_PER_OBJ_FREE,
+	FYAST_PER_OBJ_FREE_DEDUP,
+	FYAST_SINGLE_LINEAR_RANGE,
+	FYAST_SINGLE_LINEAR_RANGE_DEDUP,
+};
+
+/**
+ * struct fy_auto_allocator_cfg - auto allocator configuration
+ *
+ * @scenario: Auto allocator scenario
+ * @estimated_max_size: Estimated max content size (or 0 for don't know)
+ */
+struct fy_auto_allocator_cfg {
+	enum fy_auto_allocator_scenario_type scenario;
+	size_t estimated_max_size;
+};
+
+struct fy_parser_checkpoint;
+
+/**
+ * fy_parser_checkpoint_create() - Create a parser checkpoint
+ *
+ * Create a checkpoint of the parser's current state. This allows you
+ * to save the parser state and potentially roll back to it later using
+ * fy_parser_rollback(). The checkpoint must be destroyed via
+ * fy_parser_checkpoint_destroy() when no longer needed.
+ *
+ * @fyp: The parser
+ *
+ * Returns:
+ * A pointer to the checkpoint, or NULL in case of an error
+ */
+struct fy_parser_checkpoint *
+fy_parser_checkpoint_create(struct fy_parser *fyp)
+	FY_EXPORT;
+
+/**
+ * fy_parser_checkpoint_destroy() - Destroy a parser checkpoint
+ *
+ * Destroy a checkpoint created earlier via fy_parser_checkpoint_create().
+ *
+ * @fypchk: The checkpoint to destroy
+ */
+void
+fy_parser_checkpoint_destroy(struct fy_parser_checkpoint *fypchk)
+	FY_EXPORT;
+
+/**
+ * fy_parser_rollback() - Roll back the parser to a checkpoint
+ *
+ * Roll back the parser state to a previously created checkpoint. This allows
+ * you to revert the parser to an earlier state and re-parse from that point.
+ * The checkpoint remains valid after rollback and can be used again or
+ * destroyed via fy_parser_checkpoint_destroy().
+ *
+ * @fyp: The parser
+ * @fypc: The checkpoint to roll back to
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_parser_rollback(struct fy_parser *fyp, struct fy_parser_checkpoint *fypc)
 	FY_EXPORT;
 
 #ifdef __cplusplus

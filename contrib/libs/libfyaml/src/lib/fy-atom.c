@@ -23,6 +23,18 @@
 
 #include "fy-parse.h"
 #include "fy-doc.h"
+#include "fy-input.h"
+
+#include "fy-atom.h"
+
+const char *fy_atom_data(const struct fy_atom *atom)
+{
+	if (!atom)
+		return NULL;
+
+	return (const char *)fy_input_start(atom->fyi) + atom->start_mark.input_pos;
+}
+
 
 struct fy_atom *fy_reader_fill_atom(struct fy_reader *fyr, int advance, struct fy_atom *handle)
 {
@@ -40,21 +52,20 @@ struct fy_atom *fy_reader_fill_atom(struct fy_reader *fyr, int advance, struct f
 
 int fy_reader_advance_mark(struct fy_reader *fyr, int advance, struct fy_mark *m)
 {
-	int i, c, tabsize;
+	int c, tabsize, w;
 	bool is_line_break;
 
 	tabsize = fy_reader_tabsize(fyr);
-	i = 0;
 	while (advance-- > 0) {
-		c = fy_reader_peek_at(fyr, i++);
+		c = fy_reader_peek_at_offset_width(fyr, m->input_pos, &w);
 		if (c == -1)
 			return -1;
 		m->input_pos += fy_utf8_width(c);
 
 		/* first check for CR/LF */
-		if (c == '\r' && fy_reader_peek_at(fyr, i) == '\n') {
+		if (c == '\r' &&
+			fy_reader_peek_at_offset(fyr, m->input_pos + (size_t)w) == '\n') {
 			m->input_pos++;
-			i++;
 			is_line_break = true;
 		} else if (fy_reader_is_lb(fyr, c))
 			is_line_break = true;
@@ -103,7 +114,7 @@ struct fy_atom *fy_reader_fill_atom_at(struct fy_reader *fyr, int advance, int c
 	struct fy_mark start_mark, end_mark;
 	int rc;
 
-	if (!fyr || !handle)
+	if (!fyr || !handle || !fyr->current_input)
 		return NULL;
 
 	/* start mark */
@@ -220,25 +231,6 @@ _fy_atom_iter_add_chunk_copy(struct fy_atom_iter *iter, const char *str, size_t 
 	return 0;
 }
 
-/* keep it around without a warning even though it's unused */
-static int
-_fy_atom_iter_add_utf8(struct fy_atom_iter *iter, int c)
-	FY_ATTRIBUTE(__unused__);
-
-static int
-_fy_atom_iter_add_utf8(struct fy_atom_iter *iter, int c)
-{
-	char buf[FY_UTF8_FORMAT_BUFMIN];
-	char *e;
-
-	/* only fails if invalid utf8 */
-	e = fy_utf8_put(buf, sizeof(buf), c);
-	if (!e)
-		return -1;
-
-	return _fy_atom_iter_add_chunk_copy(iter, buf, e - buf);
-}
-
 /* optimized linebreaks */
 static int
 _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
@@ -264,7 +256,6 @@ _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
 #ifndef DEBUG_CHUNK
 #define fy_atom_iter_add_chunk _fy_atom_iter_add_chunk
 #define fy_atom_iter_add_chunk_copy _fy_atom_iter_add_chunk_copy
-#define fy_atom_iter_add_utf8 _fy_atom_iter_add_utf8
 #define fy_atom_iter_add_lb _fy_atom_iter_add_lb
 #else
 #define fy_atom_iter_add_chunk(_iter, _str, _len) \
@@ -301,12 +292,6 @@ _fy_atom_iter_add_lb(struct fy_atom_iter *iter, int c)
 		} \
 		__ret; \
 	})
-#define fy_atom_iter_add_utf8(_iter, _c) \
-	({ \
-		int __c = (_c); \
-		fprintf(stderr, "%s:%d utf8 %d\n", __func__, __LINE__, __c); \
-		_fy_atom_iter_add_utf8((_iter), (_c)); \
-	})
 #define fy_atom_iter_add_lb(_iter, _c) \
 	({ \
 		int __c = (_c); \
@@ -321,18 +306,18 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 {
 	const struct fy_atom *atom = iter->atom;
 	const char *s, *e, *ss;
-	int col, c, w, ts, cws, advws;
+	int col, c, cn, w, wn, ts, cws, advws;
 	bool last_was_ws, is_block;
 	int lastc;
 
 	s = line_start;
 	e = line_start + len;
 
-	is_block = atom->style == FYAS_LITERAL || atom->style == FYAS_FOLDED;
+	is_block = fy_atom_style_is_block(atom->style);
 
 	/* short circuit non multiline, non ws atoms */
 	if ((atom->direct_output && !atom->has_lb && !atom->has_ws) ||
-	    atom->style == FYAS_DOUBLE_QUOTED_MANUAL) {
+	    (atom->style & FYAS_MANUAL_MARK)) {
 		li->start = s;
 		li->end = e;
 		li->nws_start = s;
@@ -433,6 +418,17 @@ fy_atom_iter_line_analyze(struct fy_atom_iter *iter, struct fy_atom_iter_line_in
 				li->nws_end = ss;
 				last_was_ws = true;
 			}
+
+#if defined(DEBUG_CHUNK)
+			/* special CR/LF handling */
+			if (c == '\r') {
+				cn = ss < e ? fy_utf8_get(ss + w, (e - ss - w), &wn) : FYUG_EOF;
+				if (cn == '\n') {
+					ss += w;
+					w = wn;
+				}
+			}
+#endif
 
 		} else if (fy_is_space(c)) {
 
@@ -593,6 +589,17 @@ do_nws:
 			li->trailing_breaks_ws = true;
 
 		if (fy_is_lb_m(c, atom->lb_mode)) {
+			/* special CRLF handling */
+			if (c == '\r') {
+				cn = ss < e ? fy_utf8_get(ss + w, (e - ss - w), &wn) : FYUG_EOF;
+				if (cn == '\n') {
+#if defined(DEBUG_CHUNK)
+					fprintf(stderr, "%s:%d trailing CRLF\n", __FILE__, __LINE__);
+#endif
+					ss += w;
+					w = wn;
+				}
+			}
 			li->trailing_breaks++;
 			col = 0;
 		} else {
@@ -642,7 +649,7 @@ void fy_atom_iter_start(const struct fy_atom *atom, struct fy_atom_iter *iter)
 	iter->chomp = atom->increment;
 
 	/* default tab size is 8 */
-	iter->tabsize = atom->tabsize ? atom->tabsize: 8;
+	iter->tabsize = atom->tabsize ? atom->tabsize : 8;
 
 	memset(iter->li, 0, sizeof(iter->li));
 	li = &iter->li[1];
@@ -704,6 +711,9 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 
 	/* scan next line (special handling for '\r\n') */
 	ss = li->end;
+	if (!ss)
+		return NULL;
+
 	if (ss < iter->e) {
 		if (*ss == '\r' && (ss + 1) < iter->e && ss[1] == '\n')
 			ss += 2;
@@ -720,7 +730,7 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 		nli = NULL;
 
 	/* for quoted, output the white space start */
-	if (atom->style == FYAS_SINGLE_QUOTED || atom->style == FYAS_DOUBLE_QUOTED) {
+	if (fy_atom_style_is_quoted(atom->style)) {
 		li->s = li->first ? li->start : li->nws_start;
 		li->e = li->last ? li->end : li->nws_end;
 
@@ -728,7 +738,7 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 		if (li->empty && li->first && li->last && !iter->single_line)
 			li->s = li->e;
 
-	} else if (atom->style == FYAS_LITERAL || atom->style == FYAS_FOLDED) {
+	} else if (fy_atom_style_is_block(atom->style)) {
 		li->s = li->chomp_start;
 		li->e = li->end;
 		if (li->empty && li->first && li->last)
@@ -759,11 +769,6 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 	case FYAS_URI:
 		li->need_nl = !li->last && li->empty;
 		li->need_sep = !li->need_nl && nli && !nli->empty;
-		break;
-
-	case FYAS_DOUBLE_QUOTED_MANUAL:
-		li->need_nl = false;
-		li->need_sep = false;
 		break;
 
 	case FYAS_COMMENT:
@@ -804,7 +809,37 @@ fy_atom_iter_line(struct fy_atom_iter *iter)
 			break;
 		li->need_sep = nli && !nli->indented && !nli->empty;
 		break;
+
+	case FYAS_PLAIN_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_SINGLE_QUOTED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_DOUBLE_QUOTED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_LITERAL_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
+	case FYAS_FOLDED_MANUAL:
+		li->need_nl = false;
+		li->need_sep = false;
+		break;
+
 	default:
+		if (atom->style & FYAS_MANUAL_MARK) {
+			li->need_nl = false;
+			li->need_sep = false;
+		}
 		break;
 	}
 
@@ -817,13 +852,13 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 	const struct fy_atom *atom = iter->atom;
 	const struct fy_atom_iter_line_info *li;
 	const char *s, *e, *t;
-	int value, code_length, rlen, ret;
+	int value, code_length, ret;
 	uint8_t code[4], *tt;
 	int j, pending_nl;
 	int *pending_lb = NULL, *pending_lb_new = NULL;
 	int pending_lb_size = 0;
 	enum fy_utf8_escape esc_mode;
-	size_t i;
+	size_t rlen, i;
 
 	/* done? */
 	li = fy_atom_iter_line(iter);
@@ -869,11 +904,11 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 
 			s = t;
 			/* next character single quote too */
-			if ((e - s) >= 2 && s[1] == '\'')
+			if ((e - s) >= 2 && s[1] == '\'') {
 				fy_atom_iter_add_chunk(iter, s, 1);
-
-			/* skip over this single quote char */
-			s++;
+				s += 2;	/* skip over the two single quotes */
+			} else
+				s++;	/* skip over this single quote char */
 		}
 		break;
 
@@ -943,12 +978,18 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 		}
 		break;
 
+	case FYAS_PLAIN_MANUAL:
+	case FYAS_SINGLE_QUOTED_MANUAL:
 	case FYAS_DOUBLE_QUOTED_MANUAL:
+	case FYAS_LITERAL_MANUAL:
+	case FYAS_FOLDED_MANUAL:
 		/* manual scalar just goes out */
-		ret = fy_atom_iter_add_chunk(iter, s, e - s);
-		if (ret)
-			goto out;
-		s = e;
+		if (s < e) {
+			ret = fy_atom_iter_add_chunk(iter, s, e - s);
+			if (ret)
+				goto out;
+			s = e;
+		}
 		break;
 
 	default:
@@ -965,7 +1006,7 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 			case FYAC_CLIP:
 
 				pending_lb_size = 16;
-				pending_lb = FY_ALLOCA(sizeof(*pending_lb) * pending_lb_size);
+				pending_lb = alloca(sizeof(*pending_lb) * pending_lb_size);
 
 				pending_nl = 0;
 				if (!li->empty) {
@@ -987,7 +1028,7 @@ fy_atom_iter_format(struct fy_atom_iter *iter)
 					}
 					if (li->lb_end && !iter->empty) {
 						if (pending_nl >= pending_lb_size) {
-							pending_lb_new = FY_ALLOCA(sizeof(*pending_lb) * pending_lb_size * 2);
+							pending_lb_new = alloca(sizeof(*pending_lb) * pending_lb_size * 2);
 							memcpy(pending_lb_new, pending_lb, sizeof(*pending_lb) * pending_lb_size);
 							pending_lb_size *= 2;
 							pending_lb = pending_lb_new;
@@ -1162,7 +1203,7 @@ fy_atom_iter_chunk_next(struct fy_atom_iter *iter, const struct fy_iter_chunk *c
 	return ic;
 }
 
-int fy_atom_format_text_length(struct fy_atom *atom)
+ssize_t fy_atom_format_text_length(struct fy_atom *atom)
 {
 	struct fy_atom_iter iter;
 	const struct fy_iter_chunk *ic;
@@ -1173,7 +1214,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 		return -1;
 
 	if (atom->storage_hint_valid)
-		return atom->storage_hint;
+		return (ssize_t)atom->storage_hint;
 
 	len = 0;
 	fy_atom_iter_start(atom, &iter);
@@ -1183,7 +1224,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 	fy_atom_iter_finish(&iter);
 
 	/* something funky going on here */
-	if ((int)len < 0)
+	if ((ssize_t)len < 0)
 		return -1;
 
 	if (ret != 0)
@@ -1191,7 +1232,7 @@ int fy_atom_format_text_length(struct fy_atom *atom)
 
 	atom->storage_hint = (size_t)len;
 	atom->storage_hint_valid = true;
-	return (int)len;
+	return (ssize_t)len;
 }
 
 const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
@@ -1209,9 +1250,11 @@ const char *fy_atom_format_text(struct fy_atom *atom, char *buf, size_t maxsz)
 	fy_atom_iter_start(atom, &iter);
 	ic = NULL;
 	while ((ic = fy_atom_iter_chunk_next(&iter, ic, &ret)) != NULL) {
-		/* must fit */
-		if ((size_t)(e - s) < ic->len)
-			return NULL;
+		/* must fit (something is really off) */
+		if ((size_t)(e - s) < ic->len) {
+			ret = -1;
+			break;
+		}
 		memcpy(s, ic->str, ic->len);
 		s += ic->len;
 	}
@@ -1229,8 +1272,8 @@ int fy_atom_format_utf8_length(struct fy_atom *atom)
 	struct fy_atom_iter iter;
 	const struct fy_iter_chunk *ic;
 	const char *s, *e;
-	size_t len;
-	int ret, rem, run, w;
+	size_t len, run, rem;
+	int ret, w;
 
 	if (!atom)
 		return -1;
@@ -1244,7 +1287,7 @@ int fy_atom_format_utf8_length(struct fy_atom *atom)
 		e = s + ic->len;
 
 		/* add the remainder */
-		run = (e - s) > rem ? rem : (e - s);
+		run = (size_t)(e - s) > rem ? rem : (size_t)(e - s);
 		s += run;
 
 		/* count utf8 characters */
@@ -1345,10 +1388,13 @@ int fy_atom_iter_getc(struct fy_atom_iter *iter)
 		return -1;
 
 	/* first try the pushed ungetc */
-	if (iter->unget_c != -1) {
+	if (iter->unget_c >= 0) {
 		c = iter->unget_c;
+		/* unmatched getc/ungetc */
+		if (fy_utf8_width(c) != 1)
+			return -1;
 		iter->unget_c = -1;
-		return c & 0xff;
+		return c;
 	}
 
 	/* read first octet */
@@ -1361,17 +1407,17 @@ int fy_atom_iter_getc(struct fy_atom_iter *iter)
 
 int fy_atom_iter_ungetc(struct fy_atom_iter *iter, int c)
 {
-	if (!iter)
+	if (!iter || c >= 0x80)
 		return -1;
 
-	if (iter->unget_c != -1)
+	if (iter->unget_c >= 0)
 		return -1;
-	if (c == -1) {
+	if (c < 0) {
 		iter->unget_c = -1;
 		return 0;
 	}
-	iter->unget_c = c & 0xff;
-	return c & 0xff;
+	iter->unget_c = c;
+	return c;
 }
 
 int fy_atom_iter_peekc(struct fy_atom_iter *iter)
@@ -1395,10 +1441,10 @@ int fy_atom_iter_utf8_get(struct fy_atom_iter *iter)
 		return -1;
 
 	/* first try the pushed ungetc */
-	if (iter->unget_c != -1) {
+	if (iter->unget_c >= 0) {
 		c = iter->unget_c;
 		iter->unget_c = -1;
-		return c & 0xff;
+		return c;
 	}
 
 	/* read first octet */
@@ -1431,11 +1477,11 @@ int fy_atom_iter_utf8_quoted_get(struct fy_atom_iter *iter, size_t *lenp, uint8_
 		return -1;
 
 	/* first try the pushed ungetc */
-	if (iter->unget_c != -1) {
+	if (iter->unget_c >= 0) {
 		c = iter->unget_c;
 		iter->unget_c = -1;
 		*lenp = 0;
-		return c & 0xff;
+		return c;
 	}
 
 	/* read first octet */
@@ -1455,7 +1501,7 @@ int fy_atom_iter_utf8_quoted_get(struct fy_atom_iter *iter, size_t *lenp, uint8_
 		nread = fy_atom_iter_read(iter, buf + 1, w - 1);
 		if (nread != (w - 1)) {
 			if (nread != -1 && nread < (w - 1))
-				*lenp += nread;
+				*lenp = nread;
 			return 0;
 		}
 	}
@@ -1472,12 +1518,17 @@ int fy_atom_iter_utf8_quoted_get(struct fy_atom_iter *iter, size_t *lenp, uint8_
 
 int fy_atom_iter_utf8_unget(struct fy_atom_iter *iter, int c)
 {
-	if (iter->unget_c != -1)
+	if (!iter)
 		return -1;
-	if (c == -1) {
+
+	if (iter->unget_c >= 0)
+		return -1;
+	if (c < 0) {
 		iter->unget_c = -1;
 		return 0;
 	}
+	if (!fy_utf8_is_valid(c))
+		return -1;
 	iter->unget_c = c;
 	return c;
 }
@@ -1567,21 +1618,21 @@ bool fy_atom_is_number(struct fy_atom *atom)
 	fy_atom_iter_start(atom, &iter);
 
 	/* skip minus sign if it's there */
-	c = fy_atom_iter_peekc(&iter);
+	c = fy_atom_iter_utf8_peek(&iter);
 	if (c == '-') {
-		(void)fy_atom_iter_getc(&iter);
+		(void)fy_atom_iter_utf8_get(&iter);
 		len++;
 	}
 
 	/* skip digits */
 	first_zero = false;
 	dec = 0;
-	while ((c = fy_atom_iter_peekc(&iter)) >= 0 && isdigit(c)) {
+	while ((c = fy_atom_iter_utf8_peek(&iter)) >= 0 && fy_is_digit(c)) {
 		if (dec == 0 && c == '0')
 			first_zero = true;
 		else if (dec == 1 && first_zero)
 			goto err_out;	/* 0[0-9] is bad */
-		(void)fy_atom_iter_getc(&iter);
+		(void)fy_atom_iter_utf8_get(&iter);
 		dec++;
 		len++;
 	}
@@ -1592,14 +1643,14 @@ bool fy_atom_is_number(struct fy_atom *atom)
 
 	fract = 0;
 	/* dot? */
-	c = fy_atom_iter_peekc(&iter);
+	c = fy_atom_iter_utf8_peek(&iter);
 	if (c == '.') {
 
-		(void)fy_atom_iter_getc(&iter);
+		(void)fy_atom_iter_utf8_get(&iter);
 		len++;
 		/* skip decimal part */
-		while ((c = fy_atom_iter_peekc(&iter)) >= 0 && isdigit(c)) {
-			(void)fy_atom_iter_getc(&iter);
+		while ((c = fy_atom_iter_utf8_peek(&iter)) >= 0 && fy_is_digit(c)) {
+			(void)fy_atom_iter_utf8_get(&iter);
 			len++;
 			fract++;
 		}
@@ -1611,21 +1662,21 @@ bool fy_atom_is_number(struct fy_atom *atom)
 
 	enot = 0;
 	/* scientific notation */
-	c = fy_atom_iter_peekc(&iter);
+	c = fy_atom_iter_utf8_peek(&iter);
 	if (c == 'e' || c == 'E') {
-		(void)fy_atom_iter_getc(&iter);
+		(void)fy_atom_iter_utf8_get(&iter);
 		len++;
 
 		/* skip sign if it's there */
-		c = fy_atom_iter_peekc(&iter);
+		c = fy_atom_iter_utf8_peek(&iter);
 		if (c == '+' || c == '-') {
-			(void)fy_atom_iter_getc(&iter);
+			(void)fy_atom_iter_utf8_get(&iter);
 			len++;
 		}
 
 		/* skip exponent part */
-		while ((c = fy_atom_iter_peekc(&iter)) >= 0 && isdigit(c)) {
-			(void)fy_atom_iter_getc(&iter);
+		while ((c = fy_atom_iter_utf8_peek(&iter)) >= 0 && fy_is_digit(c)) {
+			(void)fy_atom_iter_utf8_get(&iter);
 			len++;
 			enot++;
 		}
@@ -1634,7 +1685,7 @@ bool fy_atom_is_number(struct fy_atom *atom)
 			goto err_out;
 	}
 
-	c = fy_atom_iter_peekc(&iter);
+	c = fy_atom_iter_utf8_peek(&iter);
 
 	fy_atom_iter_finish(&iter);
 
@@ -1733,8 +1784,13 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 	if (l->lineno > 0 && iter->rs >= iter->ae)
 		return NULL;
 
+	/* this may happen on illegal utf8 */
+	if (!iter->is)
+		return NULL;
+
+	c = -1;
 	while (s > iter->is) {
-		c = fy_utf8_get_right(iter->is, (int)(s - iter->is), &w);
+		c = fy_utf8_get_right(iter->is, (size_t)(s - iter->is), &w);
 		if (c <= 0 || fy_is_lb_m(c, iter->atom->lb_mode))
 			break;
 		s -= w;
@@ -1748,7 +1804,7 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 
 	/* track until the start of the content */
 	while (s < iter->as) {
-		c = fy_utf8_get(s, (int)(iter->ae - s), &w);
+		c = fy_utf8_get(s, (size_t)(iter->ae - s), &w);
 		/* we should never hit that */
 		if (c <= 0)
 			return NULL;
@@ -1775,7 +1831,7 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 
 	/* track until the end of the content (or lb) */
 	while (s < iter->ae) {
-		c = fy_utf8_get(s, (int)(iter->ae - s), &w);
+		c = fy_utf8_get(s, (size_t)(iter->ae - s), &w);
 		/* we should never hit that */
 		if (c <= 0)
 			return NULL;
@@ -1803,7 +1859,7 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 	/* if the stop was due to end of the atom */
 	if (s >= iter->ae) {
 		while (s < iter->ie) {
-			c = fy_utf8_get(s, (int)(iter->ie - s), &w);
+			c = fy_utf8_get(s, (size_t)(iter->ie - s), &w);
 			/* just end of input */
 			if (c <= 0)
 				break;
@@ -1829,9 +1885,10 @@ fy_atom_raw_line_iter_next(struct fy_atom_raw_line_iter *iter)
 	l->line_count = count;
 
 	if (fy_is_lb_m(c, iter->atom->lb_mode)) {
+
 		s += w;
 		/* special case for MSDOS */
-		if (c == '\r' && (s < iter->ie && s[1] == '\n'))
+		if (c == '\r' && (s + 1 < iter->ie && s[1] == '\n'))
 			s++;
 		/* len_lb includes the lb */
 		l->line_len_lb = (size_t)(s - l->line_start);
@@ -1874,4 +1931,302 @@ void fy_atom_raw_line_iter_start(const struct fy_atom *atom,
 void fy_atom_raw_line_iter_finish(struct fy_atom_raw_line_iter *iter)
 {
 	/* nothing */
+}
+
+/* returns the line of the atom, marking exactly where the atom is */
+const char *fy_atom_lines_containing(struct fy_atom *atom, size_t *lenp)
+{
+	const struct fy_raw_line *l, *ln;
+	struct fy_atom_raw_line_iter iter;
+	bool first_line, last_line;
+	const char *start, *end;
+
+	if (!atom || !lenp) {
+		if (lenp)
+			*lenp = 0;
+		return NULL;
+	}
+
+	start = end = NULL;
+
+	fy_atom_raw_line_iter_start(atom, &iter);
+	l = fy_atom_raw_line_iter_next(&iter);
+	for (; l != NULL; l = ln) {
+		/* get the next too */
+		ln = fy_atom_raw_line_iter_next(&iter);
+
+		first_line = l->lineno <= 1;
+		last_line = ln == NULL;
+
+		if (first_line)
+			start = l->line_start;
+		if (last_line)
+			end = l->line_start + l->line_count;
+	}
+	fy_atom_raw_line_iter_finish(&iter);
+
+	*lenp = end - start;
+	return start;
+}
+
+unsigned int
+fy_atom_text_analyze(struct fy_atom *handle, enum fy_atom_style style, int *maxspanp, int *maxcolp)
+{
+	unsigned int flags = 0;
+	int c, cn, cnn, cp, col;
+	uint8_t col0si, col0ei;	/* mask for --- ... at indent 0 */
+	int span, maxspan, maxcol;
+	struct fy_atom_iter iter;
+
+	if (maxspanp)
+		*maxspanp = 0;
+	if (maxcolp)
+		*maxcolp = 0;
+
+	flags = FYTTAF_TEXT_TOKEN;
+
+	/* hardwired and fast for regular plain scalars */
+	if (style == FYAS_PLAIN && handle->storage_hint_valid &&
+	    handle->direct_output && !handle->high_ascii &&
+	    !handle->has_lb && !handle->has_ws && !handle->empty) {
+
+		flags |= FYTTAF_DIRECT_OUTPUT;
+
+		maxcol = (int)handle->storage_hint;
+		maxspan = maxcol - 1;
+		flags |=
+			FYTTAF_DIRECT_OUTPUT |
+			FYTTAF_CAN_BE_SIMPLE_KEY |
+			FYTTAF_CAN_BE_PLAIN |
+			FYTTAF_CAN_BE_SINGLE_QUOTED |
+			FYTTAF_CAN_BE_DOUBLE_QUOTED |
+			FYTTAF_CAN_BE_LITERAL |
+			FYTTAF_CAN_BE_PLAIN_FLOW |
+			FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
+
+		goto done;
+	}
+
+	/* can this token be a simple key initial condition */
+	if (!fy_atom_style_is_block(style) && style != FYAS_URI)
+		flags |= FYTTAF_CAN_BE_SIMPLE_KEY;
+
+	/* can this token be directly output initial condition */
+	if (!fy_atom_style_is_block(style))
+		flags |= FYTTAF_DIRECT_OUTPUT;
+
+	fy_atom_iter_start(handle, &iter);
+
+	col = 0;
+	maxcol = 0;
+	maxspan = 0;
+	span = 0;
+
+	/* get first character */
+	cn = fy_atom_iter_utf8_get(&iter);
+	if (cn < 0) {
+		/* empty? */
+		flags |= FYTTAF_SIZE0 | FYTTAF_EMPTY | FYTTAF_CAN_BE_UNQUOTED_PATH_KEY | FYTTAF_CAN_BE_SIMPLE_KEY;
+		goto out;
+	}
+
+	flags |= FYTTAF_CAN_BE_PLAIN |
+		 FYTTAF_CAN_BE_SINGLE_QUOTED |
+		 FYTTAF_CAN_BE_DOUBLE_QUOTED |
+		 FYTTAF_CAN_BE_LITERAL |
+		 FYTTAF_CAN_BE_FOLDED |
+		 FYTTAF_CAN_BE_PLAIN_FLOW |
+		 FYTTAF_CAN_BE_UNQUOTED_PATH_KEY |
+		 FYTTAF_ALL_WS_LB |
+		 FYTTAF_ALL_PRINT_ASCII |
+		 FYTTAF_EMPTY;
+
+	col0si = col0ei = 0;
+
+	/* disable folded right off the bat, it's a pain */
+	flags &= ~FYTTAF_CAN_BE_FOLDED;
+
+	/* plain scalars can't start with any indicator (or space/lb) */
+	if ((flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW))) {
+		if (fy_is_start_indicator(cn) || fy_atom_is_lb(handle, cn) || fy_is_ws(cn))
+			flags &= ~(FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW);
+	}
+
+	/* plain scalars in flow mode can't start with a flow indicator */
+	if ((flags & FYTTAF_CAN_BE_PLAIN_FLOW) &&
+		fy_is_flow_indicator(cn))
+		flags &= ~FYTTAF_CAN_BE_PLAIN_FLOW;
+
+	if ((flags & (FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW))) {
+		cnn = fy_atom_iter_utf8_peek(&iter);
+		if (fy_is_blankz_m(cnn, fy_atom_lb_mode(handle)) && fy_is_indicator_before_space(cn))
+			flags &= ~(FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW);
+	}
+
+	/* plain unquoted path keys can only start with [a-zA-Z_] */
+	if ((flags & FYTTAF_CAN_BE_UNQUOTED_PATH_KEY) &&
+		!fy_is_first_alpha(cn))
+		flags &= ~FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
+
+	/* if it starts with white space can't be a plain */
+	if (fy_is_ws(cn)) {
+		flags |= FYTTAF_HAS_START_WS;
+		flags &= ~(FYTTAF_CAN_BE_PLAIN |
+			   FYTTAF_CAN_BE_PLAIN_FLOW);
+	}
+
+	cp = -1;
+	for (c = cn; c >= 0; cp = c, c = cn) {
+
+		if (col <= 2) {
+			if (cn == '-') {
+				col0si |= (uint8_t)1 << col;
+				if (col0si == 7)
+					flags |= FYTTAF_HAS_START_IND | FYTTAF_QUOTE_AT_0;
+			} else if (cn == '.') {
+				col0ei |= (uint8_t)1 << col;
+				if (col0ei == 7)
+					flags |= FYTTAF_HAS_END_IND | FYTTAF_QUOTE_AT_0;
+			}
+		}
+
+		/* can be -1 on end */
+		cn = fy_atom_iter_utf8_get(&iter);
+
+		/* zero can't be output, only in double quoted mode */
+		if (c == 0) {
+			flags &= ~(FYTTAF_DIRECT_OUTPUT |
+				   FYTTAF_CAN_BE_PLAIN |
+				   FYTTAF_CAN_BE_SINGLE_QUOTED |
+				   FYTTAF_CAN_BE_LITERAL |
+				   FYTTAF_CAN_BE_FOLDED |
+				   FYTTAF_CAN_BE_PLAIN_FLOW |
+				   FYTTAF_CAN_BE_UNQUOTED_PATH_KEY |
+				   FYTTAF_ALL_WS_LB |
+				   FYTTAF_ALL_PRINT_ASCII);
+			flags |= FYTTAF_CAN_BE_DOUBLE_QUOTED;
+			flags &= ~FYTTAF_EMPTY;
+			flags |= FYTTAF_HAS_ZERO;
+		} else if (fy_is_ws(c)) {
+
+			flags |= FYTTAF_HAS_WS;
+			if (fy_is_ws(cn)) {
+				flags |= FYTTAF_HAS_CONSECUTIVE_WS;
+
+				/* on a manual ' style we can't have linebreak and then consecutive ws */
+				if (style == FYAS_SINGLE_QUOTED_MANUAL && fy_atom_is_lb(handle, cp))
+					flags &= ~FYTTAF_CAN_BE_SINGLE_QUOTED;
+			}
+
+			/* non printable ascii */
+			flags &= ~FYTTAF_ALL_PRINT_ASCII;
+
+		} else if (fy_atom_is_lb(handle, c)) {
+
+			flags |= FYTTAF_HAS_LB;
+			if (fy_atom_is_lb(handle, cn))
+				flags |= FYTTAF_HAS_CONSECUTIVE_LB;
+
+			/* non printable ascii */
+			flags &= ~FYTTAF_ALL_PRINT_ASCII;
+			flags &= ~FYTTAF_EMPTY;
+
+			/* only non linebreaks can be simple keys */
+			flags &= ~FYTTAF_CAN_BE_SIMPLE_KEY;
+
+			/* anything with linebreaks, can't be direct */
+			flags &= ~FYTTAF_DIRECT_OUTPUT;
+
+			if (c != '\n')
+				flags |= FYTTAF_HAS_NON_NL_LB;
+		} else {
+			flags &= ~FYTTAF_EMPTY;
+			flags &= ~FYTTAF_ALL_WS_LB;
+			/* out of our comfort zone */
+			if (c < '!' || c > '~')
+				flags &= ~FYTTAF_ALL_PRINT_ASCII;
+		}
+
+		if ((flags & FYTTAF_CAN_BE_UNQUOTED_PATH_KEY) && !fy_is_alnum(c))
+			flags &= ~FYTTAF_CAN_BE_UNQUOTED_PATH_KEY;
+
+		/* illegal plain combination */
+		if ((flags & FYTTAF_CAN_BE_PLAIN) &&
+			((c == ':' && fy_is_blankz_m(cn, fy_atom_lb_mode(handle))) ||
+			 (fy_is_blankz_m(c, fy_atom_lb_mode(handle)) && cn == '#') ||
+			 (cp < 0 && c == '#' && cn < 0) ||
+			 !fy_is_print(c))) {
+			flags &= ~(FYTTAF_CAN_BE_PLAIN |
+				   FYTTAF_CAN_BE_PLAIN_FLOW);
+		}
+
+		/* illegal plain flow combination */
+		if ((flags & FYTTAF_CAN_BE_PLAIN_FLOW) &&
+			(fy_is_flow_indicator(c) || (c == ':' && fy_is_flow_indicator(cn))))
+			flags &= ~FYTTAF_CAN_BE_PLAIN_FLOW;
+
+		/* non printable characters, turn off these styles */
+		if (!fy_is_print(c)) {
+			flags &= ~(FYTTAF_CAN_BE_SINGLE_QUOTED | FYTTAF_CAN_BE_LITERAL |
+				   FYTTAF_CAN_BE_FOLDED);
+			flags |= FYTTAF_HAS_NON_PRINT;
+		}
+
+		/* if there's an escape, it can't be direct */
+		if ((flags & FYTTAF_DIRECT_OUTPUT) &&
+		    ((style == FYAS_URI && c == '%') ||
+		     (style == FYAS_SINGLE_QUOTED && c == '\'') ||
+		     (style == FYAS_DOUBLE_QUOTED && c == '\\')))
+			flags &= ~FYTTAF_DIRECT_OUTPUT;
+
+		if (cn < 0 || !c || fy_atom_is_lb(handle, c) || fy_is_ws(c)) {
+			if (span > maxspan)
+				maxspan = span;
+			span = 0;
+		} else
+			span++;
+
+		if (fy_atom_is_lb(handle, c)) {
+			if (col > maxcol)
+				maxcol = col;
+			col = 0;
+			col0si = col0ei = 0;
+		} else
+			col++;
+
+		if (fy_is_any_lb(c))
+			flags |= FYTTAF_HAS_ANY_LB;
+
+		/* last character */
+		if (cn < 0) {
+			/* if ends with whitespace or linebreak, or : can't be plain */
+			if (fy_is_ws(c) || fy_atom_is_lb(handle, c) || c == ':') {
+				flags &= ~(FYTTAF_CAN_BE_PLAIN |
+					   FYTTAF_CAN_BE_PLAIN_FLOW);
+				if (c == ':')
+					flags |= FYTTAF_ENDS_WITH_COLON;
+			}
+		}
+	}
+
+	if (col > maxcol)
+		maxcol = col;
+	if (span > maxspan)
+		maxspan = span;
+
+out:
+	/* if it's got nothing, it can be anything */
+	if (flags & FYTTAF_SIZE0)
+		flags |= FYTTAF_CAN_BE_PLAIN | FYTTAF_CAN_BE_PLAIN_FLOW |
+			 FYTTAF_CAN_BE_SINGLE_QUOTED | FYTTAF_CAN_BE_DOUBLE_QUOTED |
+			 FYTTAF_CAN_BE_LITERAL |  FYTTAF_CAN_BE_FOLDED;
+
+	fy_atom_iter_finish(&iter);
+
+done:
+	if (maxspanp)
+		*maxspanp = maxspan;
+	if (maxcolp)
+		*maxcolp = maxcol;
+	return flags;
 }
