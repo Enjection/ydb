@@ -785,7 +785,7 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
             observer = ReadSetGate.Get();
         }
         if (observer) {
-            ObservedRuntime = &runtime;
+            ObserverInstall = MakeHolder<TObserverInstall>(&runtime);
             for (ui32 node = 0; node < runtime.GetNodeCount(); ++node) {
                 runtime.GetAppData(node).PathFootprintObserver = observer;
             }
@@ -839,15 +839,19 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     SetSplitMergePartCountLimit(&runtime, -1);
 }
 
+NSchemeShardUT_Private::TTestEnv::TObserverInstall::~TObserverInstall() {
+    if (!Runtime) {
+        return;
+    }
+    for (ui32 node = 0; node < Runtime->GetNodeCount(); ++node) {
+        Runtime->GetAppData(node).PathFootprintObserver = nullptr;
+    }
+}
+
 NSchemeShardUT_Private::TTestEnv::~TTestEnv() {
     // The runtime outlives every TTestEnv (tests declare it first), and it
     // keeps draining actors after this point. Unpublish before the gate dies.
-    if (ObservedRuntime) {
-        for (ui32 node = 0; node < ObservedRuntime->GetNodeCount(); ++node) {
-            ObservedRuntime->GetAppData(node).PathFootprintObserver = nullptr;
-        }
-        ObservedRuntime = nullptr;
-    }
+    ObserverInstall.Reset();
 
     if (!ReadSetGate) {
         return;

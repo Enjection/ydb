@@ -136,7 +136,15 @@ namespace NSchemeShardUT_Private {
         // The runtime whose TAppData carries the observer below. Kept only so
         // the destructor can unpublish the pointer before the runtime, which
         // outlives every TTestEnv, drains its actors.
-        TTestActorRuntime* ObservedRuntime = nullptr;
+        // Owning the installation keeps TTestEnv movable: a moved-from env
+        // holds an empty holder and its destructor does nothing, while the
+        // live copy unpublishes exactly once.
+        struct TObserverInstall {
+            TTestActorRuntime* Runtime = nullptr;
+            explicit TObserverInstall(TTestActorRuntime* runtime) : Runtime(runtime) {}
+            ~TObserverInstall();
+        };
+        THolder<TObserverInstall> ObserverInstall;
         THolder<TReadSetGate> ReadSetGate;
 
     public:
@@ -146,6 +154,7 @@ namespace NSchemeShardUT_Private {
             TSchemeShardFactory ssFactory = &CreateFlatTxSchemeShard);
         TTestEnv(TTestActorRuntime& runtime, const TTestEnvOptions& opts,
             TSchemeShardFactory ssFactory = &CreateFlatTxSchemeShard, std::shared_ptr<NKikimr::NDataShard::IExportFactory> dsExportFactory = {});
+        TTestEnv(TTestEnv&&) = default;
         ~TTestEnv();
 
         TFakeHiveState::TPtr GetHiveState() const;
