@@ -1315,3 +1315,97 @@ The database test also captures tenant initialization, which creates the default
 resource pool, so its schemeshard blobs are expected to change exactly the way
 the resource-pool row above says. Regenerate them before this reaches a release
 branch.
+
+## S8 — read-set coverage gate for every SchemeShard suite
+
+Executed partly by the s8gate agent (three API drops) and finished by the
+team lead. Commits:
+
+- `516ee6ddcee` test: read-set coverage gate available to all schemeshard suites
+  — `ut_helpers/path_footprint_gate.{h,cpp}` (`TReadSetGate`, predicate moved
+  out of ut_path_footprint), `TTestEnvOptions::AssertReadSetCoverage`
+  (default **true**), env escape hatch `YDB_SCHEMESHARD_READSET_GATE=0`.
+  Failure mechanism: violations are accumulated per part and reported from
+  `~TTestEnv` via `UNIT_FAIL_NONFATAL` ("read set escapes the path footprint:
+  ..."), so a test fails with the offending part op type and path without any
+  per-test edit; outside a running test case the report goes to Cerr only.
+  A user-supplied observer is chained behind the gate.
+- `a5c9dccf682` feat: footprint covers ttl tier storages and absolute backup
+  collection names — found by the gate in ut_olap / ut_backup_collection:
+  `CreateColumnTable_TierStorage`, `AlterColumnTable_TierStorage`,
+  `Implicit_AlterColumnTable_DroppedTiers`, plus absolute
+  `BackupCollection` name handling; gate predicate widened accordingly.
+- `3edd4ec1f21` feat: footprint marks implicit reads of backup, restore and
+  login sid removal — found in ut_backup / ut_restore / ut_login:
+  `Backup`/`Restore` run `CanBackupTable`, which walks the table's children;
+  `AlterLogin` RemoveUser/RemoveGroup scans the database subtree for owned or
+  ACL-referencing paths (`CanRemoveSid`, feature-flag gated).
+
+Suites run with the gate on (default), all green unless noted:
+
+- by s8gate: ut_base, ut_cdc_stream, ut_move, ut_consistent_copy_tables,
+  ut_index_build, ut_backup_collection, ut_backup, ut_export, ut_extsubdomain,
+  ut_full_backup, ut_login, ut_olap, ut_replication, ut_restore, ut_sequence,
+  ut_subdomain, ut_transfer, ut_view.
+- by team lead, rerun after the last extractor commit: ut_path_footprint +
+  ut_backup + ut_restore + ut_login → 900 OK, 1 TIMEOUT
+  (`TImportWithRebootsTests::ShouldSucceedOnSingleColumnTable+IsFs`, a
+  reboot-style import test, 277 s in a 631 s chunk; no gate message in its
+  logs; isolation rerun result recorded below).
+
+### S8 timeouts investigated: load, not the gate
+
+Batch 1 (15 suites at once) showed 5 TIMEOUTs in ut_index
+(`TAsyncIndexTests::*WithReboots`, 630 s chunk limit) and 1 in ut_restore
+(`TImportWithRebootsTests::ShouldSucceedOnSingleColumnTable+IsFs`). Controls:
+
+| run | Merge B0 | Merge B1 | Split B0 | Split B1 | Merge/Split PipeResets |
+|---|--:|--:|--:|--:|--:|
+| `main` alone (ya, JUnit) | 146.6 s | 139.1 s | 118.7 s | 116.5 s | 71.4 / 56.3 s |
+| branch alone, gate on (ya, JUnit) | 147.6 s | 140.2 s | 120.2 s | 115.2 s | 73.1 / 56.6 s |
+
+Branch overhead ≤ 1.3% on the heaviest reboot tests with the gate on. The
+timeouts reproduce only under machine load (parallel suites); a direct run of
+the test binaries outside ya is not usable as a control (DEBUG stderr ~1 GB
+each, I/O-bound, all three variants progress identically).
+Consequence: keep the gate default-on; rerun timed-out reboot chunks alone.
+
+### S8 defect found by batch 2: TTestEnv became non-movable
+
+`516ee6ddcee` added a `THolder<TReadSetGate>` member and a user-declared
+`~TTestEnv()`, which suppressed the implicit move constructor. Four suites
+return a `TTestEnv` by value from a helper (`ut_shred.cpp:36`,
+`ut_split_merge.cpp:1762`, `ut_topic_set_boundaries.cpp:90`,
+`ut_topic_splitmerge.cpp:95`) and stopped compiling ("call to
+implicitly-deleted copy constructor of 'TTestEnv'"). Fix (team lead): the
+observer installation became an RAII `TObserverInstall` held by `THolder`, and
+`TTestEnv(TTestEnv&&) = default` was declared, so a moved-from env unpublishes
+nothing and reports nothing while the live one does both exactly once.
+
+### S8 gate finding in ut_user_attributes: ApplyIf preconditions
+
+`TSchemeShardUserAttrsTest::UserConditionsAtCreateDropOps` and `VariousUse`
+failed the gate: MkDir/RmDir parts read a *sibling* directory by path id
+(`/MyRoot/DirA` while creating `/MyRoot/DirB`). That is
+`TSchemeShard::CheckApplyIf` (`schemeshard_impl.cpp:1585`) resolving
+`ApplyIf[i].PathId`, which every operation type may carry and which the
+thoughts document had already flagged as the one id-addressed input not yet
+extracted. Fix: a generic loop at the end of `ExtractPathRefs` emits
+`ApplyIf[{i}].PathId` as a `ById` Dependency ref for any op;
+`CanonicalizeToPaths` and `RelocatePaths` deliberately leave those refs alone
+(no name form; `StripSourceLocalPreconditions` is the consumer's tool). Pure
+test `ApplyIfPathIdsAreDependencies` added.
+
+### S8 suite matrix (gate on by default)
+
+| batch | suites | result |
+|---|---|---|
+| s8gate (18) | ut_base, ut_cdc_stream, ut_move, ut_consistent_copy_tables, ut_index_build, ut_backup_collection, ut_backup, ut_export, ut_extsubdomain, ut_full_backup, ut_login, ut_olap, ut_replication, ut_restore, ut_sequence, ut_subdomain, ut_transfer, ut_view | green after the two extractor commits (`a5c9dccf682`, `3edd4ec1f21`) |
+| recheck (4) | ut_path_footprint, ut_backup, ut_restore, ut_login | 900 OK, 1 load timeout (`TImportWithRebootsTests::ShouldSucceedOnSingleColumnTable+IsFs`), later 6 OK alone |
+| batch 1 (15) | ut_auditsettings, ut_bsvolume, ut_column_build, ut_compaction, ut_continuous_backup, ut_external_data_source, ut_external_table, ut_filestore, ut_generated_columns, ut_incremental_restore, ut_index, ut_resource_pool, ut_rtmr, ut_secret, ut_serverless | 322 OK, 5 load timeouts in ut_index (`TAsyncIndexTests::*WithReboots`), later 6 OK + 6 OK alone; main-vs-branch timing within 1.3% |
+| batch 2 (19) | ut_set_column_constraint, ut_shred, ut_split_merge, ut_stats, ut_streaming_query, ut_system_names, ut_sysview, ut_test_shard, ut_topic_cloud_events, ut_topic_set_boundaries, ut_topic_splitmerge, ut_truncate_table_simple, ut_ttl, ut_user_attributes, ut_background_cleaning, ut_failure_injection, ut_metrics, ut_partition_stats, ut_ru_calculator | first run: 4 suites failed to compile (TTestEnv non-movable, fixed in `f6fdf581312`); rerun: 900 OK, 2 gate findings in ut_user_attributes (ApplyIf, fixed below) |
+| skipped | all `*_reboots` suites, ut_login_large, ut_stats_bench | too slow for this pass; nothing suggests they behave differently |
+
+Opt-out list: **empty**. No suite needed `AssertReadSetCoverage(false)`.
+Allowlist in the gate predicate: none beyond the generic rule (entry path,
+ancestor of an entry, root/domain, write-set member).
