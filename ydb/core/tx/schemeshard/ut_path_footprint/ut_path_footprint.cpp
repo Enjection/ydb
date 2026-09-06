@@ -212,6 +212,49 @@ private:
     TVector<TString>* Sink;
 };
 
+////////////////////////////////////////////////////////////////////////////////
+// Read-set coverage (research plan §8.4). Every path a part's Propose()
+// resolves must be something the footprint already accounts for. The predicate
+// and its allowlist live in ut_helpers/path_footprint_gate.h, because TTestEnv
+// installs the same gate for every SchemeShard suite by default; this suite
+// pins it directly on a run whose op mix it controls.
+
+class TReadSetCollector: public TFootprintCollector {
+public:
+    // Redundant while the default TTestEnv gate is installed in front (the
+    // schemeshard asks the gate, not this collector), but it keeps the test
+    // self-sufficient under YDB_SCHEMESHARD_READSET_GATE=0.
+    bool WantReadSet() const override {
+        return true;
+    }
+};
+
+// Same accumulation the shared gate does: a part may legitimately read a path an
+// earlier part of the same transaction named (TPath::ResolveWithInactive).
+void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
+    TVector<TString> violations;
+    THashMap<ui64, TVector<TString>> byTx;
+    for (const auto& observed : parts) {
+        TVector<TString>& earlier = byTx[ui64(observed.TxId)];
+        for (const TString& violation : ReadSetViolations(observed.Footprint, earlier)) {
+            violations.push_back(violation);
+        }
+        for (const auto& entry : observed.Footprint.Entries) {
+            if (!entry.AbsPath.empty()) {
+                earlier.push_back(entry.AbsPath);
+            }
+        }
+    }
+    if (violations.empty()) {
+        return;
+    }
+    TStringBuilder dump;
+    for (const auto& violation : violations) {
+        dump << "\n  " << violation;
+    }
+    UNIT_FAIL("read set escapes the footprint:" << dump);
+}
+
 // Sends a hand-built TModifyScheme; helpers.h exports no such entry point.
 
 }  // namespace
@@ -1163,6 +1206,89 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
     // The observer replaced the log as the test channel, but the DEBUG line is
     // still the production rendering: it must keep rendering the same fields
     // once FLAT_TX_SCHEMESHARD admits DEBUG.
+    Y_UNIT_TEST(ReadSetStaysInsideTheFootprint) {
+        TReadSetCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions()
+            .EnableProtoSourceIdInfo(true)
+            .PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        // Every op shape the propose-level suite above drives, in one run: the
+        // env bootstrap parts (the system views) are in the collector too.
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "a/b/Table"
+            Columns { Name: "key" Type: "Uint64" }
+            Columns { Name: "value" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Indexed"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreateCdcStream(runtime, ++txId, "/MyRoot/a/b", R"(
+            TableName: "Table"
+            StreamDescription {
+              Name: "Stream"
+              Mode: ECdcStreamModeKeysOnly
+              Format: ECdcStreamFormatProto
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestMoveTable(runtime, ++txId, "/MyRoot/Indexed", "/MyRoot/Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        TestDropTable(runtime, ++txId, "/MyRoot", "Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        // A rejected part records a read set too, and must stay in bounds.
+        TestCreateTable(runtime, ++txId, "/MyRoot/NoSuchDir", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )", {NKikimrScheme::StatusPathDoesNotExist});
+
+        // Not vacuous: the recorder must have seen the paths the operations
+        // above obviously walk, including ones no single proto field names.
+        THashSet<TString> read;
+        for (const auto& observed : collector.Parts) {
+            for (const auto& entry : observed.Footprint.ReadSet) {
+                read.insert(entry.AbsPath);
+            }
+        }
+        for (const TString& expected : {
+                TString("/MyRoot"),
+                TString("/MyRoot/a/b/Table"),
+                TString("/MyRoot/Indexed/byValue/indexImplTable"),
+                TString("/MyRoot/a/b/Table/Stream")})
+        {
+            if (!read.contains(expected)) {
+                TVector<TString> sorted(read.begin(), read.end());
+                Sort(sorted);
+                UNIT_FAIL("read set never mentions " << expected << ", has:\n  "
+                    << JoinSeq("\n  ", sorted));
+            }
+        }
+
+        RequireReadSetCoverage(collector.Parts);
+    }
+
+    // Two transactions in one request: every part carries the index of the
+    // client transaction it descends from, and each gets its own request
+    // footprint.
 
 }
 
