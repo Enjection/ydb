@@ -519,7 +519,122 @@ TString JoinPathRef(TStringBuf workingDir, const TPathRef& ref,
 // nor explicitly classified as not-a-path.
 const TVector<TStringBuf>& KnownPathFieldNames();
 
+// An owning snapshot of the TPathRef an entry came from. A TPathRef points into
+// the request proto; a footprint outlives it.
+struct TPathRefOwned {
+    EPathField Field = EPathField::Count;
+    // Rendered once, here, from the field's template.
+    TString FieldPath;
+    // The repeated-field position, kept beside the rendered field path because
+    // RelocatePaths has to address the same element again to write to it.
+    // SubIndex and MapKey are not kept: no field that carries one of those is
+    // ever rewritten.
+    ui32 Index = Max<ui32>();
+    TString Value;
+    ui64 OwnerId = 0;
+    ui64 LocalPathId = 0;
+    EPathRefKind Kind = EPathRefKind::LeafUnderWorkingDir;
+    EPathRefRole Role = EPathRefRole::Target;
+    TString BasePath;
+    int AnchorIndex = -1;
+};
+
+struct TPathFootprintEntry {
+    TPathRefOwned Ref;
+    TPathId PathId;             // invalid unless Exists
+    bool Exists = false;
+    TString AbsPath;
+    TString RelPathToParent;    // leaf name
+    TString RelPathToDatabase;
+    TString RelPathToWorkingDir;
+    TPathId ParentPathId;       // nearest existing parent when !Exists
+    TPathId DatabasePathId;
+};
+
+// One path resolution performed while an IPathResolutionObserver was armed.
+struct TPathRead {
+    // The path as it stood after the step, canonical.
+    TString AbsPath;
+    // Valid only when Resolved: the element the walk landed on.
+    TPathId PathId;
+    bool Resolved = false;
+    // True when the walk started from a path id (TPath::Init) rather than from
+    // a name (TPath::Dive).
+    bool ByPathId = false;
+};
+
+struct TPathFootprint {
+    // The request's WorkingDir exactly as the client spelled it.
+    TString WorkingDir;
+    // The same directory after TPath::Resolve, which is what every AbsPath
+    // below is built from. The raw string may be non-canonical, so a prefix
+    // test against it can silently fail; test against this one.
+    TString WorkingDirCanon;
+    TString WorkingDirRelToDb;
+    TPathId DatabasePathId;
+    TVector<TPathFootprintEntry> Entries;
+
+    // Filled by the ProcessOperationParts hook.
+    NKikimrSchemeOp::EOperationType PartOpType = NKikimrSchemeOp::EOperationType::ESchemeOp_DEPRECATED_35;
+    NKikimrScheme::EStatus ProposeStatus = NKikimrScheme::StatusSuccess;
+    TSubTxId PartId = InvalidSubTxId;
+    // Index into TEvModifySchemeTransaction.Transaction of the request
+    // transaction this footprint belongs to. Max<ui32>() when unknown. A
+    // footprint of the request transaction itself keeps PartId invalid, which
+    // is how the two layers are told apart in the log.
+    ui32 OriginalTxIndex = Max<ui32>();
+
+    // The in-memory writes this part's Propose() made, taken as the diff of
+    // the TMemoryChanges undo log across the call: grab order, deduplicated.
+    // Cascades (subtree drops, index and cdc children, moved subtrees) show up
+    // here even though no proto field of the request names them.
+    TVector<TPathId> WriteSet;
+    // The paths this part asked SchemeBoard to republish. Versions are not
+    // recorded: they are computed later, at ApplyOnExecute time, and a further
+    // part of the same request may still bump them.
+    TVector<TPathId> Published;
+    // The operation wrote through TOperationContext::GetDB() rather than
+    // through TMemoryChanges, so WriteSet is a lower bound. Cumulative for the
+    // whole request: TOperationContext::DirectAccessGranted is never reset, so
+    // once one part goes direct every later part is flagged too.
+    bool WriteSetMayBeIncomplete = false;
+
+    // Every path this part's Propose() resolved, in resolution order, with the
+    // per-segment steps of one walk collapsed into their maximal path. Filled
+    // only when the installed IPathFootprintObserver asked for it: recording
+    // costs a virtual call per TPath::Dive, so it is off by default and never
+    // armed in production. The footprint's own resolutions are not in here —
+    // the recorder is armed around Propose() and nothing else.
+    TVector<TPathRead> ReadSet;
+};
+
+// Layer 2: normalization through TPath only. Never aborts on bad input.
+//
+// opId is the sub-operation this footprint belongs to, when there is one. The
+// Target of a Move* part is then resolved with TPath::ResolveWithInactive,
+// which is exactly what those Propose() implementations do: a destination
+// whose parent is still inactive because an earlier part of the same
+// transaction is holding it resolves the same way it will for the operation,
+// instead of reporting exists=0 against a name nothing is linked under yet.
+// InvalidOperationId, the default, means "no part context" — the request-level
+// footprint describes the request as submitted, before any part ran.
+TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss,
+    TOperationId opId = InvalidOperationId);
+
 TStringBuf PathRefKindName(EPathRefKind kind);
 TStringBuf PathRefRoleName(EPathRefRole role);
+
+// One-line, greppable rendering of a single footprint entry. The default
+// prefix is "PathFootprint"; the request layer passes "PathFootprint request"
+// so the two layers can be told apart in the log. Used as the observation
+// channel by tests.
+TString FormatPathFootprintLine(const TPathFootprint& footprint,
+    const TPathFootprintEntry* entry, ui64 txId,
+    TStringBuf prefix = "PathFootprint");
+
+// The same prefix, one extra line per footprint, listing the write set and the
+// publications as "owner:local" ids. Kept out of the per-entry line because it
+// belongs to the part, not to any one field.
+TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId);
 
 }  // namespace NKikimr::NSchemeShard
