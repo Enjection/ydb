@@ -1,5 +1,7 @@
 #include "schemeshard__operation.h"
 
+#include <util/generic/scope.h>
+
 #include "schemeshard__dispatch_op.h"
 #include "schemeshard__operation_db_changes.h"
 #include "schemeshard__operation_memory_changes.h"
@@ -98,6 +100,7 @@ bool TSchemeShard::ProcessOperationParts(
     const TTxId& txId,
     const NKikimrScheme::TEvModifySchemeTransaction& record,
     bool prevProposeUndoSafe,
+    ui32 originalTxIndex,
     TOperation::TPtr& operation,
     THolder<TProposeResponse>& response,
     TOperationContext& context)
@@ -110,16 +113,79 @@ bool TSchemeShard::ProcessOperationParts(
         context.IsAllowedPrivateTables = true;
     }
 
+    // Neither of these can change while this request is being proposed, so the
+    // whole footprint machinery is decided once, outside the loop. With no
+    // observer and no DEBUG logging nothing below runs at all: not the
+    // resolution, not the undo-log marks it feeds on.
+    auto* const footprintObserver = AppData()->PathFootprintObserver;
+    const bool logFootprints = IS_CTX_LOG_PRIORITY_ENABLED(context.Ctx,
+        NActors::NLog::PRI_DEBUG, NKikimrServices::FLAT_TX_SCHEMESHARD, 0ull);
+    const bool wantFootprints = footprintObserver || logFootprints;
+    const bool wantReadSet = footprintObserver && footprintObserver->WantReadSet();
+
     for (auto& part : parts) {
+        // Path footprint: computed from the part's own TModifyScheme *before*
+        // Propose() may mutate schemeshard state, recorded (and logged) after
+        // Propose() so that rejected parts are covered too.
+        TPathFootprint footprint;
+        TMemoryChanges::TMark memChangesMark;
+        size_t publishedMark = 0;
+        if (wantFootprints) {
+            footprint = ResolvePathFootprint(part->GetTransaction(), context.SS,
+                part->GetOperationId());
+            footprint.OriginalTxIndex = originalTxIndex;
+            // Marks taken here, collected after Propose(): what the part wrote
+            // in memory and what it asked SchemeBoard to publish is the diff.
+            memChangesMark = context.MemChanges.Mark();
+            publishedMark = context.OnComplete.PublishedCount(txId);
+        }
+
         TString errStr;
         if (!context.SS->CheckInFlightLimit(part->GetTransaction().GetOperationType(), errStr)) {
             response.Reset(new TProposeResponse(NKikimrScheme::StatusResourceExhausted, ui64(txId), ui64(selfId)));
             response->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
         } else {
+            // The read-set recorder covers Propose() and nothing else: not the
+            // footprint's own resolutions above, which would make any coverage
+            // check over the read set vacuous. Disarmed by the guard even if
+            // Propose() throws.
+            TPathReadSetRecorder recorder(footprint.ReadSet);
+            if (wantReadSet) {
+                context.SS->PathResolutionObserver = &recorder;
+            }
+            Y_DEFER {
+                context.SS->PathResolutionObserver = nullptr;
+            };
             response = part->Propose(owner, context);
         }
 
         Y_ABORT_UNLESS(response);
+
+        if (wantFootprints) {
+            footprint.ProposeStatus = response->Record.GetStatus();
+            footprint.PartId = part->GetOperationId().GetSubTxId();
+            context.MemChanges.CollectPathIdsSince(memChangesMark, footprint.WriteSet);
+            context.OnComplete.CollectPublishedSince(txId, publishedMark, footprint.Published);
+            // IsUndoChangesSafe() is monotone within one request, so this covers
+            // both "this part went direct to the db" and "an earlier one did".
+            footprint.WriteSetMayBeIncomplete = !context.IsUndoChangesSafe();
+            if (logFootprints) {
+                LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                    FormatPathFootprintWriteSetLine(footprint, ui64(txId)));
+                if (footprint.Entries.empty()) {
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        FormatPathFootprintLine(footprint, nullptr, ui64(txId)));
+                }
+                for (const auto& entry : footprint.Entries) {
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        FormatPathFootprintLine(footprint, &entry, ui64(txId)));
+                }
+            }
+            if (footprintObserver) {
+                footprintObserver->OnPartFootprint(txId, footprint);
+            }
+            operation->PathFootprints.push_back(std::move(footprint));
+        }
 
         LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                         "IgniteOperation"
@@ -246,13 +312,52 @@ THolder<TProposeResponse> TSchemeShard::IgniteOperation(TProposeRequest& request
 
     //
 
+    // Path footprint of the request itself, one per client transaction.
+    // rewrittenTransactions is 1:1 with record.GetTransaction(), so the index
+    // is the origin index every part footprint below refers back to. Resolved
+    // here because Phase Zero is the last point at which schemeshard state is
+    // still untouched by this request, and because Rewrite() has already run,
+    // so this describes what schemeshard will actually do. The three early
+    // returns above (duplicate txId, quota failure, rewrite failure) leave
+    // RequestFootprints empty; a Phase One split failure leaves it populated
+    // with PathFootprints still empty.
+    auto* const footprintObserver = AppData()->PathFootprintObserver;
+    const bool logFootprints = IS_CTX_LOG_PRIORITY_ENABLED(context.Ctx,
+        NActors::NLog::PRI_DEBUG, NKikimrServices::FLAT_TX_SCHEMESHARD, 0ull);
+    if (footprintObserver || logFootprints) {
+        operation->RequestFootprints.reserve(rewrittenTransactions.size());
+        for (ui32 i = 0; i < rewrittenTransactions.size(); ++i) {
+            auto footprint = ResolvePathFootprint(rewrittenTransactions[i], context.SS);
+            footprint.OriginalTxIndex = i;
+            if (logFootprints) {
+                if (footprint.Entries.empty()) {
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        FormatPathFootprintLine(footprint, nullptr, ui64(txId), "PathFootprint request"));
+                }
+                for (const auto& entry : footprint.Entries) {
+                    LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+                        FormatPathFootprintLine(footprint, &entry, ui64(txId), "PathFootprint request"));
+                }
+            }
+            if (footprintObserver) {
+                footprintObserver->OnRequestFootprint(txId, footprint);
+            }
+            operation->RequestFootprints.push_back(std::move(footprint));
+        }
+    }
+
+    //
+
     TVector<TTxTransaction> transactions;
+    TVector<ui32> transactionOrigins;
     TVector<TTxTransaction> generatedTransactions;
+    TVector<ui32> generatedOrigins;
 
     // # Phase One
     // Generate MkDir transactions based on object name.
 
-    for (const auto& transaction : rewrittenTransactions) {
+    for (ui32 originalTxIndex = 0; originalTxIndex < rewrittenTransactions.size(); ++originalTxIndex) {
+        const auto& transaction = rewrittenTransactions[originalTxIndex];
         auto splitResult = operation->SplitIntoTransactions(transaction, context);
         if (splitResult.Status != NKikimrScheme::StatusSuccess) {
             response.Reset(new TProposeResponse(splitResult.Status, ui64(txId), ui64(selfId)));
@@ -260,9 +365,13 @@ THolder<TProposeResponse> TSchemeShard::IgniteOperation(TProposeRequest& request
             return response;
         }
 
-        std::move(splitResult.Transactions.begin(), splitResult.Transactions.end(), std::back_inserter(generatedTransactions));
+        for (auto& generated : splitResult.Transactions) {
+            generatedTransactions.push_back(std::move(generated));
+            generatedOrigins.push_back(originalTxIndex);
+        }
         if (splitResult.Transaction) {
             transactions.push_back(*splitResult.Transaction);
+            transactionOrigins.push_back(originalTxIndex);
         }
     }
 
@@ -275,11 +384,11 @@ THolder<TProposeResponse> TSchemeShard::IgniteOperation(TProposeRequest& request
     // For generated MkDirs parts are constructed and proposed.
     // It is done to simplify checks in dependent (splitted) transactions
 
-    for (const auto& transaction : generatedTransactions) {
-        auto parts = operation->ConstructParts(transaction, context);
+    for (size_t i = 0; i < generatedTransactions.size(); ++i) {
+        auto parts = operation->ConstructParts(generatedTransactions[i], context);
         operation->PreparedParts += parts.size();
 
-        if (!ProcessOperationParts(parts, txId, record, prevProposeUndoSafe, operation, response, context)) {
+        if (!ProcessOperationParts(parts, txId, record, prevProposeUndoSafe, generatedOrigins[i], operation, response, context)) {
             return response;
         }
     }
@@ -287,11 +396,11 @@ THolder<TProposeResponse> TSchemeShard::IgniteOperation(TProposeRequest& request
     // # Phase Three
     // For all initial transactions parts are constructed and proposed
 
-    for (const auto& transaction : transactions) {
-        auto parts = operation->ConstructParts(transaction, context);
+    for (size_t i = 0; i < transactions.size(); ++i) {
+        auto parts = operation->ConstructParts(transactions[i], context);
         operation->PreparedParts += parts.size();
 
-        if (!ProcessOperationParts(parts, txId, record, prevProposeUndoSafe, operation, response, context)) {
+        if (!ProcessOperationParts(parts, txId, record, prevProposeUndoSafe, transactionOrigins[i], operation, response, context)) {
             return response;
         }
     }

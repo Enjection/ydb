@@ -49,6 +49,171 @@ void CheckRef(const TPathRef& ref, TStringBuf fieldPath, TStringBuf value,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Observation channel: TAppData::PathFootprintObserver, installed before the
+// schemeshard boots by TTestEnvOptions::PathFootprintObserver. The observer
+// gets the TPathFootprint itself, so assertions are typed; the DEBUG log line
+// is a rendering of the same struct and is pinned by its own test below.
+
+struct TObservedFootprint {
+    TTxId TxId;
+    TPathFootprint Footprint;
+};
+
+class TFootprintCollector: public IPathFootprintObserver {
+public:
+    void OnRequestFootprint(TTxId txId, const TPathFootprint& footprint) override {
+        Requests.push_back(TObservedFootprint{txId, footprint});
+    }
+
+    void OnPartFootprint(TTxId txId, const TPathFootprint& footprint) override {
+        Parts.push_back(TObservedFootprint{txId, footprint});
+    }
+
+    // A TDeque never relocates, so a TObservedEntry taken before more parts
+    // arrive stays valid.
+    TDeque<TObservedFootprint> Requests;
+    TDeque<TObservedFootprint> Parts;
+};
+
+// One (footprint, entry) pair, flattened out of the observed footprints the
+// way the log used to flatten them into lines. Entry is null for a footprint
+// whose request names no path at all.
+struct TObservedEntry {
+    const TPathFootprint* Part = nullptr;
+    const TPathFootprintEntry* Entry = nullptr;
+
+    TString OpType() const {
+        return NKikimrSchemeOp::EOperationType_Name(Part->PartOpType);
+    }
+
+    TString FieldPath() const {
+        return Entry ? Entry->Ref.FieldPath : TString();
+    }
+
+    TString AbsPath() const {
+        return Entry ? Entry->AbsPath : TString();
+    }
+};
+
+TVector<TObservedEntry> Flatten(const TDeque<TObservedFootprint>& footprints, size_t from = 0) {
+    TVector<TObservedEntry> result;
+    for (size_t i = from; i < footprints.size(); ++i) {
+        const TPathFootprint& footprint = footprints[i].Footprint;
+        if (footprint.Entries.empty()) {
+            result.push_back(TObservedEntry{&footprint, nullptr});
+            continue;
+        }
+        for (const auto& entry : footprint.Entries) {
+            result.push_back(TObservedEntry{&footprint, &entry});
+        }
+    }
+    return result;
+}
+
+const TObservedEntry* FindEntry(const TVector<TObservedEntry>& entries,
+        TStringBuf opType, TStringBuf fieldPath)
+{
+    for (const auto& observed : entries) {
+        if (observed.OpType() == opType && observed.FieldPath() == fieldPath) {
+            return &observed;
+        }
+    }
+    return nullptr;
+}
+
+const TObservedEntry& RequireEntry(const TVector<TObservedEntry>& entries,
+        TStringBuf opType, TStringBuf fieldPath)
+{
+    const auto* found = FindEntry(entries, opType, fieldPath);
+    if (!found) {
+        TStringBuilder dump;
+        for (const auto& observed : entries) {
+            dump << "\n  " << observed.OpType() << " / " << observed.FieldPath()
+                 << " -> " << observed.AbsPath();
+        }
+        UNIT_FAIL("no footprint entry for " << opType << " / " << fieldPath << ", have:" << dump);
+    }
+    return *found;
+}
+
+
+TVector<TString> AbsPaths(const TVector<TObservedEntry>& entries,
+        TStringBuf opType, TStringBuf fieldPath)
+{
+    TVector<TString> result;
+    for (const auto& observed : entries) {
+        if (observed.OpType() == opType && observed.FieldPath() == fieldPath) {
+            result.push_back(observed.AbsPath());
+        }
+    }
+    Sort(result);
+    return result;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Write set / publication helpers.
+
+const TPathFootprint& RequirePart(const TDeque<TObservedFootprint>& parts,
+        TStringBuf opType, size_t from = 0)
+{
+    for (size_t i = from; i < parts.size(); ++i) {
+        if (NKikimrSchemeOp::EOperationType_Name(parts[i].Footprint.PartOpType) == opType) {
+            return parts[i].Footprint;
+        }
+    }
+    UNIT_FAIL("no observed part footprint for " << opType);
+    return parts.front().Footprint;
+}
+
+TPathId PathIdOf(TTestActorRuntime& runtime, const TString& path) {
+    // Private paths (index impl tables, cdc stream pq groups) need the private
+    // describe.
+    const auto& self = DescribePrivatePath(runtime, path).GetPathDescription().GetSelf();
+    return TPathId(TOwnerId(self.GetSchemeshardId()), TLocalPathId(self.GetPathId()));
+}
+
+// Union of every part's write set, which is what a whole request wrote.
+TVector<TPathId> AllWriteSetPathIds(const TDeque<TObservedFootprint>& parts, size_t from = 0) {
+    THashSet<TPathId> seen;
+    TVector<TPathId> result;
+    for (size_t i = from; i < parts.size(); ++i) {
+        for (const TPathId& pathId : parts[i].Footprint.WriteSet) {
+            if (seen.insert(pathId).second) {
+                result.push_back(pathId);
+            }
+        }
+    }
+    Sort(result);
+    return result;
+}
+
+bool Contains(const TVector<TPathId>& haystack, const TPathId& needle) {
+    return Find(haystack, needle) != haystack.end();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// The DEBUG log rendering of the same footprints, kept alive by one test.
+
+// Collects each log record as its own string: TStreamLogBackend concatenates
+// records without a separator, which makes line-based parsing impossible.
+class TLogRecordCollector: public TLogBackend {
+public:
+    explicit TLogRecordCollector(TVector<TString>* sink)
+        : Sink(sink)
+    {}
+
+    void WriteData(const TLogRecord& rec) override {
+        Sink->emplace_back(rec.Data, rec.Len);
+    }
+
+    void ReopenLog() override {}
+
+private:
+    TVector<TString>* Sink;
+};
+
+// Sends a hand-built TModifyScheme; helpers.h exports no such entry point.
+
 }  // namespace
 
 Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
@@ -904,6 +1069,101 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         UNIT_ASSERT_EQUAL(moveRefs[1].Value.data(), move.GetMoveIndex().GetSrcPath().data());
         UNIT_ASSERT_EQUAL(moveRefs[1].BasePath.data(), move.GetMoveIndex().GetTablePath().data());
     }
+}
+
+Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
+
+    Y_UNIT_TEST(CreateTableWithIntermediateDirs) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        const size_t mark = collector.Parts.size();
+        const size_t requestMark = collector.Requests.size();
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "a/b/Table"
+            Columns { Name: "key" Type: "Uint64" }
+            Columns { Name: "value" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts);
+
+        // Two auto-generated MkDir parts, then the CreateTable part.
+        // (/MyRoot/.sys is created by the test env itself.)
+        TVector<TString> mkdirs;
+        for (const TString& path : AbsPaths(entries, "ESchemeOpMkDir", "MkDir.Name")) {
+            if (!path.StartsWith("/MyRoot/.sys")) {
+                mkdirs.push_back(path);
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(mkdirs, (TVector<TString>{"/MyRoot/a", "/MyRoot/a/b"}));
+
+        const auto& table = RequireEntry(entries, "ESchemeOpCreateTable", "CreateTable.Name");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->AbsPath, "/MyRoot/a/b/Table");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefKindName(table.Entry->Ref.Kind)), "LeafUnderWorkingDir");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(table.Entry->Ref.Role)), "Target");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->Exists, false);  // not created yet at Propose
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->RelPathToDatabase, "a/b/Table");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->RelPathToWorkingDir, "Table");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->RelPathToParent, "Table");
+        UNIT_ASSERT_VALUES_EQUAL(table.Part->WorkingDirRelToDb, "a/b");
+        UNIT_ASSERT_VALUES_EQUAL(
+            NKikimrScheme::EStatus_Name(table.Part->ProposeStatus), "StatusAccepted");
+
+        // All three parts descend from the single client transaction.
+        const auto ownEntries = Flatten(collector.Parts, mark);
+        for (const auto& observed : ownEntries) {
+            UNIT_ASSERT_VALUES_EQUAL_C(observed.Part->OriginalTxIndex, 0u,
+                observed.OpType() << " / " << observed.FieldPath());
+        }
+
+        // ... and there is exactly one request footprint, describing the
+        // request as the client wrote it: one multi-segment leaf name, not the
+        // three derived parts.
+        UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - requestMark, 1u);
+        const auto& request = collector.Requests[requestMark].Footprint;
+        UNIT_ASSERT_VALUES_EQUAL(request.PartId, InvalidSubTxId);
+        UNIT_ASSERT_VALUES_EQUAL(request.OriginalTxIndex, 0u);
+        UNIT_ASSERT_VALUES_EQUAL(
+            NKikimrSchemeOp::EOperationType_Name(request.PartOpType), "ESchemeOpCreateTable");
+        UNIT_ASSERT_VALUES_EQUAL(request.Entries.size(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(request.Entries[0].Ref.FieldPath, "CreateTable.Name");
+        UNIT_ASSERT_VALUES_EQUAL(
+            TString(PathRefKindName(request.Entries[0].Ref.Kind)), "LeafUnderWorkingDir");
+        UNIT_ASSERT_VALUES_EQUAL(request.Entries[0].RelPathToDatabase, "a/b/Table");
+        UNIT_ASSERT_VALUES_EQUAL(request.WorkingDir, "/MyRoot");
+
+        // The MkDir parts go through TMemoryChanges, so their write set is
+        // exact: each new directory plus the parent whose child list changed.
+        const TVector<TPathId> written = AllWriteSetPathIds(collector.Parts, mark);
+        for (const TString& path : {TString("/MyRoot"), TString("/MyRoot/a"), TString("/MyRoot/a/b")}) {
+            UNIT_ASSERT_C(Contains(written, PathIdOf(runtime, path)),
+                "write set has no " << path);
+        }
+
+        // TCreateTable::Propose writes straight through context.GetDB()
+        // instead of recording TMemoryChanges, so its own write set is empty
+        // and the part is flagged as a lower bound. The new table id is
+        // therefore *not* in the write set above.
+        const auto& createPart = RequirePart(collector.Parts, "ESchemeOpCreateTable", mark);
+        UNIT_ASSERT_VALUES_EQUAL(createPart.WriteSet.size(), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(createPart.WriteSetMayBeIncomplete, true);
+        UNIT_ASSERT_VALUES_EQUAL(Contains(written, PathIdOf(runtime, "/MyRoot/a/b/Table")), false);
+
+        // The MkDir parts ran before any direct db write, so they are exact.
+        const auto& mkdirPart = RequirePart(collector.Parts, "ESchemeOpMkDir", mark);
+        UNIT_ASSERT_VALUES_EQUAL(mkdirPart.WriteSetMayBeIncomplete, false);
+        UNIT_ASSERT_VALUES_EQUAL(mkdirPart.WriteSet.size(), 2u);
+        UNIT_ASSERT(!mkdirPart.Published.empty());
+    }
+
+    // The observer replaced the log as the test channel, but the DEBUG line is
+    // still the production rendering: it must keep rendering the same fields
+    // once FLAT_TX_SCHEMESHARD admits DEBUG.
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////

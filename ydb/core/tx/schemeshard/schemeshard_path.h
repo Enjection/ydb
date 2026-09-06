@@ -212,6 +212,9 @@ public:
     void MaterializeLeaf(const TString& owner, const TPathId& newPathId, bool allowInactivePath = false);
 
 private:
+    // The name step itself. Dive() is this plus the resolution-observer
+    // notification, so that one notification covers all of DiveImpl's exits.
+    void DiveImpl(const TString& name);
     EAttachChildResult MaterializeImpl(const TString& owner, const TPathId& newPathId);
     TPath& DiveByPathId(const TPathId& pathId);
     TPathId GetPathIdSafe() const;

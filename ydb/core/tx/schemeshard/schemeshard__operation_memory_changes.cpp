@@ -2,6 +2,8 @@
 
 #include "schemeshard_impl.h"
 
+#include <util/generic/hash_set.h>
+
 namespace NKikimr::NSchemeShard {
 
 template <typename I, typename C, typename H>
@@ -218,6 +220,69 @@ void TMemoryChanges::GrabNewTestShardSet(TSchemeShard* ss, const TPathId& pathId
 
 void TMemoryChanges::GrabTestShardSet(TSchemeShard* ss, const TPathId& pathId) {
     Grab<TTestShardSetInfo>(pathId, ss->TestShardSets, TestShardSets);
+}
+
+TMemoryChanges::TMark TMemoryChanges::Mark() const {
+    TMark mark;
+    mark.Paths = Paths.size();
+    mark.Indexes = Indexes.size();
+    mark.CdcStreams = CdcStreams.size();
+    mark.TablesWithSnapshots = TablesWithSnapshots.size();
+    mark.LockedPaths = LockedPaths.size();
+    mark.Tables = Tables.size();
+    mark.ColumnTables = ColumnTables.size();
+    mark.Sequences = Sequences.size();
+    mark.ExternalTables = ExternalTables.size();
+    mark.ExternalDataSources = ExternalDataSources.size();
+    mark.Views = Views.size();
+    mark.ResourcePools = ResourcePools.size();
+    mark.BackupCollections = BackupCollections.size();
+    mark.SysViews = SysViews.size();
+    mark.BCPathToFullBackup = BCPathToFullBackup.size();
+    mark.Secrets = Secrets.size();
+    mark.StreamingQueries = StreamingQueries.size();
+    mark.TestShardSets = TestShardSets.size();
+    mark.SharedShardEntries = SharedShardEntries.size();
+    return mark;
+}
+
+void TMemoryChanges::CollectPathIdsSince(const TMark& mark, TVector<TPathId>& out) const {
+    THashSet<TPathId> seen(out.begin(), out.end());
+
+    const auto add = [&](const TPathId& pathId) {
+        if (seen.insert(pathId).second) {
+            out.push_back(pathId);
+        }
+    };
+    // Every stack below stores the path id as the first element of a pair.
+    const auto collectPairs = [&](const auto& stack, size_t from) {
+        for (auto it = stack.begin() + from; it != stack.end(); ++it) {
+            add(it->first);
+        }
+    };
+
+    collectPairs(Paths, mark.Paths);
+    collectPairs(Indexes, mark.Indexes);
+    collectPairs(CdcStreams, mark.CdcStreams);
+    collectPairs(TablesWithSnapshots, mark.TablesWithSnapshots);
+    collectPairs(LockedPaths, mark.LockedPaths);
+    collectPairs(Tables, mark.Tables);
+    collectPairs(ColumnTables, mark.ColumnTables);
+    collectPairs(Sequences, mark.Sequences);
+    collectPairs(ExternalTables, mark.ExternalTables);
+    collectPairs(ExternalDataSources, mark.ExternalDataSources);
+    collectPairs(Views, mark.Views);
+    collectPairs(ResourcePools, mark.ResourcePools);
+    collectPairs(BackupCollections, mark.BackupCollections);
+    collectPairs(SysViews, mark.SysViews);
+    collectPairs(BCPathToFullBackup, mark.BCPathToFullBackup);
+    collectPairs(Secrets, mark.Secrets);
+    collectPairs(StreamingQueries, mark.StreamingQueries);
+    collectPairs(TestShardSets, mark.TestShardSets);
+    // SharedShardEntries is a (shardIdx, pathId, txId) tuple.
+    for (auto it = SharedShardEntries.begin() + mark.SharedShardEntries; it != SharedShardEntries.end(); ++it) {
+        add(std::get<1>(*it));
+    }
 }
 
 void TMemoryChanges::UnDo(TSchemeShard* ss) {

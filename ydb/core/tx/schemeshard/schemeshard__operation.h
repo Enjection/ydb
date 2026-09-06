@@ -1,6 +1,7 @@
 #pragma once
 
 #include "schemeshard__operation_part.h"
+#include "schemeshard_path_footprint.h"
 #include "schemeshard_tx_infly.h"
 
 #include <util/generic/set.h>
@@ -13,6 +14,24 @@ struct TOperation: TSimpleRefCount<TOperation> {
     const TTxId TxId;
     ui32 PreparedParts = 0;
     TVector<ISubOperation::TPtr> Parts;
+
+    // Per-part "path footprint" recorded at Propose time (in-memory only,
+    // never persisted). Includes parts that were rejected. Each entry points
+    // back into RequestFootprints through TPathFootprint::OriginalTxIndex.
+    //
+    // Both vectors below stay empty unless something asked for the footprints:
+    // an IPathFootprintObserver on TAppData, or FLAT_TX_SCHEMESHARD logging at
+    // DEBUG. Neither is on in a default production node.
+    TVector<TPathFootprint> PathFootprints;
+
+    // One footprint per transaction of the client request, indexed by
+    // TPathFootprint::OriginalTxIndex, resolved before any part is
+    // constructed. This is the layer a request rewrite works against;
+    // PathFootprints is the derived per-part view of the same request.
+    // Empty for requests that IgniteOperation rejects before it gets there
+    // (duplicate txId, quota failure, rewrite failure), and whenever nothing
+    // asked for the footprints at all.
+    TVector<TPathFootprint> RequestFootprints;
 
     THashSet<TActorId> Subscribers;
     THashSet<TTxId> DependentOperations;

@@ -155,6 +155,21 @@ void TSideEffects::PublishToSchemeBoard(TOperationId opId, TPathId pathId) {
     PublishPaths[opId.GetTxId()].push_back(pathId);
 }
 
+size_t TSideEffects::PublishedCount(TTxId txId) const {
+    const auto* paths = PublishPaths.FindPtr(txId);
+    return paths ? paths->size() : 0;
+}
+
+void TSideEffects::CollectPublishedSince(TTxId txId, size_t mark, TVector<TPathId>& out) const {
+    const auto* paths = PublishPaths.FindPtr(txId);
+    if (!paths) {
+        return;
+    }
+    for (size_t i = mark; i < paths->size(); ++i) {
+        out.push_back((*paths)[i]);
+    }
+}
+
 void TSideEffects::RePublishToSchemeBoard(TOperationId opId, TPathId pathId) {
     RePublishPaths[opId.GetTxId()].push_back(pathId);
 }

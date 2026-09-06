@@ -771,6 +771,18 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
         runtime.GetAppData().YdbDriver = YdbDriver.Get();
     }
 
+    // Before BootSchemeShard, so the footprints of the bootstrap parts (the
+    // system view directory and its ~20 CreateSysView parts) are observed too.
+    {
+        NKikimr::NSchemeShard::IPathFootprintObserver* observer = opts.PathFootprintObserver_;
+        if (observer) {
+            ObserverInstall = MakeHolder<TObserverInstall>(&runtime);
+            for (ui32 node = 0; node < runtime.GetNodeCount(); ++node) {
+                runtime.GetAppData(node).PathFootprintObserver = observer;
+            }
+        }
+    }
+
     // Create Observer to catch an event of system views update finished.
     // For more info, see comments in ydb/core/testlib/test_client.cpp
     if (app.FeatureFlags.GetEnableRealSystemViewPaths()) {
@@ -816,6 +828,23 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     CreateFakeMetering(runtime);
 
     SetSplitMergePartCountLimit(&runtime, -1);
+}
+
+NSchemeShardUT_Private::TTestEnv::TObserverInstall::~TObserverInstall() {
+    if (!Runtime) {
+        return;
+    }
+    for (ui32 node = 0; node < Runtime->GetNodeCount(); ++node) {
+        Runtime->GetAppData(node).PathFootprintObserver = nullptr;
+    }
+}
+
+NSchemeShardUT_Private::TTestEnv::~TTestEnv() {
+    // The runtime outlives every TTestEnv (tests declare it first), and it
+    // keeps draining actors after this point. Unpublish before the gate dies.
+    ObserverInstall.Reset();
+
+
 }
 
 NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime &runtime, ui32 nchannels, bool enablePipeRetries,

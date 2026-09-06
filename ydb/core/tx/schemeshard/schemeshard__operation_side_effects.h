@@ -95,6 +95,13 @@ public:
     void PublishToSchemeBoard(TOperationId opId, TPathId pathId);
     void RePublishToSchemeBoard(TOperationId opId, TPathId pathId);
 
+    // PublishPaths is keyed by txId, so all parts of one request append to a
+    // single deque in part order. These two make a part's own contribution
+    // observable as an index range. Read-only, no effect on the side effects
+    // themselves.
+    size_t PublishedCount(TTxId txId) const;
+    void CollectPublishedSince(TTxId txId, size_t mark, TVector<TPathId>& out) const;
+
     void Send(TActorId dst, ::NActors::IEventBase* message, ui64 cookie = 0, ui32 flags = 0);
     template <typename TEvent>
     void Send(TActorId dst, THolder<TEvent> message, ui64 cookie = 0, ui32 flags = 0) {
