@@ -193,10 +193,7 @@ public:
         context.DbChanges.PersistAlterIndex(indexPath->PathId);
         context.DbChanges.PersistTxState(OperationId);
 
-        auto indexData = context.SS->Indexes.Update(indexPath->PathId);
-        context.MemChanges.RecordUndo([indexData, previous = indexData->AlterData]() {
-            indexData->AlterData = previous;
-        });
+        auto& indexData = context.SS->Indexes.Update(indexPath->PathId, context.MemChanges);
         TTableIndexInfo::TPtr newIndexData = indexData->CreateNextVersion();
         Y_ABORT_UNLESS(newIndexData);
         newIndexData->State = tableIndexAlter.GetState();

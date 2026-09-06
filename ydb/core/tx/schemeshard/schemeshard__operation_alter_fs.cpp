@@ -345,7 +345,7 @@ THolder<TProposeResponse> TAlterFileStore::Propose(
 
     Y_ABORT_UNLESS(path.Base()->IsCreateFinished());
 
-    auto fs = context.SS->FileStoreInfos.Update(path.Base()->PathId);
+    auto& fs = context.SS->FileStoreInfos.Update(path.Base()->PathId, context.MemChanges);
     Y_VERIFY_S(fs, "FileStore info is null. PathId: " << path.Base()->PathId);
 
     if (fs->AlterConfig) {
@@ -397,10 +397,6 @@ THolder<TProposeResponse> TAlterFileStore::Propose(
 
     const auto oldFileStoreSpace = fs->GetFileStoreSpace();
 
-    context.MemChanges.RecordUndo([fs, version = fs->AlterVersion]() {
-        fs->AlterConfig.Reset();
-        fs->AlterVersion = version;
-    });
     fs->PrepareAlter(*alterConfig);
 
     const auto newFileStoreSpace = fs->GetFileStoreSpace();

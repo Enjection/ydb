@@ -186,9 +186,6 @@ public:
             TBlockStorePartitionInfo::TPtr part = new TBlockStorePartitionInfo();
             part->PartitionId = i + volume->DefaultPartitionCount;
             part->AlterVersion = volume->AlterData->AlterVersion;
-            context.MemChanges.RecordUndo([volume, shardIdx]() {
-                volume->Shards.erase(shardIdx);
-            });
             volume->Shards[shardIdx] = std::move(part);
         }
 
@@ -442,7 +439,7 @@ public:
             }
         }
 
-        auto volume = context.SS->BlockStoreVolumes.Update(path.Base()->PathId);
+        auto& volume = context.SS->BlockStoreVolumes.Update(path.Base()->PathId, context.MemChanges);
         Y_ABORT_UNLESS(volume);
 
         const auto* alterVolumeConfig = ParseParams(volume->VolumeConfig, alter, errStr);
@@ -600,9 +597,6 @@ public:
         alterData->DefaultPartitionCount =
             TBlockStoreVolumeInfo::CalculateDefaultPartitionCount(alterData->VolumeConfig);
         alterData->ExplicitChannelProfileCount = alterData->VolumeConfig.ExplicitChannelProfilesSize();
-        context.MemChanges.RecordUndo([volume, previous = volume->AlterData]() {
-            volume->AlterData = previous;
-        });
         volume->PrepareAlter(alterData);
 
         auto newVolumeSpace = volume->GetVolumeSpace();
