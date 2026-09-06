@@ -493,6 +493,10 @@ struct TPathRefs {
     TVector<TPathRef>::const_iterator end() const { return Refs.end(); }
 };
 
+// Layer 1: pure, state-free extraction. Covers every EOperationType. Allocates
+// nothing per string: every value is a view into tx or into the result itself.
+TPathRefs ExtractPathRefs(const NKikimrSchemeOp::TModifyScheme& tx);
+
 // One ref joined into a path string, out of the request alone. Mirrors the
 // kind switch of ResolvePathFootprint without TPath: no schemeshard state, no
 // canonization, no existence check, so the result is what the request asks for

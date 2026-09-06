@@ -23,6 +23,12 @@ namespace {
 ////////////////////////////////////////////////////////////////////////////////
 // Layer-1 helpers
 
+NKikimrSchemeOp::TModifyScheme MakeTx(NKikimrSchemeOp::EOperationType type, const TString& workingDir) {
+    NKikimrSchemeOp::TModifyScheme tx;
+    tx.SetOperationType(type);
+    tx.SetWorkingDir(workingDir);
+    return tx;
+}
 
 
 
@@ -101,5 +107,22 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
     // Extraction reads the request, it does not copy it: every value is a view
     // into the TModifyScheme that was passed in. Only the resolve step, which
     // has to outlive the request, materializes strings.
+    Y_UNIT_TEST(ExtractedValuesPointIntoTheRequest) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpMoveTable, "/MyRoot");
+        tx.MutableMoveTable()->SetSrcPath("/MyRoot/Src");
+        tx.MutableMoveTable()->SetDstPath("/MyRoot/Dst");
 
+        const auto refs = ExtractPathRefs(tx);
+        UNIT_ASSERT_VALUES_EQUAL(refs.size(), 3u);
+        UNIT_ASSERT_EQUAL(refs[0].Value.data(), tx.GetMoveTable().GetSrcPath().data());
+        UNIT_ASSERT_EQUAL(refs[1].Value.data(), tx.GetMoveTable().GetDstPath().data());
+
+        // A sibling base is a view too, when the request spells it out.
+        auto move = MakeTx(NKikimrSchemeOp::ESchemeOpMoveIndex, "/MyRoot");
+        move.MutableMoveIndex()->SetTablePath("/MyRoot/Table");
+        move.MutableMoveIndex()->SetSrcPath("oldIndex");
+        const auto moveRefs = ExtractPathRefs(move);
+        UNIT_ASSERT_EQUAL(moveRefs[1].Value.data(), move.GetMoveIndex().GetSrcPath().data());
+        UNIT_ASSERT_EQUAL(moveRefs[1].BasePath.data(), move.GetMoveIndex().GetTablePath().data());
+    }
 }
