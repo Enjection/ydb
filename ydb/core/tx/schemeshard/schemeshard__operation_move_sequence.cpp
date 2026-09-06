@@ -978,16 +978,13 @@ public:
         txState.State = TTxState::CreateParts;
 
         Y_ABORT_UNLESS(context.SS->Sequences.contains(srcPath.Base()->PathId));
-        auto srcSequence = context.SS->Sequences.Update(srcPath.Base()->PathId);
+        auto& srcSequence = context.SS->Sequences.Update(srcPath.Base()->PathId, context.MemChanges);
         Y_ABORT_UNLESS(!srcSequence->Sharding.GetSequenceShards().empty());
 
         const auto& protoSequenceShard = *srcSequence->Sharding.GetSequenceShards().rbegin();
         TShardIdx sequenceShard = FromProto(protoSequenceShard);
 
         TSequenceInfo::TPtr sequenceInfo = new TSequenceInfo(0);
-        context.MemChanges.RecordUndo([srcSequence, previous = srcSequence->AlterData]() {
-            srcSequence->AlterData = previous;
-        });
         sequenceInfo->AlterData = srcSequence->CreateNextVersion();
 
         txState.Shards.emplace_back(sequenceShard, ETabletType::SequenceShard, TTxState::ConfigureParts);

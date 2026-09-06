@@ -158,11 +158,10 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
         Paths.pop();
     }
 
-    // Restore membership and explicitly recorded fields in reverse mutation order.
-    // Paths above already restored the counters, so membership undo does not release.
-    while (UndoActions) {
-        UndoActions.top()();
-        UndoActions.pop();
+    // Self-ref map rollbacks recorded by TDbRefMap::Set, undone LIFO.
+    while (DbRefUndos) {
+        DbRefUndos.top()();
+        DbRefUndos.pop();
     }
 
     while (TablesWithSnapshots) {

@@ -221,7 +221,7 @@ public:
 
 
         Y_ABORT_UNLESS(context.SS->CdcStreams.contains(oldStreamPath.Base()->PathId));
-        auto oldStream = context.SS->CdcStreams.Update(oldStreamPath.Base()->PathId);
+        auto& oldStream = context.SS->CdcStreams.Update(oldStreamPath.Base()->PathId, context.MemChanges);
 
         TCdcStreamInfo::EState requiredState = TCdcStreamInfo::EState::ECdcStreamStateDisabled;
         TCdcStreamInfo::EState newState = TCdcStreamInfo::EState::ECdcStreamStateInvalid;
@@ -372,9 +372,6 @@ public:
         context.DbChanges.PersistAlterCdcStream(pathId);
         context.DbChanges.PersistTxState(OperationId);
 
-        context.MemChanges.RecordUndo([oldStream, previous = oldStream->AlterData]() {
-            oldStream->AlterData = previous;
-        });
         auto streamAlter = oldStream->CreateNextVersion();
         Y_ABORT_UNLESS(streamAlter);
         streamAlter->State = newState;

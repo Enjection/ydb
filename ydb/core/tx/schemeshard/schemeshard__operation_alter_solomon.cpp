@@ -225,7 +225,7 @@ public:
             }
         }
 
-        auto solomon = context.SS->SolomonVolumes.Update(path.Base()->PathId);
+        auto& solomon = context.SS->SolomonVolumes.Update(path.Base()->PathId, context.MemChanges);
 
         if (!alter.HasPartitionCount() && !alter.GetUpdateChannelsBinding()) {
             result->SetError(NKikimrScheme::StatusInvalidParameter, "Empty alter");
@@ -322,9 +322,6 @@ public:
             path.Base()->IncShardsInside(shardsToCreate);
         }
 
-        context.MemChanges.RecordUndo([solomon, previous = solomon->AlterData]() {
-            solomon->AlterData = previous;
-        });
         solomon->AlterData = alterSolomon;
         context.SS->PersistAlterSolomonVolume(db, path.Base()->PathId, solomon);
 

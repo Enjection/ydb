@@ -701,7 +701,7 @@ public:
         }
 
         Y_ABORT_UNLESS(context.SS->Tables.contains(path.Base()->PathId));
-        auto table = context.SS->Tables.Update(path.Base()->PathId);
+        auto& table = context.SS->Tables.Update(path.Base()->PathId, context.MemChanges);
 
         if (context.SS->IsTableInBackupCollection(path.Base()->PathId)) {
             result->SetError(NKikimrScheme::StatusPreconditionFailed,
@@ -774,11 +774,6 @@ public:
             }
         }
 
-        // The schema change is staged in AlterData; undo only its attachment,
-        // without copying the table's partitioning or per-shard statistics.
-        context.MemChanges.RecordUndo([table, previousAlterData = table->AlterData]() {
-            table->AlterData = previousAlterData;
-        });
         table->PrepareAlter(alterData);
         PrepareChanges(OperationId, path.Base(), table, bindingChanges, context);
 
