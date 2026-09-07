@@ -20,9 +20,6 @@ using namespace NSchemeShardUT_Private;
 
 namespace {
 
-////////////////////////////////////////////////////////////////////////////////
-// Layer-1 helpers
-
 NKikimrSchemeOp::TModifyScheme MakeTx(NKikimrSchemeOp::EOperationType type, const TString& workingDir) {
     NKikimrSchemeOp::TModifyScheme tx;
     tx.SetOperationType(type);
@@ -390,7 +387,6 @@ TPathFootprint FakeResolve(const NKikimrSchemeOp::TModifyScheme& tx, const TStri
 }  // namespace
 
 Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
-
     Y_UNIT_TEST(MkDirAndCreateTable) {
         auto mkdir = MakeTx(NKikimrSchemeOp::ESchemeOpMkDir, "/MyRoot");
         mkdir.MutableMkDir()->SetName("dir");
@@ -1165,12 +1161,9 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
             const auto field = static_cast<EPathField>(i);
             const TString tmpl(PathFieldName(field));
             UNIT_ASSERT_C(!tmpl.empty(), "field " << i << " has no field-path template");
-            // A template is the identity of a field path: two rows rendering
-            // the same string would be indistinguishable in a log line.
             UNIT_ASSERT_C(templates.insert(tmpl).second,
                 "two path fields share the field-path template " << tmpl);
 
-            // Rendering substitutes every placeholder and leaves no brace.
             TPathRef ref;
             ref.Field = field;
             ref.Index = 3;
@@ -1202,9 +1195,6 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         }
         UNIT_ASSERT_C(synthetic > 0, "no synthetic (marker or id) field rows");
 
-        // KnownPathFieldNames() is exactly the non-empty proto column,
-        // deduplicated and sorted: the descriptor walk uses it as a set, and a
-        // duplicate would hide a second field behind the first.
         const auto& known = KnownPathFieldNames();
         THashSet<TString> knownSet;
         for (const TStringBuf name : known) {
@@ -2323,6 +2313,5 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
         UNIT_ASSERT(result.Untransformable.empty());
         UNIT_ASSERT_VALUES_EQUAL(copy.DebugString(), tx.DebugString());
     }
-
 
 }
