@@ -256,6 +256,27 @@ void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
 }  // namespace
 
 Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
+    Y_UNIT_TEST(RenderRepeatedAndMapFields) {
+        TPathRef ref;
+        ref.Field = EPathField::CopyTables_Item_IndexImplDropCdc_StreamName;
+        ref.Index = 12;
+        ref.SubIndex = 345;
+        ref.MapKey = "key{i}";
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(ref),
+            "CreateConsistentCopyTables.CopyTableDescriptions[12]"
+            ".IndexImplTableDropCdcStreams[key{i}].StreamName[345]");
+
+        ref.Index = 0;
+        ref.SubIndex = Max<ui32>();
+        ref.MapKey = "";
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(ref),
+            "CreateConsistentCopyTables.CopyTableDescriptions[0]"
+            ".IndexImplTableDropCdcStreams[].StreamName[4294967295]");
+
+        ref.Field = EPathField::MkDir_Name;
+        UNIT_ASSERT_VALUES_EQUAL(FieldPath(ref), "MkDir.Name");
+    }
+
     Y_UNIT_TEST(MkDirAndCreateTable) {
         auto mkdir = MakeTx(NKikimrSchemeOp::ESchemeOpMkDir, "/MyRoot");
         mkdir.MutableMkDir()->SetName("dir");
