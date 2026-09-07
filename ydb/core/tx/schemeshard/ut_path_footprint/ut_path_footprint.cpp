@@ -1,3 +1,4 @@
+#include <ydb/core/tx/schemeshard/schemeshard_operation_registry.h>
 #include <ydb/core/tx/schemeshard/schemeshard_audit_log_fragment.h>
 #include <ydb/core/tx/schemeshard/schemeshard_path_footprint.h>
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
@@ -1074,15 +1075,10 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
     }
 
     Y_UNIT_TEST(EveryOperationTypeIsCovered) {
-        const THashSet<TString> noPathOps = {
-            "ESchemeOp_DEPRECATED_35",
+        const THashSet<TString> emptyRequests = {
             "ESchemeOpAlterLogin",
-            "ESchemeOpAlterBlobDepot",
-            "ESchemeOpDropBlobDepot",
-            "ESchemeOpAlterView",
             "ESchemeOpIncrementalRestoreLockTargets",
             "ESchemeOpIncrementalRestoreUnlockTargets",
-            // repeated-only requests: nothing to extract from an empty proto
             "ESchemeOpCreateConsistentCopyTables",
         };
 
@@ -1093,9 +1089,17 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
         for (int i = 0; i < descriptor->value_count(); ++i) {
             const auto* value = descriptor->value(i);
             const TString name(value->name());
-            auto tx = MakeTx(static_cast<NKikimrSchemeOp::EOperationType>(value->number()), "/MyRoot");
+            const auto type = static_cast<NKikimrSchemeOp::EOperationType>(value->number());
+            const auto support = GetSchemeOperationSupport(type);
+            UNIT_ASSERT_C(support != ESchemeOperationSupport::Unknown, name);
+            auto tx = MakeTx(type, "/MyRoot");
             const auto refs = ExtractPathRefs(tx);
-            if (noPathOps.contains(name)) {
+            if (support == ESchemeOperationSupport::Unsupported) {
+                continue;
+            }
+            if (emptyRequests.contains(name)
+                    || support == ESchemeOperationSupport::Stub
+                    || support == ESchemeOperationSupport::Deprecated) {
                 UNIT_ASSERT_VALUES_EQUAL_C(refs.size(), 0u, name);
             } else {
                 UNIT_ASSERT_C(!refs.empty(), "no path refs extracted for " << name);
