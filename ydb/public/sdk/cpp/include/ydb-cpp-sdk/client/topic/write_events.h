@@ -92,7 +92,9 @@ struct TWriteSessionEvent {
         }
         TReadyToAcceptEvent& operator=(TReadyToAcceptEvent&&) = default;
         TReadyToAcceptEvent& operator=(const TReadyToAcceptEvent& other) {
-            ContinuationToken = std::move(other.ContinuationToken);
+            if (this != &other) {
+                ContinuationToken = std::move(other.ContinuationToken);
+            }
             return *this;
         }
     };

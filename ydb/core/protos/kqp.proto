@@ -48,6 +48,11 @@ enum EQueryType {
     QUERY_TYPE_SQL_GENERIC_QUERY = 12;
     QUERY_TYPE_SQL_GENERIC_SCRIPT = 13;
     QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY = 14;
+
+    // Preserve the UID requirement across forwarding to older KQP nodes.
+    // An old proto2 reader sees UNDEFINED, never an ordinary executable type.
+    QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID = 15;
+    QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID = 16;
 };
 
 enum EQueryAction {
@@ -200,6 +205,7 @@ message TQueryRequest {
     optional Ydb.Formats.ArrowFormatSettings ArrowFormatSettings = 40;
     optional bool IsWarmupCompilation = 41;
     optional bool CollectAffectedRows = 43;
+    optional string Uid = 44 [(Ydb.sensitive) = true];
 }
 
 message TVectorIndexKmeansTreeDescription {

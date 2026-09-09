@@ -175,8 +175,26 @@ public:
         return RequestCtx ? QueryAction : Record.GetRequest().GetAction();
     }
 
-    NKikimrKqp::EQueryType GetType() const {
+    NKikimrKqp::EQueryType GetWireType() const {
         return RequestCtx ? QueryType : Record.GetRequest().GetType();
+    }
+
+    bool HasNativeUidGuard() const {
+        return GetWireType() == NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID
+            || GetWireType() == NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID;
+    }
+
+    NKikimrKqp::EQueryType GetType() const {
+        // Normalize only for local execution. Serialization retains GetWireType()
+        // so another node cannot mistake a guarded request for ordinary SQL.
+        switch (GetWireType()) {
+            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID:
+                return NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY;
+            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID:
+                return NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY;
+            default:
+                return GetWireType();
+        }
     }
 
     Ydb::Query::Syntax GetSyntax() const {

@@ -171,7 +171,7 @@ public:
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL
         ChannelPool_.GetStubsHolderLocked(
             clientConfig.Locator, clientConfig, [&conn, this](NYdbGrpc::TStubsHolder& holder) mutable {
-            conn.reset(GRpcClientLow_.CreateGRpcServiceConnection<TService>(holder).release());
+            conn = GRpcClientLow_.CreateGRpcServiceConnection<TService>(holder);
         });
 #else
         conn = std::move(GRpcClientLow_.CreateGRpcServiceConnection<TService>(clientConfig));
@@ -483,7 +483,7 @@ public:
         auto self = dynamic_cast<TGRpcConnectionsImpl*>(dbState->Client);
         Y_ABORT_UNLESS(self);
         self->Run<TService, TRequest, TResponse>(
-            std::move(request),
+            std::forward<TRequest>(request),
             std::move(responseCb),
             rpc,
             dbState,

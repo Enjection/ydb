@@ -1262,6 +1262,31 @@ Y_UNIT_TEST(BacktickMatching) {
 
 Y_UNIT_TEST_SUITE(Backup) {
 
+Y_UNIT_TEST(Uid) {
+    for (const TString& suffix : TVector<TString>{"", " INCREMENTAL"}) {
+        const auto res = SqlToYql("USE plato; BACKUP TestCollection" + suffix +
+                                  " WITH (uid = 'backup:A-_.:09');");
+        UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+        TWordCountHive elementStat = {{TString("Write"), 0}};
+        VerifyProgram(res, elementStat, [](const TString& word, const TString& line) {
+            if (word == "Write") {
+                UNIT_ASSERT_STRING_CONTAINS(line, "uid");
+                UNIT_ASSERT_STRING_CONTAINS(line, "backup:A-_.:09");
+            }
+        });
+        UNIT_ASSERT_VALUES_EQUAL(elementStat["Write"], 1);
+    }
+}
+
+Y_UNIT_TEST(IdempotencyDuplicateOptionRejected) {
+    const auto res = SqlToYql(R"(
+        USE plato;
+        BACKUP TestCollection WITH (uid = 'first', uid = 'second');
+    )");
+    UNIT_ASSERT(!res.IsOk());
+    UNIT_ASSERT_STRING_CONTAINS(Err2Str(res), "Duplicate uid");
+}
+
 Y_UNIT_TEST(Simple) {
     NYql::TAstParseResult res = SqlToYql(R"sql(
                 USE plato;
@@ -1305,6 +1330,24 @@ Y_UNIT_TEST(Incremental) {
 } // Y_UNIT_TEST_SUITE(Backup)
 
 Y_UNIT_TEST_SUITE(Restore) {
+
+Y_UNIT_TEST(UidAtPoint) {
+    const auto res = SqlToYql(R"(
+        USE plato;
+        RESTORE TestCollection AT '2024-06-16_20-14-02'
+            WITH (uid = 'restore:stable');
+    )");
+    UNIT_ASSERT_C(res.IsOk(), Err2Str(res));
+    TWordCountHive elementStat = {{TString("Write"), 0}};
+    VerifyProgram(res, elementStat, [](const TString& word, const TString& line) {
+        if (word == "Write") {
+            UNIT_ASSERT_STRING_CONTAINS(line, "uid");
+            UNIT_ASSERT_STRING_CONTAINS(line, "restore:stable");
+            UNIT_ASSERT_STRING_CONTAINS(line, "2024-06-16_20-14-02");
+        }
+    });
+    UNIT_ASSERT_VALUES_EQUAL(elementStat["Write"], 1);
+}
 
 Y_UNIT_TEST(Simple) {
     NYql::TAstParseResult res = SqlToYql(R"sql(

@@ -1999,6 +1999,13 @@ public:
 
 
     TFuture<TGenericResult> Backup(const TString& cluster, const NYql::TBackupSettings& settings) override {
+        if (settings.Uid.Defined() &&
+            (!IsPrepare() || SessionCtx->Query().SuppressDdlChecks)) {
+            TGenericResult result;
+            result.SetStatus(NYql::YqlStatusFromYdbStatus(Ydb::StatusIds::UNSUPPORTED));
+            result.AddIssue(TIssue("IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires Query Service execution"));
+            return MakeFuture(result);
+        }
         CHECK_PREPARED_DDL(Backup);
 
         try {
@@ -2023,6 +2030,10 @@ public:
             auto& op = *tx.MutableBackupBackupCollection();
             op.SetName(pathPair.second);
 
+            if (settings.Uid.Defined()) {
+                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+            }
+
             if (IsPrepare()) {
                 auto& phyQuery = *SessionCtx->Query().PreparingQuery->MutablePhysicalQuery();
                 auto& phyTx = *phyQuery.AddTransactions();
@@ -2043,6 +2054,13 @@ public:
     }
 
     TFuture<TGenericResult> BackupIncremental(const TString& cluster, const NYql::TBackupSettings& settings) override {
+        if (settings.Uid.Defined() &&
+            (!IsPrepare() || SessionCtx->Query().SuppressDdlChecks)) {
+            TGenericResult result;
+            result.SetStatus(NYql::YqlStatusFromYdbStatus(Ydb::StatusIds::UNSUPPORTED));
+            result.AddIssue(TIssue("IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires Query Service execution"));
+            return MakeFuture(result);
+        }
         CHECK_PREPARED_DDL(BackupIncremental);
 
         try {
@@ -2067,6 +2085,10 @@ public:
             auto& op = *tx.MutableBackupIncrementalBackupCollection();
             op.SetName(pathPair.second);
 
+            if (settings.Uid.Defined()) {
+                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+            }
+
             if (IsPrepare()) {
                 auto& phyQuery = *SessionCtx->Query().PreparingQuery->MutablePhysicalQuery();
                 auto& phyTx = *phyQuery.AddTransactions();
@@ -2087,6 +2109,13 @@ public:
     }
 
     TFuture<TGenericResult> Restore(const TString& cluster, const NYql::TBackupSettings& settings) override {
+        if (settings.Uid.Defined() &&
+            (!IsPrepare() || SessionCtx->Query().SuppressDdlChecks)) {
+            TGenericResult result;
+            result.SetStatus(NYql::YqlStatusFromYdbStatus(Ydb::StatusIds::UNSUPPORTED));
+            result.AddIssue(TIssue("IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires Query Service execution"));
+            return MakeFuture(result);
+        }
         CHECK_PREPARED_DDL(Restore);
 
         try {
@@ -2110,6 +2139,10 @@ public:
 
             auto& op = *tx.MutableRestoreBackupCollection();
             op.SetName(pathPair.second);
+
+            if (settings.Uid.Defined()) {
+                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+            }
 
             if (IsPrepare()) {
                 auto& phyQuery = *SessionCtx->Query().PreparingQuery->MutablePhysicalQuery();

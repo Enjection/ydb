@@ -4,6 +4,8 @@
 #include "kqp_query_state.h"
 #include "kqp_query_stats.h"
 
+#include <ydb/core/backup/common/idempotency.h>
+
 #include <ydb/core/kqp/common/buffer/buffer.h>
 #include <ydb/core/kqp/common/buffer/events.h>
 #include <ydb/core/kqp/common/kqp_data_integrity_trails.h>
@@ -447,6 +449,9 @@ public:
             case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT:
             case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT_STREAMING:
             case NKikimrKqp::QUERY_TYPE_UNDEFINED:
+            // These wire-only types are normalized by TEvQueryRequest::GetType.
+            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID:
+            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID:
                 return false;
         }
     }
@@ -510,12 +515,30 @@ public:
             return;
         }
 
+        if (ev->Get()->HasNativeUidGuard() != ev->Get()->Record.GetRequest().HasUid()) {
+            ReplyProcessError(ev, Ydb::StatusIds::BAD_REQUEST,
+                "UID_GUARD_REQUIRED: UID metadata and guarded query type must be supplied together");
+            return;
+        }
+
         MakeNewQueryState(ev);
         TTimerGuard timer(this);
         YQL_ENSURE(QueryState->GetDatabase() == Settings.Database,
                 "Wrong database, expected:" << Settings.Database << ", got: " << QueryState->GetDatabase());
 
         auto action = QueryState->GetAction();
+
+        if (QueryState->RequestEv->Record.GetRequest().HasUid()) {
+            const auto type = QueryState->GetType();
+            if (action != NKikimrKqp::QUERY_ACTION_EXECUTE
+                || (type != NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY
+                    && type != NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY))
+            {
+                ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                    "IDEMPOTENCY_NOT_SUPPORTED: keyed requests require ExecuteQuery");
+                return;
+            }
+        }
 
         LWTRACK(KqpSessionQueryRequest,
             QueryState->Orbit,
@@ -1009,6 +1032,17 @@ public:
 
     void Handle(TEvKqp::TEvParseResponse::TPtr& ev) {
         QueryState->SaveAndCheckParseResult(std::move(*ev->Get()));
+        if (QueryState->Statements.size() > 1) {
+            bool keyed = QueryState->RequestEv->Record.GetRequest().HasUid();
+            for (const auto& statement : QueryState->Statements) {
+                keyed |= statement.Ast && HasSqlNativeOperationUid(statement.Ast->Root);
+            }
+            if (keyed) {
+                ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                    "IDEMPOTENCY_NOT_SUPPORTED: keyed multi-statement requests are not supported");
+                return;
+            }
+        }
         CompileStatement();
     }
 
@@ -1129,6 +1163,9 @@ public:
     }
 
     void OnSuccessCompileRequest() {
+        if (!ValidateNativeOperationIdentity()) {
+            co_return;
+        }
         if (WmPostCompileClassify()) {
             co_return;
         }
@@ -1526,6 +1563,59 @@ public:
             QueryState->TxCtx->EffectiveIsolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
         }
 
+        return true;
+    }
+
+    bool ValidateNativeOperationIdentity() {
+        const auto& request = *QueryState->RequestEv;
+        const auto& phyQuery = QueryState->PreparedQuery->GetPhysicalQuery();
+        TMaybe<TString> key;
+        if (request.Record.GetRequest().HasUid()) {
+            key = request.Record.GetRequest().GetUid();
+        }
+
+        bool supported = phyQuery.TransactionsSize() == 1;
+        for (const auto& tx : phyQuery.GetTransactions()) {
+            const NKikimrSchemeOp::TModifyScheme* native = nullptr;
+            if (tx.GetType() == NKqpProto::TKqpPhyTx::TYPE_SCHEME) {
+                const auto& op = tx.GetSchemeOperation();
+                switch (op.GetOperationCase()) {
+                    case NKqpProto::TKqpSchemeOperation::kBackup: native = &op.GetBackup(); break;
+                    case NKqpProto::TKqpSchemeOperation::kBackupIncremental: native = &op.GetBackupIncremental(); break;
+                    case NKqpProto::TKqpSchemeOperation::kRestore: native = &op.GetRestore(); break;
+                    default: break;
+                }
+            }
+            supported &= native != nullptr;
+            if (native && native->HasNativeOperationIdentity()) {
+                const auto& sqlKey = native->GetNativeOperationIdentity().GetUid();
+                if (key.Defined() && *key != sqlKey) {
+                    ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
+                        "UID_MISMATCH: SQL and request keys must match");
+                    return false;
+                }
+                key = sqlKey;
+            }
+        }
+        if (!key.Defined()) {
+            return true;
+        }
+        if (!NBackup::IsValidNativeOperationUid(*key)) {
+            ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
+                "INVALID_NATIVE_OPERATION_UID: expected 1–256 ASCII bytes from [A-Za-z0-9_.:-]");
+            return false;
+        }
+        if (!supported || QueryState->Statements.size() > 1 ||
+            QueryState->GetAction() != NKikimrKqp::QUERY_ACTION_EXECUTE ||
+            QueryState->HasTxControl() || !request.GetYdbParameters().empty() ||
+            (request.GetSyntax() != Ydb::Query::SYNTAX_UNSPECIFIED && request.GetSyntax() != Ydb::Query::SYNTAX_YQL_V1)) {
+            ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one native backup or restore statement in NoTx execution mode");
+            return false;
+        }
+        auto& identity = QueryState->NativeOperationIdentity.emplace();
+        identity.SetUid(*key);
+        identity.SetOriginalDdl(request.GetQuery());
         return true;
     }
 
@@ -2250,7 +2340,7 @@ public:
             temporary, /* createTmpDir */ temporary && !TempTablesState.NeedCleaning,
             QueryState->IsCreateTableAs(), TempTablesState.TempDirName, QueryState->UserRequestContext,
             expectsResult, expectsResult ? QueryState->QueryData->GetAllocState() : nullptr,
-            KqpTempTablesAgentActor);
+            KqpTempTablesAgentActor, QueryState->NativeOperationIdentity);
 
         ExecuterId = RegisterWithSameMailbox(executerActor);
 

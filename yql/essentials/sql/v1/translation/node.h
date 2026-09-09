@@ -1608,10 +1608,12 @@ struct TDropBackupCollectionParameters {
 
 struct TBackupParameters {
     bool Incremental = false;
+    TMaybe<TString> Uid;
 };
 
 struct TRestoreParameters {
     TString At;
+    TMaybe<TString> Uid;
 };
 
 struct TStreamingQuerySettings {

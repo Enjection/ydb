@@ -12,6 +12,8 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/tx/tx.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/request_settings.h>
 
+#include <optional>
+
 namespace NYdb::inline Dev {
     class TProtoAccessor;
 
@@ -285,12 +287,27 @@ class TExecuteQueryPart : public TStreamPartStatus {
 public:
     bool HasResultSet() const { return ResultSet_.has_value(); }
     uint64_t GetResultSetIndex() const { return ResultSetIndex_; }
-    const TResultSet& GetResultSet() const { return *ResultSet_; }
-    TResultSet ExtractResultSet() { return std::move(*ResultSet_); }
+    const TResultSet& GetResultSet() const {
+        if (!ResultSet_.has_value()) {
+            throw std::bad_optional_access();
+        }
+        return *ResultSet_;
+    }
+    TResultSet ExtractResultSet() {
+        if (!ResultSet_.has_value()) {
+            throw std::bad_optional_access();
+        }
+        return std::move(*ResultSet_);
+    }
 
     bool HasStats() const { return Stats_.has_value(); }
     const std::optional<TExecStats>& GetStats() const { return Stats_; }
-    TExecStats ExtractStats() const { return std::move(*Stats_); }
+    TExecStats ExtractStats() const {
+        if (!Stats_.has_value()) {
+            throw std::bad_optional_access();
+        }
+        return std::move(*Stats_);
+    }
     
     const std::optional<TTransaction>& GetTransaction() const { return Transaction_; }
 

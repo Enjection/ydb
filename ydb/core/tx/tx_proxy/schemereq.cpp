@@ -61,6 +61,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     TActorId Source;
     TActorId PipeClient;
     ui64 SchemeshardIdToRequest;
+    ui64 NativeRequestGeneration = 0;
 
     struct TPathToResolve {
         const NKikimrSchemeOp::TModifyScheme& ModifyScheme;
@@ -123,7 +124,14 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             {"txId", TxId},
             {"to", shardToRequest},
             {"ev", req->ToString()});
-        NTabletPipe::SendData(ctx, PipeClient, req.Release());
+        if (req->Record.TransactionSize() == 1 && req->Record.GetTransaction(0).HasNativeOperationIdentity()) {
+            auto guarded = MakeHolder<NSchemeShard::TEvSchemeShard::TEvProposeNativeOperation>();
+            guarded->Record.Swap(&req->Record);
+            NTabletPipe::SendData(ctx, PipeClient, guarded.Release());
+            ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++NativeRequestGeneration));
+        } else {
+            NTabletPipe::SendData(ctx, PipeClient, req.Release());
+        }
     }
 
     THolder<TEvSchemeShardPropose> MakePropose(ui64 schemeshardIdToRequest) {
@@ -1654,6 +1662,13 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     }
 
 
+    void Handle(TEvents::TEvWakeup::TPtr& ev, const TActorContext& ctx) {
+        if (ev->Get()->Tag == NativeRequestGeneration) {
+            ReportStatus(TEvTxUserProxy::TResultStatus::ProxyShardNotAvailable, ctx);
+            Die(ctx);
+        }
+    }
+
     void Handle(TEvTabletPipe::TEvClientConnected::TPtr &ev, const TActorContext &ctx) {
         TEvTabletPipe::TEvClientConnected *msg = ev->Get();
         YDB_LOG_DEBUG_CTX(ctx, "Handle TEvClientConnected",
@@ -1893,6 +1908,25 @@ struct TFlatSchemeReq : public TBaseSchemeReq<TFlatSchemeReq> {
     void ProcessRequest(const TActorContext &ctx);
 
     void HandleWorkingDir(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr &ev, const TActorContext &ctx);
+    void HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx);
+    void HandleNativeLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx);
+    bool NativeLookupFinished = false;
+
+    STFUNC(StateWaitNativeDatabase) {
+        switch (ev->GetTypeRewrite()) {
+            HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, HandleNativeDatabase);
+        }
+    }
+
+    STFUNC(StateWaitNativeLookup) {
+        switch (ev->GetTypeRewrite()) {
+            HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, HandleNativeLookup);
+            HFunc(TEvTabletPipe::TEvClientConnected, Handle);
+            HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
+            HFunc(TEvents::TEvWakeup, Handle);
+        }
+    }
+
 
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::TX_PROXY_SCHEMEREQ;
@@ -1927,6 +1961,7 @@ struct TFlatSchemeReq : public TBaseSchemeReq<TFlatSchemeReq> {
 
     STFUNC(StateWaitPrepare) {
         switch (ev->GetTypeRewrite()) {
+            HFunc(TEvents::TEvWakeup, Handle);
             HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, Handle);
             HFunc(TEvTabletPipe::TEvClientConnected, Handle);
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
@@ -1948,6 +1983,22 @@ void TFlatSchemeReq::Bootstrap(const TActorContext &ctx) {
 }
 
 void TFlatSchemeReq::Start(const TActorContext &ctx) {
+    if (GetModifyScheme().HasNativeOperationIdentity() && !NativeLookupFinished) {
+        ResolveForACL.clear();
+        auto database = TPathToResolve(GetModifyScheme());
+        database.Path = SplitPath(GetRequestProto().GetDatabaseName());
+        database.RequireAccess = NACLib::EAccessRights::ConnectDatabase;
+        ResolveForACL.push_back(database);
+        auto request = ResolveRequestForACL();
+        if (!request) {
+            ReportStatus(TEvTxUserProxy::TResultStatus::ResolveError, ctx);
+            return Die(ctx);
+        }
+        ctx.Send(Services.SchemeCache, new TEvTxProxySchemeCache::TEvNavigateKeySet(request));
+        Become(&TThis::StateWaitNativeDatabase);
+        return;
+    }
+
     //NOTE: split-merge operations here bypass access checks:
     // - internal requests should not follow general rules
     // - external requests are checked for admin rights elsewhere
@@ -1978,6 +2029,54 @@ void TFlatSchemeReq::Start(const TActorContext &ctx) {
 
     ProcessRequest(ctx);
  }
+
+void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx) {
+    auto& navigate = *ev->Get()->Request;
+    if (navigate.ErrorCount || navigate.ResultSet.size() != 1) {
+        InterpretResolveError(&navigate, ctx);
+        return Die(ctx);
+    }
+    if (UserToken && !CheckAccess(navigate.ResultSet, ctx)) {
+        return Die(ctx);
+    }
+    auto& entry = navigate.ResultSet.front();
+    const bool rootDatabase = entry.Kind == NSchemeCache::TSchemeCacheNavigate::KindPath && entry.Self
+        && entry.Self->Info.GetPathId() == entry.Self->Info.GetParentPathId();
+    if ((!IsDB(entry) && !rootDatabase) || !entry.DomainInfo) {
+        ReportStatus(TEvTxUserProxy::TResultStatus::ResolveError, ctx);
+        return Die(ctx);
+    }
+    SchemeshardIdToRequest = GetShardToRequest(entry, ResolveForACL.front());
+    auto ordinary = MakePropose(SchemeshardIdToRequest);
+    // Bind lookup to the authenticated database, before any source-path
+    // adjustment. Only admission on a miss depends on the source collection.
+    ordinary->Record.MutableTransaction(0)->SetWorkingDir(GetRequestProto().GetDatabaseName());
+    auto request = MakeHolder<NSchemeShard::TEvSchemeShard::TEvLookupNativeOperation>();
+    request->Record.Swap(&ordinary->Record);
+    if (UserToken) {
+        request->Record.SetUserToken(UserToken->SerializeAsString());
+    }
+    NTabletPipe::TClientConfig config;
+    config.RetryPolicy = {.RetryLimitCount = 3};
+    PipeClient = ctx.RegisterWithSameMailbox(NTabletPipe::CreateClient(ctx.SelfID, SchemeshardIdToRequest, config));
+    NTabletPipe::SendData(ctx, PipeClient, request.Release());
+    ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++NativeRequestGeneration));
+    Become(&TThis::StateWaitNativeLookup);
+}
+
+void TFlatSchemeReq::HandleNativeLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx) {
+    const auto& record = ev->Get()->Record;
+    if (record.GetStatus() != NKikimrScheme::StatusSuccess || record.HasOperationId()) {
+        TBase::Handle(ev, ctx);
+        return;
+    }
+    NTabletPipe::CloseClient(ctx, PipeClient);
+    PipeClient = {};
+    ++NativeRequestGeneration;
+    NativeLookupFinished = true;
+    ResolveForACL.clear();
+    Start(ctx);
+}
 
 void TFlatSchemeReq::ProcessRequest(const TActorContext &ctx) {
     if (!ExtractResolveForACL(GetModifyScheme())) {
@@ -2094,6 +2193,7 @@ struct TSchemeTransactionalReq : public TBaseSchemeReq<TSchemeTransactionalReq> 
 
     STFUNC(StateWaitPrepare) {
         switch (ev->GetTypeRewrite()) {
+            HFunc(TEvents::TEvWakeup, Handle);
             HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, Handle);
             HFunc(TEvTabletPipe::TEvClientConnected, Handle);
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);

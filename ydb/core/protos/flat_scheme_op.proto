@@ -1999,6 +1999,13 @@ message TSetColumnConstraintSettings {
 
 // Request for scheme modification
 // Has only one of the operations
+// Identity of an external native operation submission. Child operations must
+// retain their parent's operation identity rather than admit this key again.
+message TNativeOperationIdentity {
+    optional string Uid = 1 [(Ydb.sensitive) = true];
+    optional bytes OriginalDdl = 3 [(Ydb.sensitive) = true];
+}
+
 message TModifyScheme {
     optional string WorkingDir = 1;
     optional EOperationType OperationType = 2;
@@ -2134,6 +2141,8 @@ message TModifyScheme {
     optional TCreateFullBackupOp CreateFullBackupOp = 95;
 
     optional TCreateTestShardSet CreateTestShardSet = 96;
+
+    optional TNativeOperationIdentity NativeOperationIdentity = 97;
 
     // Some entries are grouped by semantics, so are out of order
 }

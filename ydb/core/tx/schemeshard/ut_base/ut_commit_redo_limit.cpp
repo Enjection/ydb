@@ -9,6 +9,88 @@ Y_UNIT_TEST_SUITE(TSchemeShardCheckProposeSize) {
     //TODO: can't check all operations as many of them do not implement
     // TSubOperation::AbortPropose() properly and will abort.
 
+    Y_UNIT_TEST(CreateTableRollsBackBeforeRetry) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+        const auto initialDomain = DescribePath(runtime, "/MyRoot").GetPathDescription().GetDomainDescription();
+        TControlWrapper redoLimit;
+        TControlBoard::RegisterSharedControl(redoLimit, runtime.GetAppData().Icb->TabletControls.MaxCommitRedoMB);
+        redoLimit.Reset(200, 1, 4096);
+        const TString schema = R"(
+            Name: "table"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+            UniformPartitionsCount: 3
+        )";
+        redoLimit = 1;
+        TestCreateTable(runtime, ++txId, "/MyRoot", schema, {NKikimrScheme::StatusSchemeError});
+        redoLimit = 200;
+        TestDescribeResult(DescribePath(runtime, "/MyRoot/table"), {NLs::PathNotExist});
+        TestDescribeResult(DescribePath(runtime, "/MyRoot"), {
+            NLs::PathsInsideDomain(initialDomain.GetPathsInside()), NLs::ShardsInsideDomain(initialDomain.GetShardsInside()),
+        });
+        TestCreateTable(runtime, ++txId, "/MyRoot", schema);
+        env.TestWaitNotification(runtime, txId);
+        RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
+        TestDescribeResult(DescribePath(runtime, "/MyRoot/table"), {NLs::PathExist, NLs::Finished});
+        TestDescribeResult(DescribePath(runtime, "/MyRoot"), {
+            NLs::PathsInsideDomain(initialDomain.GetPathsInside() + 1), NLs::ShardsInsideDomain(initialDomain.GetShardsInside() + 3),
+        });
+    }
+
+    Y_UNIT_TEST(TopicCreateAndAlterRollBackBeforeRetry) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+        const auto initialDomain = DescribePath(runtime, "/MyRoot").GetPathDescription().GetDomainDescription();
+        TControlWrapper redoLimit;
+        TControlBoard::RegisterSharedControl(redoLimit, runtime.GetAppData().Icb->TabletControls.MaxCommitRedoMB);
+        redoLimit.Reset(200, 1, 4096);
+        const TString create = R"(
+            Name: "topic"
+            TotalGroupCount: 2
+            PartitionPerTablet: 1
+            PQTabletConfig { PartitionConfig { LifetimeSeconds: 10 } }
+        )";
+        const TString alter = R"(
+            Name: "topic"
+            TotalGroupCount: 5
+            PartitionPerTablet: 1
+            PQTabletConfig { PartitionConfig { LifetimeSeconds: 20 } }
+        )";
+        redoLimit = 1;
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", create, {NKikimrScheme::StatusSchemeError});
+        redoLimit = 200;
+        TestDescribeResult(DescribePath(runtime, "/MyRoot/topic"), {NLs::PathNotExist});
+        TestDescribeResult(DescribePath(runtime, "/MyRoot"), {
+            NLs::PathsInsideDomain(initialDomain.GetPathsInside()), NLs::ShardsInsideDomain(initialDomain.GetShardsInside()),
+            NLs::PQGroupsInsideDomain(0), NLs::PQPartitionsInsideDomain(0),
+        });
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", create);
+        env.TestWaitNotification(runtime, txId);
+        redoLimit = 1;
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", alter, {NKikimrScheme::StatusSchemeError});
+        redoLimit = 200;
+        TestDescribeResult(DescribePath(runtime, "/MyRoot/topic"), {
+            NLs::PathExist, NLs::Finished, NLs::CheckPQAlterVersion("topic", 1),
+        });
+        TestDescribeResult(DescribePath(runtime, "/MyRoot"), {
+            NLs::PathsInsideDomain(initialDomain.GetPathsInside() + 1), NLs::ShardsInsideDomain(initialDomain.GetShardsInside() + 3),
+            NLs::PQGroupsInsideDomain(1), NLs::PQPartitionsInsideDomain(2),
+        });
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", alter);
+        env.TestWaitNotification(runtime, txId);
+        RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
+        TestDescribeResult(DescribePath(runtime, "/MyRoot/topic"), {
+            NLs::PathExist, NLs::Finished, NLs::CheckPQAlterVersion("topic", 2),
+        });
+        TestDescribeResult(DescribePath(runtime, "/MyRoot"), {
+            NLs::PathsInsideDomain(initialDomain.GetPathsInside() + 1), NLs::ShardsInsideDomain(initialDomain.GetShardsInside() + 6),
+            NLs::PQGroupsInsideDomain(1), NLs::PQPartitionsInsideDomain(5),
+        });
+    }
+
     Y_UNIT_TEST(CopyTable) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime);

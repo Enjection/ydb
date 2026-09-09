@@ -21,6 +21,72 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+@contextmanager
+def lose_native_admission_response(endpoint, database):
+    """Forward real Query RPCs, dropping one admitted operation's result stream."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    import grpc
+    from ydb.public.api.grpc import ydb_query_v1_pb2_grpc
+
+    with grpc.insecure_channel(endpoint) as channel:
+        upstream = ydb_query_v1_pb2_grpc.QueryServiceStub(channel)
+
+        class Proxy(ydb_query_v1_pb2_grpc.QueryServiceServicer):
+            lost_id = None
+
+            @staticmethod
+            def options(context):
+                return {"metadata": context.invocation_metadata(), "timeout": min(context.time_remaining() or 120, 120)}
+
+            def CreateSession(self, request, context):
+                return upstream.CreateSession(request, **self.options(context))
+
+            def DeleteSession(self, request, context):
+                return upstream.DeleteSession(request, **self.options(context))
+
+            def AttachSession(self, request, context):
+                call = upstream.AttachSession(request, **self.options(context))
+                context.add_callback(call.cancel)
+                try:
+                    yield from call
+                finally:
+                    call.cancel()
+
+            def ExecuteQuery(self, request, context):
+                call = upstream.ExecuteQuery(request, **self.options(context))
+                context.add_callback(call.cancel)
+                try:
+                    for part in call:
+                        if self.lost_id is None and part.HasField("result_set") and part.result_set.rows:
+                            columns = [column.name for column in part.result_set.columns]
+                            if "operation_id" in columns:
+                                index = columns.index("operation_id")
+                                self.lost_id = part.result_set.rows[0].items[index].text_value
+                                # This SUCCESS result comes from the real server
+                                # after durable admission. The SDK never sees it.
+                                context.abort(grpc.StatusCode.UNAVAILABLE, "injected admission response loss")
+                        yield part
+                finally:
+                    call.cancel()
+
+        proxy = Proxy()
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            server = grpc.server(workers)
+            ydb_query_v1_pb2_grpc.add_QueryServiceServicer_to_server(proxy, server)
+            port = server.add_insecure_port("127.0.0.1:0")
+            assert port
+            server.start()
+            try:
+                with ydb.Driver(ydb.DriverConfig(
+                    endpoint=f"grpc://127.0.0.1:{port}", database=database, disable_discovery=True,
+                )) as driver:
+                    driver.wait(timeout=20)
+                    yield driver, proxy
+            finally:
+                server.stop(0).wait(timeout=10)
+
+
 def backup_bin():
     if os.getenv("YDB_CLI_BINARY"):
         return yatest.common.binary_path(os.getenv("YDB_CLI_BINARY"))
@@ -260,9 +326,14 @@ class BackupStage:
 
 # ================ BASE TEST CLASS ================
 class BaseTestBackupInFiles(object):
+    use_in_memory_pdisks = True
+
     @classmethod
     def setup_class(cls):
-        cls.cluster = KiKiMR(KikimrConfigGenerator(extra_feature_flags=["enable_resource_pools", "enable_backup_service"]))
+        cls.cluster = KiKiMR(KikimrConfigGenerator(
+            extra_feature_flags=["enable_resource_pools", "enable_backup_service"],
+            use_in_memory_pdisks=cls.use_in_memory_pdisks,
+        ))
         cls.cluster.start()
         cls.root_dir = "/Root"
 
@@ -2570,6 +2641,9 @@ class TestFullCycleOperationIdPolling(BaseTestBackupInFiles):
     poll to Done -> verify data -> forget.
     """
 
+    # Process restarts must retain SchemeShard records and backup data.
+    use_in_memory_pdisks = False
+
     # ---- CLI helpers ---------------------------------------------------
 
     def _endpoint(self):
@@ -2669,3 +2743,125 @@ class TestFullCycleOperationIdPolling(BaseTestBackupInFiles):
             f"{full_id} still listed after forget"
         assert incr_id not in self.operation_list_ids("incbackup"), \
             f"{incr_id} still listed after forget"
+
+
+    @pytest.mark.parametrize("placement", ["request", "sql"])
+    def test_uid_retries_preserve_incremental_restore_data(self, placement):
+        table = "uid_orders"
+        collection = "uid_backup"
+        collection_path = f"/Root/.backups/collections/{collection}"
+        with self.session_scope() as session:
+            create_table_with_data(session, table)
+            session.execute_scheme(f"""
+                CREATE BACKUP COLLECTION `{collection}` (TABLE `/Root/{table}`)
+                WITH (STORAGE = 'cluster', INCREMENTAL_BACKUP_ENABLED = 'true');
+            """)
+
+        def submit(sql, uid, kind):
+            # Each attempt gets a new pool/session. Submission recovery must
+            # depend on the server's UID, not on state in the old session.
+            with ydb.QuerySessionPool(self.driver) as pool:
+                result = pool.execute_with_retries(sql, uid=uid)
+            assert len(result) == 1 and len(result[0].rows) == 1, result
+            return self._wrap_operation_id(kind, result[0].rows[0]["operation_id"])
+
+        def snapshots():
+            return {entry.name for entry in self.driver.scheme_client.list_directory(collection_path).children}
+
+        def identity(statement, uid):
+            if placement == "sql":
+                return f"{statement} WITH (uid = '{uid}');", None
+            return statement + ";", uid
+
+        def stage(statement, uid, kind, restart=False):
+            sql, request_uid = identity(statement, uid)
+            before = self.operation_list_ids(kind)
+            endpoint = f"localhost:{self.cluster.nodes[1].grpc_port}"
+            with lose_native_admission_response(endpoint, self.root_dir) as (driver, proxy):
+                with ydb.QuerySessionPool(driver) as pool:
+                    with pytest.raises(ydb.Unavailable, match="injected admission response loss"):
+                        pool.execute_with_retries(
+                            sql, uid=request_uid, retry_settings=ydb.RetrySettings(max_retries=0),
+                        )
+                assert proxy.lost_id, "the fault must follow actual native admission"
+                original = self._wrap_operation_id(kind, proxy.lost_id)
+            # Only the fault proxy retains the first ID as a test oracle. A new
+            # SDK pool recovers it using the original UID/SQL after the failed RPC.
+            if restart:
+                for node in self.cluster.nodes.values():
+                    node.stop()
+                for node in self.cluster.nodes.values():
+                    node.start()
+                self.driver.wait(timeout=60)
+            recovered = submit(sql, request_uid, kind)
+            assert recovered == original
+            self.poll_operation_to_success(recovered)
+            assert self.operation_list_ids(kind) == before | {original}
+            after = snapshots()
+            assert submit(sql, request_uid, kind) == original
+            assert snapshots() == after, "UID replay created another snapshot or incremental boundary"
+            assert self.operation_list_ids(kind) == before | {original}
+            return original
+
+        full_id = stage(f"BACKUP `{collection}`", "uid:full", "fullbackup")
+        data = DataHelper(self, table)
+        data.modify(add_rows=[(2, 200, "updated-two"), (4, 40, "four")], remove_ids=[1])
+        time.sleep(1.1)  # Native snapshot directory names use wall-clock seconds.
+        incremental_id = stage(f"BACKUP `{collection}` INCREMENTAL", "uid:incremental-1", "incbackup")
+        data.modify(add_rows=[(4, 400, "updated-four"), (5, 50, "five")], remove_ids=[3])
+        expected = self._capture_snapshot(table)
+        assert expected == [
+            ["id", "number", "txt"],
+            ["2", "200", "updated-two"],
+            ["4", "400", "updated-four"],
+            ["5", "50", "five"],
+        ], expected
+        time.sleep(1.1)
+        second_incremental_id = stage(
+            f"BACKUP `{collection}` INCREMENTAL", "uid:incremental-2", "incbackup", restart=True,
+        )
+        with self.session_scope() as session:
+            session.drop_table(f"/Root/{table}")
+        restore_id = stage(f"RESTORE `{collection}`", "uid:restore", "restore")
+        self.wait_for_table_rows(table, expected, timeout_s=120)
+
+        old_snapshots = {
+            name for name in snapshots() if name.endswith(("_full", "_incremental"))
+        }
+        assert len(old_snapshots) == 3, old_snapshots
+        time.sleep(1.1)
+        replacement_full_id = stage(f"BACKUP `{collection}`", "uid:full-2", "fullbackup")
+        # Prune data from the superseded chain while keeping its operation
+        # records. Capture must continue, and old UIDs must still replay.
+        with self.session_scope() as session:
+            for snapshot in sorted(old_snapshots):
+                session.execute_scheme(f"DROP TABLE `{collection_path}/{snapshot}/{table}`;")
+        old_sql, old_uid = identity(f"BACKUP `{collection}`", "uid:full")
+        assert submit(old_sql, old_uid, "fullbackup") == full_id
+        for uid, original_id in (("uid:incremental-1", incremental_id), ("uid:incremental-2", second_incremental_id)):
+            old_sql, old_uid = identity(f"BACKUP `{collection}` INCREMENTAL", uid)
+            assert submit(old_sql, old_uid, "incbackup") == original_id
+
+        data.modify(add_rows=[(5, 500, "updated-five"), (6, 60, "six")], remove_ids=[4])
+        after_pruning = self._capture_snapshot(table)
+        assert after_pruning == [
+            ["id", "number", "txt"],
+            ["2", "200", "updated-two"],
+            ["5", "500", "updated-five"],
+            ["6", "60", "six"],
+        ], after_pruning
+        time.sleep(1.1)
+        third_incremental_id = stage(f"BACKUP `{collection}` INCREMENTAL", "uid:incremental-3", "incbackup")
+        with self.session_scope() as session:
+            session.drop_table(f"/Root/{table}")
+        second_restore_id = stage(f"RESTORE `{collection}`", "uid:restore-2", "restore", restart=True)
+        self.wait_for_table_rows(table, after_pruning, timeout_s=120)
+
+        for operation_id in (
+            full_id, replacement_full_id, incremental_id, second_incremental_id,
+            third_incremental_id, restore_id, second_restore_id,
+        ):
+            self.operation_forget(operation_id)
+        assert {full_id, replacement_full_id}.isdisjoint(self.operation_list_ids("fullbackup"))
+        assert {incremental_id, second_incremental_id, third_incremental_id}.isdisjoint(self.operation_list_ids("incbackup"))
+        assert {restore_id, second_restore_id}.isdisjoint(self.operation_list_ids("restore"))

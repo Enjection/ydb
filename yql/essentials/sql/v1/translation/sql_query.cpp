@@ -54,6 +54,35 @@ void TSqlQuery::AddStatementToBlocks(TVector<TNodePtr>& blocks, TNodePtr node) {
     blocks.emplace_back(node);
 }
 
+bool TSqlQuery::ParseNativeOperationSettings(const TRule_native_operation_settings& node, TMaybe<TString>& key) {
+    const auto parse = [&](const TRule_native_operation_setting& entry) {
+        const auto name = IdEx(entry.GetRule_an_id1(), *this);
+        if (to_lower(name.Name) != "uid") {
+            Ctx_.Error() << "Unknown native operation setting: " << name.Name;
+            return false;
+        }
+        if (key.Defined()) {
+            Ctx_.Error() << "Duplicate uid";
+            return false;
+        }
+        const auto value = StringContent(Ctx_, Ctx_.Pos(), Ctx_.Token(entry.GetToken3()));
+        if (!value) {
+            return false;
+        }
+        key = value->Content;
+        return true;
+    };
+    if (!parse(node.GetRule_native_operation_setting3())) {
+        return false;
+    }
+    for (const auto& block : node.GetBlock4()) {
+        if (!parse(block.GetRule_native_operation_setting2())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace {
 
 bool AsyncReplicationSettingsEntry(std::map<TString, TNodePtr>& out,
@@ -1883,7 +1912,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
             break;
         }
         case TRule_sql_stmt_core::kAltSqlStmtCore55: {
-            // backup_stmt: BACKUP object_ref (INCREMENTAL)?;
+            // backup_stmt: BACKUP object_ref (INCREMENTAL)? native_operation_settings?;
             auto& node = core.GetAlt_sql_stmt_core55().GetRule_backup_stmt1();
             TObjectOperatorContext context(Ctx_.Scoped);
             if (node.GetRule_object_ref2().HasBlock1()) {
@@ -1894,6 +1923,10 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
             }
 
             bool incremental = node.HasBlock3();
+            TMaybe<TString> uid;
+            if (node.HasBlock4() && !ParseNativeOperationSettings(node.GetBlock4().GetRule_native_operation_settings1(), uid)) {
+                return false;
+            }
 
             const TString& objectId = Id(node.GetRule_object_ref2().GetRule_id_or_at2(), *this).second;
             AddStatementToBlocks(blocks,
@@ -1903,12 +1936,13 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
                                      objectId,
                                      TBackupParameters{
                                          .Incremental = incremental,
+                                         .Uid = std::move(uid),
                                      },
                                      context));
             break;
         }
         case TRule_sql_stmt_core::kAltSqlStmtCore56: {
-            // restore_stmt: RESTORE object_ref (AT STRING_VALUE)?;
+            // restore_stmt: RESTORE object_ref (AT STRING_VALUE)? native_operation_settings?;
             auto& node = core.GetAlt_sql_stmt_core56().GetRule_restore_stmt1();
             TObjectOperatorContext context(Ctx_.Scoped);
             if (node.GetRule_object_ref2().HasBlock1()) {
@@ -1916,6 +1950,11 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
                                  /*allowWildcard=*/false, context.ServiceId, context.Cluster)) {
                     return false;
                 }
+            }
+
+            TMaybe<TString> uid;
+            if (node.HasBlock4() && !ParseNativeOperationSettings(node.GetBlock4().GetRule_native_operation_settings1(), uid)) {
+                return false;
             }
 
             TString at;
@@ -1936,6 +1975,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
                                      objectId,
                                      TRestoreParameters{
                                          .At = at,
+                                         .Uid = std::move(uid),
                                      },
                                      context));
             break;

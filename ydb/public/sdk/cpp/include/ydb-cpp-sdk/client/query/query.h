@@ -14,6 +14,8 @@
 
 #include <library/cpp/threading/future/future.h>
 
+#include <optional>
+
 namespace NYdb::inline Dev::NQuery {
 
 using TRetryOperationSettings = NYdb::NRetry::TRetryOperationSettings;
@@ -119,6 +121,11 @@ struct TExecuteQuerySettings : public TRequestSettings<TExecuteQuerySettings> {
     FLUENT_SETTING_DEFAULT(TResultSet::EFormat, Format, TResultSet::EFormat::Unspecified);
     FLUENT_SETTING_OPTIONAL(TArrowFormatSettings, ArrowFormatSettings);
     FLUENT_SETTING_OPTIONAL(TRetryOperationSettings, RetrySettings);
+
+    // Supported native backup/restore requests only. Preserve this key and the
+    // exact SQL text across retries. The SDK selects a guarded wire mode.
+    // Keys are case-sensitive, 1-256 bytes from [A-Za-z0-9_.:-]. Empty is invalid.
+    FLUENT_SETTING_OPTIONAL(std::string, Uid);
 };
 
 struct TBeginTxSettings : public TRequestSettings<TBeginTxSettings> {};
@@ -220,8 +227,18 @@ class TFetchScriptResultsResult : public TStatus {
 public:
     bool HasResultSet() const { return ResultSet_.has_value(); }
     uint64_t GetResultSetIndex() const { return ResultSetIndex_; }
-    const TResultSet& GetResultSet() const { return *ResultSet_; }
-    TResultSet ExtractResultSet() { return std::move(*ResultSet_); }
+    const TResultSet& GetResultSet() const {
+        if (!ResultSet_.has_value()) {
+            throw std::bad_optional_access();
+        }
+        return *ResultSet_;
+    }
+    TResultSet ExtractResultSet() {
+        if (!ResultSet_.has_value()) {
+            throw std::bad_optional_access();
+        }
+        return std::move(*ResultSet_);
+    }
     const std::string& GetNextFetchToken() const { return NextFetchToken_; }
 
     explicit TFetchScriptResultsResult(TStatus&& status)

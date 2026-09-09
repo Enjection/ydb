@@ -1443,6 +1443,7 @@ struct TDropBackupCollectionSettings {
 
 struct TBackupSettings {
     TString Name;
+    TMaybe<TString> Uid;
 };
 
 struct TSecretSettings {
@@ -1510,6 +1511,8 @@ public:
 
     struct TGenericResult : public NCommon::TOperationResult {
         TMaybe<TString> OperationId;
+        // Native UID errors include statuses without a YQL issue-code equivalent.
+        TMaybe<Ydb::StatusIds::StatusCode> NativeOperationStatus;
     };
 
     struct TListPathResult : public TGenericResult {

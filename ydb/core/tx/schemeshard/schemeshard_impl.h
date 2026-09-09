@@ -12,6 +12,7 @@
 #include "schemeshard_export.h"
 #include "schemeshard_forced_compaction.h"
 #include "schemeshard_import.h"
+#include "schemeshard_idempotency.h"
 #include "schemeshard_info_types.h"
 #include "schemeshard_path.h"
 #include "schemeshard_path_element.h"
@@ -1351,6 +1352,8 @@ public:
     void Handle(TEvSchemeShard::TEvInitTenantSchemeShard::TPtr &ev, const TActorContext &ctx);
 
     void Handle(TEvSchemeShard::TEvModifySchemeTransaction::TPtr &ev, const TActorContext &ctx);
+    void Handle(TEvSchemeShard::TEvLookupNativeOperation::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvSchemeShard::TEvProposeNativeOperation::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvSchemeShard::TEvDescribeScheme::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvSchemeShard::TEvNotifyTxCompletion::TPtr &ev, const TActorContext &ctx);
 
@@ -1794,6 +1797,14 @@ public:
     // Persisted in Schema::FullBackups (Table<136>) + Schema::FullBackupItems (Table<137>).
     // Items are keyed by destination TPathId because CCT children are not 1-1 with user-visible items.
     TMap<ui64, TFullBackupInfo::TPtr> FullBackups;
+
+    // Separate from operation details: Forget must not release the key.
+    // Family-separated UID indexes, rebuilt from native operation records.
+    TMap<TNativeOperationKey, ui64> NativeOperationsByUid;
+    TMaybe<TNativeOperationReplay> FindNativeOperationByUid(const TNativeOperationKey& key) const;
+    void BindNativeOperationUid(const TNativeOperationKey& key, ui64 id,
+        const NKikimrSchemeOp::TModifyScheme& tx, const TPathId& domainPathId, const TString& userSID);
+    void PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeOperationKey& key);
 
     // Reverse index: backup-collection TPathId -> running control op id.
     // Rebuilt at TTxInit from non-terminal rows; used by the control op's Propose

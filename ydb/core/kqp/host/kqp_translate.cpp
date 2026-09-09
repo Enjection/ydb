@@ -163,6 +163,10 @@ NYql::EKikimrQueryType ConvertType(NKikimrKqp::EQueryType type) {
         case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_SCRIPT:
             return NYql::EKikimrQueryType::Script;
 
+        // Wire guards must be validated and normalized by the session before
+        // a request reaches SQL translation.
+        case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID:
+        case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID:
         case NKikimrKqp::QUERY_TYPE_PREPARED_DML:
         case NKikimrKqp::QUERY_TYPE_UNDEFINED:
             YQL_ENSURE(false, "Unexpected query type: " << type);

@@ -226,6 +226,7 @@ class QuerySessionPool:
         retry_settings: Optional[RetrySettings] = None,
         *args,
         pool_id: Optional[str] = None,
+        uid: Optional[str] = None,
         **kwargs,
     ) -> List[convert.ResultSet]:
         """Special interface to execute a one-shot queries in a safe, retriable way.
@@ -236,6 +237,9 @@ class QuerySessionPool:
         :param parameters: dict with parameters and YDB types;
         :param retry_settings: RetrySettings object.
         :param pool_id: Optional resource pool ID for routing the query to a specific resource pool.
+        :param uid: Optional key for a supported native backup or restore.
+         Preserve the key and exact SQL across retries; requires server capability.
+         Keys are case-sensitive, 1-256 ASCII bytes from [A-Za-z0-9_.:-].
 
         :return: Result sets or exception in case of execution errors.
         """
@@ -244,7 +248,7 @@ class QuerySessionPool:
 
         async def wrapped_callee():
             async with self.checkout(timeout=retry_settings.max_session_acquire_timeout) as session:
-                it = await session.execute(query, parameters, *args, pool_id=pool_id, **kwargs)
+                it = await session.execute(query, parameters, *args, pool_id=pool_id, uid=uid, **kwargs)
                 return await convert.aggregate_result_sets_by_index_async(it)
 
         return await retry_operation_async(wrapped_callee, retry_settings)

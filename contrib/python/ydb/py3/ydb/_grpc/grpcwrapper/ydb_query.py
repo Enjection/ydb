@@ -168,6 +168,7 @@ class ExecuteQueryRequest(IToProto):
     result_set_format: int
     arrow_format_settings: Optional[public_types.ArrowFormatSettings]
     pool_id: Optional[str]
+    uid: Optional[str] = None
 
     def to_proto(self) -> ydb_query_pb2.ExecuteQueryRequest:
         tx_control = self.tx_control.to_proto() if self.tx_control is not None else self.tx_control
@@ -188,4 +189,8 @@ class ExecuteQueryRequest(IToProto):
         )
         if self.pool_id is not None:
             req.pool_id = self.pool_id
+        if self.uid is not None:
+            req.uid = self.uid
+            if self.exec_mode == ydb_query_pb2.EXEC_MODE_EXECUTE:
+                req.exec_mode = ydb_query_pb2.EXEC_MODE_EXECUTE_WITH_UID
         return req

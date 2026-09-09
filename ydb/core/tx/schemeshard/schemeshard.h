@@ -114,6 +114,11 @@ namespace TEvSchemeShard {
         EvShredInfoResponse,
         EvShredManualStartupRequest,
 
+        // Separate wire messages prevent an older tablet from admitting a
+        // keyed request as an ordinary proposal with unknown fields ignored.
+        EvLookupNativeOperation,
+        EvProposeNativeOperation,
+
         EvEnd
     };
 
@@ -152,6 +157,22 @@ namespace TEvSchemeShard {
             } else {
                 return std::shared_ptr<ISSDataProcessor>(result.Release());
             }
+        }
+    };
+
+    struct TEvLookupNativeOperation : public TEventPB<TEvLookupNativeOperation,
+        NKikimrScheme::TEvModifySchemeTransaction, EvLookupNativeOperation> {
+        TString ToString() const override {
+            // Unknown-event logging must not expose UID, DDL, or user tokens.
+            return ToStringHeader();
+        }
+    };
+
+    struct TEvProposeNativeOperation : public TEventPB<TEvProposeNativeOperation,
+        NKikimrScheme::TEvModifySchemeTransaction, EvProposeNativeOperation> {
+        TString ToString() const override {
+            // Unknown-event logging must not expose UID, DDL, or user tokens.
+            return ToStringHeader();
         }
     };
 
