@@ -38,9 +38,6 @@ public:
     virtual ::NMonitoring::TMetricRegistry* GetMetricRegistry() = 0;
     virtual std::shared_ptr<NMetrics::IMetricRegistry> GetExternalMetricRegistry() const = 0;
     virtual const TLog& GetLog() const = 0;
-
-protected:
-    ~IInternalClient() = default;
 };
 
 } // namespace NYdb

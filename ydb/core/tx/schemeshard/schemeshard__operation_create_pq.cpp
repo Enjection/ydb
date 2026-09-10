@@ -282,7 +282,6 @@ class TCreatePQ: public TSubOperation {
         }
     }
 
-    bool TopicCreated = false;
     ui64 PqShardCountChange = 0;
     ui64 StreamReservedThroughputChange = 0;
     ui64 StreamReservedStorageChange = 0;
@@ -464,14 +463,7 @@ public:
             pqChannelsBinding = tabletChannelsBinding;
         }
 
-        auto guard = context.DbGuard();
-        const auto allocatedPathId = context.SS->AllocatePathId();
-        context.MemChanges.GrabNewPath(context.SS, allocatedPathId);
-        context.MemChanges.GrabPath(context.SS, parentPath.Base()->PathId);
-        context.MemChanges.GrabDomain(context.SS, parentPath.GetPathIdForDomain());
-        context.MemChanges.GrabNewTxState(context.SS, OperationId);
-        context.MemChanges.GrabNewTopic(context.SS, allocatedPathId);
-        dstPath.MaterializeLeaf(owner, allocatedPathId);
+        dstPath.MaterializeLeaf(owner);
         result->SetPathId(dstPath.Base()->PathId.LocalPathId);
 
         // Assign topic Id for SourceId→Partition mapping. For FirstClass topics use
@@ -498,7 +490,6 @@ public:
         }
 
         context.SS->TabletCounters->Simple()[COUNTER_PQ_GROUP_COUNT].Add(1);
-        TopicCreated = true;
 
         TPathId pathId = dstPath.Base()->PathId;
 
@@ -525,7 +516,6 @@ public:
 
         for (auto shard : txState.Shards) {
             Y_ABORT_UNLESS(shard.Operation == TTxState::CreateParts);
-            context.MemChanges.GrabNewShard(context.SS, shard.Idx);
             context.DbChanges.PersistShard(shard.Idx);
         }
 
@@ -563,9 +553,11 @@ public:
         if (!acl.empty()) {
             dstPath.Base()->ApplyACL(acl);
         }
+        context.MemChanges.GrabPath(context.SS, dstPath.Base()->PathId);
         context.DbChanges.PersistPath(dstPath.Base()->PathId);
 
         ++parentPath.Base()->DirAlterVersion;
+        context.MemChanges.GrabPath(context.SS, parentPath.Base()->PathId);
         context.DbChanges.PersistPath(parentPath.Base()->PathId);
         context.SS->ClearDescribePathCaches(parentPath.Base());
         context.OnComplete.PublishToSchemeBoard(OperationId, parentPath.Base()->PathId);
@@ -594,10 +586,6 @@ public:
     }
 
     void AbortPropose(TOperationContext& context) override {
-        if (!TopicCreated) {
-            return;
-        }
-        context.SS->TabletCounters->Simple()[COUNTER_PQ_GROUP_COUNT].Sub(1);
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Sub(StreamReservedThroughputChange);
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_STORAGE].Sub(StreamReservedStorageChange);
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_SHARDS_COUNT].Sub(StreamShardsCountChange);

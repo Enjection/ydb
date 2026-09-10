@@ -1800,7 +1800,7 @@ public:
     TMap<TNativeOperationKey, ui64> NativeOperationsByUid;
     TMaybe<TNativeOperationReplay> FindNativeOperationByUid(const TNativeOperationKey& key) const;
     void BindNativeOperationUid(const TNativeOperationKey& key, ui64 id,
-        const NKikimrSchemeOp::TModifyScheme& tx, const TPathId& domainPathId, const TString& userSID);
+        const NKikimrSchemeOp::TModifyScheme& tx, const TString& userSID);
     void PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeOperationKey& key);
 
     // Reverse index: backup-collection TPathId -> running control op id.

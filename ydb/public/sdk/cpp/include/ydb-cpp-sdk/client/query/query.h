@@ -14,8 +14,6 @@
 
 #include <library/cpp/threading/future/future.h>
 
-#include <optional>
-
 namespace NYdb::inline Dev::NQuery {
 
 using TRetryOperationSettings = NYdb::NRetry::TRetryOperationSettings;
@@ -227,18 +225,8 @@ class TFetchScriptResultsResult : public TStatus {
 public:
     bool HasResultSet() const { return ResultSet_.has_value(); }
     uint64_t GetResultSetIndex() const { return ResultSetIndex_; }
-    const TResultSet& GetResultSet() const {
-        if (!ResultSet_.has_value()) {
-            throw std::bad_optional_access();
-        }
-        return *ResultSet_;
-    }
-    TResultSet ExtractResultSet() {
-        if (!ResultSet_.has_value()) {
-            throw std::bad_optional_access();
-        }
-        return std::move(*ResultSet_);
-    }
+    const TResultSet& GetResultSet() const { return *ResultSet_; }
+    TResultSet ExtractResultSet() { return std::move(*ResultSet_); }
     const std::string& GetNextFetchToken() const { return NextFetchToken_; }
 
     explicit TFetchScriptResultsResult(TStatus&& status)

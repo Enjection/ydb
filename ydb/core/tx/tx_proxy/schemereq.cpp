@@ -2044,9 +2044,6 @@ void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeyS
     }
     SchemeshardIdToRequest = GetShardToRequest(entry, ResolveForACL.front());
     auto request = MakePropose(SchemeshardIdToRequest);
-    // Bind lookup to the authenticated database, before any source-path
-    // adjustment. Only admission on a miss depends on the source collection.
-    request->Record.MutableTransaction(0)->SetWorkingDir(GetRequestProto().GetDatabaseName());
     request->Record.MutableTransaction(0)->MutableNativeOperationIdentity()->SetLookupOnly(true);
     if (UserToken) {
         request->Record.SetUserToken(UserToken->SerializeAsString());

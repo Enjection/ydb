@@ -658,7 +658,6 @@ void TSchemeShard::Handle(TEvPrivate::TEvRunIncrementalRestore::TPtr& ev, const 
         }
         state.Uid = admitted->Uid;
         state.OriginalDdl = admitted->OriginalDdl;
-        state.DomainPathId = admitted->DomainPathId;
         state.UserSID = admitted->UserSID;
     }
     state.BackupCollectionPathId = backupCollectionPathId;

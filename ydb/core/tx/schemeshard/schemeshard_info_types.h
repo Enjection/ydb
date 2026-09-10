@@ -4077,7 +4077,6 @@ struct TIncrementalRestoreState {
 
     TString Uid;
     TString OriginalDdl;
-    TPathId DomainPathId;
     TString UserSID;
     // UID metadata exists at admission, before the initial restore is done.
     bool AwaitingInitialRestore = false;

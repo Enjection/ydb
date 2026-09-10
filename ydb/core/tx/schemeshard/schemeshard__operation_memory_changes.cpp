@@ -36,10 +36,6 @@ void TMemoryChanges::GrabTable(TSchemeShard* ss, const TPathId& pathId) {
     Grab<TTableInfo>(pathId, ss->Tables, Tables);
 }
 
-void TMemoryChanges::GrabNewTopic(TSchemeShard* ss, const TPathId& pathId) {
-    GrabNew(pathId, ss->Topics, Topics);
-}
-
 void TMemoryChanges::GrabTopic(TSchemeShard* ss, const TPathId& pathId) {
     const auto& topic = ss->Topics.at(pathId);
     Y_ABORT_UNLESS(!topic->AlterData);

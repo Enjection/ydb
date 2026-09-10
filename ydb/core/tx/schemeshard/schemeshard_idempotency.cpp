@@ -15,7 +15,7 @@ EUidReplayMatch CompareOperationUid(const TOperationUidIdentity& stored, const T
     if (requested.UserSID && stored.UserSID != requested.UserSID) {
         return EUidReplayMatch::OwnerMismatch;
     }
-    if (stored.DomainPathId != requested.DomainPathId) {
+    if (requested.DomainPathId && stored.DomainPathId != requested.DomainPathId) {
         return EUidReplayMatch::DomainMismatch;
     }
     if (requested.RequestBody && stored.RequestBody != requested.RequestBody) {
@@ -33,15 +33,15 @@ TMaybe<TNativeOperationReplay> TSchemeShard::FindNativeOperationByUid(const TNat
     switch (key.first) {
         case NKikimrSchemeOp::ESchemeOpBackupBackupCollection: {
             const auto& info = *FullBackups.at(*id);
-            return TNativeOperationReplay{*id, info.DomainPathId, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
+            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
         }
         case NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection: {
             const auto& info = *IncrementalBackups.at(*id);
-            return TNativeOperationReplay{*id, info.DomainPathId, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
+            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
         }
         case NKikimrSchemeOp::ESchemeOpRestoreBackupCollection: {
             const auto& info = IncrementalRestoreStates.at(*id);
-            return TNativeOperationReplay{*id, info.DomainPathId, info.OriginalDdl, info.UserSID};
+            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID};
         }
         default:
             Y_ABORT("Unexpected native UID operation family");
@@ -49,7 +49,7 @@ TMaybe<TNativeOperationReplay> TSchemeShard::FindNativeOperationByUid(const TNat
 }
 
 void TSchemeShard::BindNativeOperationUid(const TNativeOperationKey& key, ui64 id,
-    const NKikimrSchemeOp::TModifyScheme& tx, const TPathId& domainPathId, const TString& userSID)
+    const NKikimrSchemeOp::TModifyScheme& tx, const TString& userSID)
 {
     const auto& ddl = tx.GetNativeOperationIdentity().GetOriginalDdl();
     switch (key.first) {
@@ -72,7 +72,6 @@ void TSchemeShard::BindNativeOperationUid(const TNativeOperationKey& key, ui64 i
             auto& info = IncrementalRestoreStates[id];
             info.Uid = key.second;
             info.OriginalDdl = ddl;
-            info.DomainPathId = domainPathId;
             info.UserSID = userSID;
             info.OriginalOperationId = id;
             const auto& name = tx.GetRestoreBackupCollection().GetName();
@@ -111,8 +110,6 @@ void TSchemeShard::PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeO
             db.Table<T>().Key(id).Update(
                 NIceDb::TUpdate<T::Uid>(info.Uid),
                 NIceDb::TUpdate<T::OriginalDdl>(info.OriginalDdl),
-                NIceDb::TUpdate<T::DomainPathOwnerId>(info.DomainPathId.OwnerId),
-                NIceDb::TUpdate<T::DomainPathId>(info.DomainPathId.LocalPathId),
                 NIceDb::TUpdate<T::UserSID>(info.UserSID),
                 NIceDb::TUpdate<T::BackupCollectionPathOwnerId>(info.BackupCollectionPathId.OwnerId),
                 NIceDb::TUpdate<T::BackupCollectionPathId>(info.BackupCollectionPathId.LocalPathId),

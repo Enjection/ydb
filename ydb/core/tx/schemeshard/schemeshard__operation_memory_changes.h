@@ -112,7 +112,6 @@ public:
     void GrabNewTable(TSchemeShard* ss, const TPathId& pathId);
     void GrabTable(TSchemeShard* ss, const TPathId& pathId);
 
-    void GrabNewTopic(TSchemeShard* ss, const TPathId& pathId);
     void GrabTopic(TSchemeShard* ss, const TPathId& pathId);
 
     void GrabNewColumnTable(TSchemeShard* ss, const TPathId& pathId);

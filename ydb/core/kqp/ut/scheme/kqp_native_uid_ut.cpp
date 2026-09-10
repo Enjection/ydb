@@ -122,7 +122,7 @@ namespace NKikimr::NKqp {
             using TResponse = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult;
             using TAction = NActors::TTestActorRuntimeBase::EEventAction;
             const auto status = AccessDenied ? NKikimrScheme::StatusAccessDenied : NKikimrScheme::StatusAlreadyExists;
-            const TString reason = AccessDenied ? "Access to the operation is denied" : "UID_NAMESPACE_COLLISION: UID is already in use";
+            const TString reason = AccessDenied ? "Access to the operation is denied" : "Native backup already exists";
             const auto intercepted = std::make_shared<std::atomic<bool>>(false);
             auto* runtime = kikimr.GetTestServer().GetRuntime();
             const auto previousObserver = runtime->SetObserverFunc([runtime, intercepted, status, reason](TAutoPtr<IEventHandle>& event) {

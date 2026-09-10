@@ -406,12 +406,9 @@ public:
 
 };
 
-// Borrowed inputs are copied before Precommit suspends, or serialized by
-// ExecuteQueryCommon before its await. Only the owned handles and copies are
-// accessed after suspension; the reference-parameter diagnostic cannot see this.
-TAsyncExecuteQueryIterator TExecQueryImpl::StreamExecuteQuery(std::shared_ptr<TGRpcConnectionsImpl> connections,
-    TDbDriverStatePtr driverState, const std::string& query, const TTxControl& txControl, // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
-    const std::optional<TParams>& params, const TExecuteQuerySettings& settings, const std::optional<TSession>& session) // NOLINT(cppcoreguidelines-avoid-reference-coroutine-parameters)
+TAsyncExecuteQueryIterator TExecQueryImpl::StreamExecuteQuery(const std::shared_ptr<TGRpcConnectionsImpl>& connections,
+    const TDbDriverStatePtr& driverState, const std::string& query, const TTxControl& txControl,
+    const std::optional<TParams>& params, const TExecuteQuerySettings& settings, const std::optional<TSession>& session)
 {
     TPlainStatus plainStatus;
     TExecuteQueryProcessorPtr processor;

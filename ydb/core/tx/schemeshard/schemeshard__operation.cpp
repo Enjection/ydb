@@ -423,24 +423,15 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
                 return reject(NKikimrScheme::StatusInvalidParameter,
                     "INVALID_IDEMPOTENCY_IDENTITY: exact original DDL is required");
             }
-            const auto workingDir = TPath::Resolve(tx.GetWorkingDir(), Self);
-            if (!workingDir.IsResolved()) {
-                return reject(NKikimrScheme::StatusPathDoesNotExist, "Working directory does not exist");
-            }
             key = TNativeOperationKey{ui32(tx.GetOperationType()), identity.GetUid()};
             if (const auto receipt = Self->FindNativeOperationByUid(*key)) {
                 // A known key is not authority to read another user's receipt.
                 // Check this before comparing or exposing the original request.
                 const auto match = CompareOperationUid(
-                    {receipt->DomainPathId, TStringBuf(receipt->UserSID), TStringBuf(receipt->OriginalDdl)},
-                    {workingDir.GetPathIdForDomain(), TStringBuf(UserSID), TStringBuf(identity.GetOriginalDdl())});
+                    {{}, TStringBuf(receipt->UserSID), TStringBuf(receipt->OriginalDdl)},
+                    {{}, TStringBuf(UserSID), TStringBuf(identity.GetOriginalDdl())});
                 if (match == EUidReplayMatch::OwnerMismatch) {
                     return reject(NKikimrScheme::StatusAccessDenied, "Access to the operation receipt is denied");
-                }
-                if (match == EUidReplayMatch::DomainMismatch) {
-                    NativeUidCounter = COUNTER_NATIVE_UID_CONFLICTS;
-                    return reject(NKikimrScheme::StatusAlreadyExists,
-                        "UID_NAMESPACE_COLLISION: UID is already in use");
                 }
                 if (match == EUidReplayMatch::RequestMismatch) {
                     NativeUidCounter = COUNTER_NATIVE_UID_CONFLICTS;
@@ -514,8 +505,7 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
         if (uid && Self->Operations.contains(txId)) {
             const auto& tx = record.GetTransaction(0);
             memChanges.GrabNewNativeOperationKey(Self, *uid);
-            Self->BindNativeOperationUid(*uid, ui64(txId), tx,
-                TPath::Resolve(tx.GetWorkingDir(), Self).GetPathIdForDomain(), UserSID);
+            Self->BindNativeOperationUid(*uid, ui64(txId), tx, UserSID);
             dbChanges.PersistNativeOperationKey(*uid);
             NativeUidCounter = COUNTER_NATIVE_UID_ADMITTED;
         }

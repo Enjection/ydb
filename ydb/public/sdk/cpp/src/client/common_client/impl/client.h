@@ -86,7 +86,7 @@ protected:
             };
 
         Connections_->RunDeferred<TService, TRequest, TResponse>(
-            std::forward<TRequest>(request),
+            std::move(request),
             extractor,
             rpc,
             DbDriverState_,
@@ -117,7 +117,7 @@ protected:
             };
 
         Connections_->RunDeferred<TService, TRequest, TResponse>(
-            std::forward<TRequest>(request),
+            std::move(request),
             extractor,
             rpc,
             DbDriverState_,

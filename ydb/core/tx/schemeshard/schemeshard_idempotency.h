@@ -23,7 +23,7 @@ const typename TIndex::mapped_type* FindOperationByUid(const TIndex& index, cons
 }
 
 struct TOperationUidIdentity {
-    TPathId DomainPathId;
+    TMaybe<TPathId> DomainPathId;
     TMaybe<TStringBuf> UserSID;
     TMaybe<TStringBuf> RequestBody;
 };
@@ -35,7 +35,7 @@ enum class EUidReplayMatch {
     RequestMismatch,
 };
 
-// Import/export supply only the domain. Native SQL also supplies owner and DDL.
+// Import/export compare domains; native SQL compares owner and DDL.
 EUidReplayMatch CompareOperationUid(const TOperationUidIdentity& stored, const TOperationUidIdentity& requested);
 
 // A UID belongs to an operation family on this SchemeShard tablet.
@@ -43,7 +43,6 @@ using TNativeOperationKey = std::pair<ui32, TString>;
 
 struct TNativeOperationReplay {
     ui64 OperationId = 0;
-    TPathId DomainPathId;
     TString OriginalDdl;
     TString UserSID;
 };

@@ -997,7 +997,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         UNIT_ASSERT_VALUES_EQUAL(replay.GetTxId(), originalId);
     }
 
-    Y_UNIT_TEST(SameTabletDatabaseCollisionAfterReboot) {
+    Y_UNIT_TEST(SameTabletUidDoesNotBindDatabaseAfterReboot) {
         TTestBasicRuntime runtime;
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
         ui64 txId = 100;
@@ -1017,10 +1017,14 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
         auto request = MakeRequest(++txId, "backup:tablet-scope");
         request->Record.MutableTransaction(0)->SetWorkingDir("/MyRoot/Tenant");
-        const auto collision = Submit(runtime, std::move(request));
-        UNIT_ASSERT_VALUES_EQUAL_C(collision.GetStatus(), NKikimrScheme::StatusAlreadyExists, collision.ShortDebugString());
-        UNIT_ASSERT_STRING_CONTAINS(collision.GetReason(), "UID_NAMESPACE_COLLISION");
-        UNIT_ASSERT(collision.GetOperationId().empty());
+        const auto acrossDatabase = Submit(runtime, std::move(request));
+        UNIT_ASSERT_VALUES_EQUAL_C(acrossDatabase.GetStatus(), NKikimrScheme::StatusAccepted, acrossDatabase.ShortDebugString());
+        UNIT_ASSERT_VALUES_EQUAL(acrossDatabase.GetOperationId(), ToString(originalId));
+        auto changedBody = MakeRequest(++txId, "backup:tablet-scope", "BACKUP `FullBackupCol1`; -- changed");
+        changedBody->Record.MutableTransaction(0)->SetWorkingDir("/MyRoot/Tenant");
+        const auto conflict = Submit(runtime, std::move(changedBody));
+        UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
+        UNIT_ASSERT_STRING_CONTAINS(conflict.GetReason(), "UID_CONFLICT");
         UNIT_ASSERT_VALUES_EQUAL(InternalGetFullBackup(runtime, txId).GetStatus(), Ydb::StatusIds::NOT_FOUND);
         const auto replay = Submit(runtime, ++txId, "backup:tablet-scope");
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());

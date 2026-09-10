@@ -124,10 +124,7 @@ public:
     }
 };
 
-// Invoke callbacks as lvalues: this synchronous helper neither transfers ownership
-// nor requires rvalue-callable operator(), even when the callback is temporary.
 template<class F>
-// NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
 void RunQueueClientCallback(const TQueueClientCallbackGuardFactory& guardFactory, F&& f) {
     std::unique_ptr<IQueueClientCallbackGuard> guard;
     if (guardFactory) {

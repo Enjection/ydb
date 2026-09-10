@@ -6066,8 +6066,6 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 auto& state = Self->IncrementalRestoreStates[operationId];
                 state.Uid = rowset.GetValueOrDefault<Schema::IncrementalRestoreState::Uid>();
                 state.OriginalDdl = rowset.GetValueOrDefault<Schema::IncrementalRestoreState::OriginalDdl>();
-                state.DomainPathId = TPathId(rowset.GetValueOrDefault<Schema::IncrementalRestoreState::DomainPathOwnerId>(),
-                    rowset.GetValueOrDefault<Schema::IncrementalRestoreState::DomainPathId>());
                 state.UserSID = rowset.GetValueOrDefault<Schema::IncrementalRestoreState::UserSID>();
                 state.BackupCollectionPathId = TPathId(rowset.GetValueOrDefault<Schema::IncrementalRestoreState::BackupCollectionPathOwnerId>(),
                     rowset.GetValueOrDefault<Schema::IncrementalRestoreState::BackupCollectionPathId>());

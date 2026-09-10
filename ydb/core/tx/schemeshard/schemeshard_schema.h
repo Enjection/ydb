@@ -2296,8 +2296,6 @@ struct Schema : NIceDb::Schema {
 
         struct Uid : Column<12, NScheme::NTypeIds::Utf8> {};
         struct OriginalDdl : Column<13, NScheme::NTypeIds::String> {};
-        struct DomainPathOwnerId : Column<14, NScheme::NTypeIds::Uint64> { using Type = TOwnerId; };
-        struct DomainPathId : Column<15, NScheme::NTypeIds::Uint64> {};
         struct UserSID : Column<16, NScheme::NTypeIds::Utf8> {};
         struct BackupCollectionPathOwnerId : Column<17, NScheme::NTypeIds::Uint64> { using Type = TOwnerId; };
         struct BackupCollectionPathId : Column<18, NScheme::NTypeIds::Uint64> {};
@@ -2305,7 +2303,7 @@ struct Schema : NIceDb::Schema {
 
         using TKey = TableKey<OperationId>;
         using TColumns = TableColumns<
-            Uid, OriginalDdl, DomainPathOwnerId, DomainPathId, UserSID,
+            Uid, OriginalDdl, UserSID,
             BackupCollectionPathOwnerId, BackupCollectionPathId, AwaitingInitialRestore,
             OperationId,
             State,
