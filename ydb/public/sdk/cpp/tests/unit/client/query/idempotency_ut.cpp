@@ -84,22 +84,7 @@ namespace {
             if (key) {
                 UNIT_ASSERT_VALUES_EQUAL(request.uid(), *key);
             }
-            if (key && mode == EExecMode::Execute) {
-                // Legacy endpoints can ignore UID fields in familiar modes.
-                // A keyed ExecuteQuery must select a mode they reject.
-                switch (request.exec_mode()) {
-                    case Ydb::Query::EXEC_MODE_UNSPECIFIED:
-                    case Ydb::Query::EXEC_MODE_PARSE:
-                    case Ydb::Query::EXEC_MODE_VALIDATE:
-                    case Ydb::Query::EXEC_MODE_EXPLAIN:
-                    case Ydb::Query::EXEC_MODE_EXECUTE:
-                        UNIT_FAIL("UID metadata was sent using a legacy execution mode");
-                    default:
-                        break;
-                }
-            } else {
-                UNIT_ASSERT_VALUES_EQUAL(static_cast<int>(request.exec_mode()), static_cast<int>(mode));
-            }
+            UNIT_ASSERT_VALUES_EQUAL(static_cast<int>(request.exec_mode()), static_cast<int>(mode));
             UNIT_ASSERT_VALUES_EQUAL(request.query_content().text(), ddl);
         }
         driver.Stop(true);
@@ -120,7 +105,9 @@ Y_UNIT_TEST_SUITE(QueryIdempotency) {
     }
 
     Y_UNIT_TEST(ExactKeyAfterSettingsCopy) {
-        CheckKey("Backup:AbC-019._", false);
+        CheckKey("ключ with spaces/and?symbols!", false);
+        CheckKey(std::string(120, 'x') + "ключ", false);
+        CheckKey(std::string("a\0b", 3), false);
     }
 
     Y_UNIT_TEST(ExplicitEmptyKeyIsPresent) {
@@ -128,7 +115,7 @@ Y_UNIT_TEST_SUITE(QueryIdempotency) {
     }
 
     Y_UNIT_TEST(RetryPreservesIdentity) {
-        CheckKey("backup:retry", true);
+        CheckKey("ключ/retry with spaces", true);
     }
 
 } // Y_UNIT_TEST_SUITE(QueryIdempotency)

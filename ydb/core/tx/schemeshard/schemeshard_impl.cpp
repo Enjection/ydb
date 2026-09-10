@@ -5882,8 +5882,6 @@ void TSchemeShard::StateConfigure(STFUNC_SIG) {
 
         //operation initiate msg, must return error
         HFuncTraced(TEvSchemeShard::TEvModifySchemeTransaction, Handle);
-        HFuncTraced(TEvSchemeShard::TEvLookupNativeOperation, Handle);
-        HFuncTraced(TEvSchemeShard::TEvProposeNativeOperation, Handle);
         HFuncTraced(TEvSchemeShard::TEvDescribeScheme, Handle);
         HFuncTraced(TEvSchemeShard::TEvNotifyTxCompletion, Handle);
         HFuncTraced(TEvSchemeShard::TEvCancelTx, Handle);
@@ -5924,8 +5922,6 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
 
         //operation initiate msg
         HFuncTraced(TEvSchemeShard::TEvModifySchemeTransaction, Handle);
-        HFuncTraced(TEvSchemeShard::TEvLookupNativeOperation, Handle);
-        HFuncTraced(TEvSchemeShard::TEvProposeNativeOperation, Handle);
         HFuncTraced(TEvSchemeShard::TEvDescribeScheme, Handle);
         HFuncTraced(TEvSchemeShard::TEvNotifyTxCompletion, Handle);
         HFuncTraced(TEvSchemeShard::TEvCancelTx, Handle);

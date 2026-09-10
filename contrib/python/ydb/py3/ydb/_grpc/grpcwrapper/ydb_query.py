@@ -191,6 +191,4 @@ class ExecuteQueryRequest(IToProto):
             req.pool_id = self.pool_id
         if self.uid is not None:
             req.uid = self.uid
-            if self.exec_mode == ydb_query_pb2.EXEC_MODE_EXECUTE:
-                req.exec_mode = ydb_query_pb2.EXEC_MODE_EXECUTE_WITH_UID
         return req

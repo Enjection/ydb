@@ -178,10 +178,6 @@ enum ExecMode {
     EXEC_MODE_EXPLAIN = 30;
     reserved 40; // EXEC_MODE_PREPARE
     EXEC_MODE_EXECUTE = 50;
-    // Execute with a native-operation UID. Older endpoints reject this mode
-    // instead of executing a request whose UID field they do not understand.
-    // Requires ExecuteQueryRequest.uid.
-    EXEC_MODE_EXECUTE_WITH_UID = 60;
 }
 
 enum StatsMode {
@@ -250,11 +246,10 @@ message ExecuteQueryRequest {
     bool collect_affected_rows = 15;
 
     // Optional durable submission identity for supported native operations.
-    // 1–256 ASCII bytes from [A-Za-z0-9_.:-], compared case-sensitively.
+    // 1-128 bytes with no UID-specific character restrictions, compared case-sensitively.
     // Reusing a key requires byte-identical original query text.
     // Unsupported statements, batches, and execution modes are rejected.
-    // Requires EXEC_MODE_EXECUTE_WITH_UID so older endpoints reject the request
-    // before execution. SDKs select this mode automatically when UID is set.
+    // Enable only after all serving nodes support UID; older binaries may ignore it.
     optional string uid = 16 [(Ydb.sensitive) = true];
 }
 

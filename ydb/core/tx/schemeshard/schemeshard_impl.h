@@ -1352,8 +1352,6 @@ public:
     void Handle(TEvSchemeShard::TEvInitTenantSchemeShard::TPtr &ev, const TActorContext &ctx);
 
     void Handle(TEvSchemeShard::TEvModifySchemeTransaction::TPtr &ev, const TActorContext &ctx);
-    void Handle(TEvSchemeShard::TEvLookupNativeOperation::TPtr& ev, const TActorContext& ctx);
-    void Handle(TEvSchemeShard::TEvProposeNativeOperation::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvSchemeShard::TEvDescribeScheme::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvSchemeShard::TEvNotifyTxCompletion::TPtr &ev, const TActorContext &ctx);
 
@@ -1798,7 +1796,6 @@ public:
     // Items are keyed by destination TPathId because CCT children are not 1-1 with user-visible items.
     TMap<ui64, TFullBackupInfo::TPtr> FullBackups;
 
-    // Separate from operation details: Forget must not release the key.
     // Family-separated UID indexes, rebuilt from native operation records.
     TMap<TNativeOperationKey, ui64> NativeOperationsByUid;
     TMaybe<TNativeOperationReplay> FindNativeOperationByUid(const TNativeOperationKey& key) const;

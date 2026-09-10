@@ -520,7 +520,7 @@ class QuerySession(BaseQuerySession["SyncDriver"]):
         :param pool_id: Optional resource pool ID for routing the query to a specific compute pool.
         :param uid: Optional key for a supported native backup or restore.
          Preserve the key and exact SQL across retries; requires server capability.
-         Keys are case-sensitive, 1-256 ASCII bytes from [A-Za-z0-9_.:-].
+         Keys are case-sensitive, 1-128 bytes with no UID-specific character restrictions.
 
         :return: Iterator with result sets
         """

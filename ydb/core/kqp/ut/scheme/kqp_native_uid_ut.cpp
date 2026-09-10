@@ -3,12 +3,9 @@
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 
 #include <ydb/public/api/grpc/ydb_query_v1.grpc.pb.h>
-#include <google/protobuf/descriptor.pb.h>
-#include <google/protobuf/dynamic_message.h>
 #include <grpcpp/create_channel.h>
 
 #include <atomic>
-#include <type_traits>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/draft/ydb_backup.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/operation/operation.h>
 
@@ -17,36 +14,25 @@ namespace NKikimr::NKqp {
     using namespace NYdb;
 
     Y_UNIT_TEST_SUITE(NativeBackupIdempotency) {
-        Y_UNIT_TEST(PublicWireRequiresUidAndGuardTogether) {
-            TKikimrRunner kikimr;
-            const auto channel = grpc::CreateChannel(kikimr.GetEndpoint(), grpc::InsecureChannelCredentials());
-            const auto stub = Ydb::Query::V1::QueryService::NewStub(channel);
-            for (bool guarded : {false, true}) {
-                Ydb::Query::ExecuteQueryRequest request;
-                request.set_exec_mode(guarded ? Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID : Ydb::Query::EXEC_MODE_EXECUTE);
-                request.mutable_query_content()->set_text("CREATE TABLE `/Root/malformed_uid` (id Uint64, PRIMARY KEY(id));");
-                if (!guarded) {
-                    request.set_uid("backup:unguarded");
+        Y_UNIT_TEST_TWIN(UidLengthRejectedBeforeAdmission, Sql) {
+            NKikimrConfig::TAppConfig config;
+            config.MutableFeatureFlags()->SetEnableBackupService(true);
+            TKikimrRunner kikimr(NKqp::TKikimrSettings(config).SetEnableBackupService(true));
+            for (const TString& uid : TVector<TString>{"", TString(129, 'a'), TString(127, 'a') + "я"}) {
+                auto settings = NQuery::TExecuteQuerySettings().ClientTimeout(TDuration::Seconds(20));
+                TString ddl = "BACKUP `missing`;";
+                if constexpr (Sql) {
+                    ddl = "BACKUP `missing` WITH (uid = '" + uid + "');";
+                } else {
+                    settings.Uid(uid);
                 }
-                grpc::ClientContext context;
-                context.AddMetadata("x-ydb-database", "/Root");
-                context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(20));
-                auto reader = stub->ExecuteQuery(&context, request);
-                Ydb::Query::ExecuteQueryResponsePart part;
-                unsigned parts = 0;
-                while (reader->Read(&part)) {
-                    ++parts;
-                    UNIT_ASSERT_VALUES_EQUAL(part.status(), Ydb::StatusIds::BAD_REQUEST);
-                    UNIT_ASSERT(!part.has_result_set());
-                }
-                UNIT_ASSERT(reader->Finish().ok());
-                UNIT_ASSERT(parts > 0);
+                const auto result = kikimr.GetQueryClient().ExecuteQuery(ddl, NQuery::TTxControl::NoTx(), settings).GetValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
+                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_NATIVE_OPERATION_UID");
             }
-            const auto path = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession().DescribeTable("/Root/malformed_uid").GetValueSync();
-            UNIT_ASSERT_VALUES_EQUAL(path.GetStatus(), EStatus::SCHEME_ERROR);
         }
 
-        Y_UNIT_TEST_TWIN(ForwardedUidRetainsGuardAndOriginalBytes, Concurrent) {
+        Y_UNIT_TEST_TWIN(ForwardedUidRetainsOriginalBytesAndOrdinaryQueryType, Concurrent) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
             TKikimrRunner kikimr(NKqp::TKikimrSettings(config).SetEnableBackupService(true).SetUseRealThreads(false));
@@ -59,24 +45,22 @@ namespace NKikimr::NKqp {
             auto* runtime = kikimr.GetTestServer().GetRuntime();
             unsigned forwarded = 0;
             const TString ddl = "-- exact original bytes\nBACKUP `forward_uid`;";
+            const TString uid = TString(120, 'x') + "ключ"; // 128 UTF-8 bytes.
             const auto previous = runtime->SetObserverFunc([&](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TEvKqp::TEvQueryRequest::EventType) {
                     auto* request = event->Get<TEvKqp::TEvQueryRequest>();
-                    if (request->Record.GetRequest().GetUid() == "backup:forward") {
-                        const auto guarded = Concurrent ? NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID
-                                                        : NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID;
+                    if (request->Record.GetRequest().GetUid() == uid) {
                         const auto ordinary = Concurrent ? NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY
                                                          : NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY;
-                        UNIT_ASSERT(request->HasNativeUidGuard());
                         UNIT_ASSERT_VALUES_EQUAL(request->GetType(), ordinary);
                         request->CalculateSerializedSize(); // Materialize the local gRPC context for forwarding.
-                        UNIT_ASSERT_VALUES_EQUAL(request->Record.GetRequest().GetType(), guarded);
+                        UNIT_ASSERT_VALUES_EQUAL(request->Record.GetRequest().GetType(), ordinary);
                         const auto bytes = request->Record.SerializeAsString();
                         request->Record.Clear();
                         UNIT_ASSERT(request->Record.ParseFromString(bytes));
                         UNIT_ASSERT_VALUES_EQUAL(request->GetType(), ordinary);
-                        UNIT_ASSERT(request->HasNativeUidGuard());
                         UNIT_ASSERT_VALUES_EQUAL(request->GetQuery(), ddl);
+                        UNIT_ASSERT_VALUES_EQUAL(request->Record.GetRequest().GetUid(), uid);
                         ++forwarded;
                     }
                 }
@@ -88,7 +72,7 @@ namespace NKikimr::NKqp {
                 // StreamExecuteQuery exercises both wire types explicitly.
                 auto iterator = kikimr.RunCall([&] {
                     return kikimr.GetQueryClient().StreamExecuteQuery(ddl, NQuery::TTxControl::NoTx(),
-                                                                      NQuery::TExecuteQuerySettings().Uid("backup:forward").ConcurrentResultSets(Concurrent).ClientTimeout(TDuration::Seconds(20)))
+                                                                      NQuery::TExecuteQuerySettings().Uid(uid).ConcurrentResultSets(Concurrent).ClientTimeout(TDuration::Seconds(20)))
                         .GetValueSync();
                 });
                 UNIT_ASSERT_VALUES_EQUAL_C(iterator.GetStatus(), EStatus::SUCCESS, iterator.GetIssues().ToString());
@@ -116,81 +100,6 @@ namespace NKikimr::NKqp {
             UNIT_ASSERT(forwarded >= 2);
         }
 
-        Y_UNIT_TEST_TWIN(KqpRejectsIncompleteUidGuardBeforeEffects, RemoveUid) {
-            TKikimrRunner kikimr(NKqp::TKikimrSettings().SetUseRealThreads(false));
-            auto* runtime = kikimr.GetTestServer().GetRuntime();
-            bool changed = false;
-            const auto previous = runtime->SetObserverFunc([&](TAutoPtr<IEventHandle>& event) {
-                if (!changed && event->GetTypeRewrite() == TEvKqp::TEvQueryRequest::EventType) {
-                    auto* request = event->Get<TEvKqp::TEvQueryRequest>();
-                    if (request->Record.GetRequest().GetUid() == "backup:malformed") {
-                        request->CalculateSerializedSize();
-                        if (RemoveUid) {
-                            request->Record.MutableRequest()->ClearUid();
-                        } else {
-                            request->Record.MutableRequest()->SetType(NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY);
-                        }
-                        changed = true;
-                    }
-                }
-                return NActors::TTestActorRuntimeBase::EEventAction::PROCESS;
-            });
-            const auto result = kikimr.RunCall([&] {
-                return kikimr.GetQueryClient().ExecuteQuery(
-                                                  "CREATE TABLE `/Root/incomplete_uid` (id Uint64, PRIMARY KEY(id));", NQuery::TTxControl::NoTx(),
-                                                  NQuery::TExecuteQuerySettings().Uid("backup:malformed").ClientTimeout(TDuration::Seconds(20)))
-                    .GetValueSync();
-            });
-            runtime->SetObserverFunc(previous);
-            UNIT_ASSERT(changed);
-            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
-            const auto path = kikimr.RunCall([&] {
-                return kikimr.GetTableClient().CreateSession().GetValueSync().GetSession().DescribeTable("/Root/incomplete_uid").GetValueSync();
-            });
-            UNIT_ASSERT_VALUES_EQUAL(path.GetStatus(), EStatus::SCHEME_ERROR);
-        }
-
-        Y_UNIT_TEST(LegacyProtoReaderCannotExecuteGuardedQueryType) {
-            // Model the old proto2 enum and the original field number; new UID
-            // metadata is unknown to this reader, just as on an older KQP node.
-            google::protobuf::FileDescriptorProto file;
-            file.set_name("legacy_native_uid_guard.proto");
-            file.set_syntax("proto2");
-            auto* type = file.add_enum_type();
-            type->set_name("EQueryType");
-            NKikimrKqp::EQueryType_descriptor()->CopyTo(type);
-            while (type->value_size() && type->value(type->value_size() - 1).number() >= 15) {
-                type->mutable_value()->RemoveLast();
-            }
-            auto* message = file.add_message_type();
-            message->set_name("LegacyQueryRequest");
-            auto* field = message->add_field();
-            field->set_name("Type");
-            field->set_number(3);
-            field->set_label(google::protobuf::FieldDescriptorProto::LABEL_OPTIONAL);
-            field->set_type(google::protobuf::FieldDescriptorProto::TYPE_ENUM);
-            field->set_type_name("EQueryType");
-            google::protobuf::DescriptorPool pool;
-            const auto* built = pool.BuildFile(file);
-            UNIT_ASSERT(built);
-            google::protobuf::DynamicMessageFactory factory(&pool);
-            const auto* descriptor = built->message_type(0);
-            const auto* typeField = descriptor->FindFieldByNumber(3);
-            std::unique_ptr<google::protobuf::Message> legacy(factory.GetPrototype(descriptor)->New());
-            for (auto guarded : {NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID,
-                                 NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID}) {
-                NKikimrKqp::TQueryRequest request;
-                request.SetType(guarded);
-                request.SetUid("backup:legacy");
-                request.SetAction(NKikimrKqp::QUERY_ACTION_EXECUTE);
-                request.SetQuery("BACKUP `daily`;");
-                UNIT_ASSERT(legacy->ParseFromString(request.SerializeAsString()));
-                UNIT_ASSERT(!legacy->GetReflection()->HasField(*legacy, typeField));
-                UNIT_ASSERT_VALUES_EQUAL(legacy->GetReflection()->GetEnumValue(*legacy, typeField),
-                                         static_cast<int>(NKikimrKqp::QUERY_TYPE_UNDEFINED));
-            }
-        }
-
         Y_UNIT_TEST_TWIN(SchemeShardUidErrorsReachCaller, AccessDenied) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
@@ -209,7 +118,7 @@ namespace NKikimr::NKqp {
             });
             UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
 
-            using TRequest = NSchemeShard::TEvSchemeShard::TEvProposeNativeOperation;
+            using TRequest = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransaction;
             using TResponse = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult;
             using TAction = NActors::TTestActorRuntimeBase::EEventAction;
             const auto status = AccessDenied ? NKikimrScheme::StatusAccessDenied : NKikimrScheme::StatusAlreadyExists;
@@ -219,7 +128,7 @@ namespace NKikimr::NKqp {
             const auto previousObserver = runtime->SetObserverFunc([runtime, intercepted, status, reason](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TRequest::EventType) {
                     const auto& record = event->Get<TRequest>()->Record;
-                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:status") {
+                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:status") {
                         // Model SchemeShard's refusal before it admits any native
                         // work, exercising TxProxy, KQP, gRPC, and SDK conversion.
                         auto response = MakeHolder<TResponse>(status, record.GetTxId(), record.GetTabletId(), reason);
@@ -243,7 +152,7 @@ namespace NKikimr::NKqp {
             UNIT_ASSERT(result.GetResultSets().empty());
         }
 
-        Y_UNIT_TEST_TWIN(UnknownTabletProtocolCannotDowngradeToUnkeyedWork, Admission) {
+        Y_UNIT_TEST_TWIN(NativeRequestTimeoutAllowsRetry, Admission) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
             TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
@@ -259,26 +168,17 @@ namespace NKikimr::NKqp {
             });
             UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
 
-            using TRequest = std::conditional_t<Admission,
-                                                NSchemeShard::TEvSchemeShard::TEvProposeNativeOperation,
-                                                NSchemeShard::TEvSchemeShard::TEvLookupNativeOperation>;
-            using TOrdinary = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransaction;
+            using TRequest = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransaction;
             using TAction = NActors::TTestActorRuntimeBase::EEventAction;
             const auto intercepted = std::make_shared<std::atomic<bool>>(false);
-            const auto unguarded = std::make_shared<std::atomic<unsigned>>(0);
             auto* runtime = kikimr.GetTestServer().GetRuntime();
-            const auto previous = runtime->SetObserverFunc([intercepted, unguarded](TAutoPtr<IEventHandle>& event) {
+            const auto previous = runtime->SetObserverFunc([intercepted](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TRequest::EventType) {
                     const auto& record = event->Get<TRequest>()->Record;
-                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:old-tablet") {
+                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() != Admission
+                        && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:old-tablet") {
                         intercepted->store(true);
-                        return TAction::DROP; // An older tablet does not handle this wire message.
-                    }
-                } else if (event->GetTypeRewrite() == TOrdinary::EventType) {
-                    for (const auto& tx : event->Get<TOrdinary>()->Record.GetTransaction()) {
-                        if (tx.GetOperationType() == NKikimrSchemeOp::ESchemeOpBackupBackupCollection) {
-                            ++*unguarded;
-                        }
+                        return TAction::DROP; // Model a lost lookup or admission request.
                     }
                 }
                 return TAction::PROCESS;
@@ -289,15 +189,14 @@ namespace NKikimr::NKqp {
             auto future = kikimr.RunInThreadPool([&] {
                 return client.ExecuteQuery(sql, NQuery::TTxControl::NoTx(), settings).GetValueSync();
             });
-            runtime->WaitFor("guarded native request", [&] { return intercepted->load(); });
+            runtime->WaitFor("native request", [&] { return intercepted->load(); });
             runtime->SimulateSleep(TDuration::Seconds(31));
             const auto failed = runtime->WaitFuture(future);
             runtime->SetObserverFunc(previous);
             UNIT_ASSERT_VALUES_EQUAL_C(failed.GetStatus(), EStatus::UNAVAILABLE, failed.GetIssues().ToString());
-            UNIT_ASSERT_VALUES_EQUAL(unguarded->load(), 0);
             UNIT_ASSERT(failed.GetResultSets().empty());
             // The failed attempt reserved nothing. The same request can proceed
-            // when a tablet supporting the guarded protocol becomes available.
+            // once requests reach the tablet again.
             const auto retried = kikimr.RunCall([&] {
                 return client.ExecuteQuery(sql, NQuery::TTxControl::NoTx(), settings).GetValueSync();
             });
@@ -320,7 +219,7 @@ namespace NKikimr::NKqp {
             });
             UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
 
-            using TPropose = NSchemeShard::TEvSchemeShard::TEvProposeNativeOperation;
+            using TPropose = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransaction;
             using TReply = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult;
             using TAction = NActors::TTestActorRuntimeBase::EEventAction;
             const auto originalId = std::make_shared<std::atomic<ui64>>(0);
@@ -330,7 +229,7 @@ namespace NKikimr::NKqp {
             const auto previous = runtime->SetObserverFunc([originalId, proposals, lost](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TPropose::EventType) {
                     const auto& record = event->Get<TPropose>()->Record;
-                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:lost-api") {
+                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:lost-api") {
                         if (++*proposals == 1) {
                             originalId->store(record.GetTxId());
                         }

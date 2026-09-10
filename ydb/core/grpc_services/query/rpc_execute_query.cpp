@@ -120,12 +120,6 @@ bool ParseQueryAction(const Ydb::Query::ExecuteQueryRequest& req, NKikimrKqp::EQ
             queryAction = NKikimrKqp::QUERY_ACTION_EXPLAIN;
             return true;
 
-        case Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID:
-            if (!req.has_uid()) {
-                issues.AddIssue(NYql::TIssue("UID_REQUIRED: guarded execution requires uid"));
-                return false;
-            }
-            [[fallthrough]];
         case Ydb::Query::EXEC_MODE_EXECUTE:
             queryAction = NKikimrKqp::QUERY_ACTION_EXECUTE;
             return true;
@@ -160,7 +154,6 @@ bool NeedReportStats(const Ydb::Query::ExecuteQueryRequest& req) {
         case Ydb::Query::EXEC_MODE_EXPLAIN:
             return true;
 
-        case Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID:
         case Ydb::Query::EXEC_MODE_EXECUTE:
             switch (req.stats_mode()) {
                 case Ydb::Query::StatsMode::STATS_MODE_BASIC:
@@ -181,7 +174,6 @@ bool NeedReportAst(const Ydb::Query::ExecuteQueryRequest& req) {
         case Ydb::Query::EXEC_MODE_EXPLAIN:
             return true;
 
-        case Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID:
         case Ydb::Query::EXEC_MODE_EXECUTE:
             switch (req.stats_mode()) {
                 case Ydb::Query::StatsMode::STATS_MODE_FULL:
@@ -201,7 +193,6 @@ bool NeedCollectDiagnostics(const Ydb::Query::ExecuteQueryRequest& req) {
         case Ydb::Query::EXEC_MODE_EXPLAIN:
             return true;
 
-        case Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID:
         case Ydb::Query::EXEC_MODE_EXECUTE:
             switch (req.stats_mode()) {
                 case Ydb::Query::StatsMode::STATS_MODE_FULL:
@@ -285,7 +276,7 @@ private:
         if (req->has_uid()) {
             if (!NBackup::IsValidNativeOperationUid(req->uid())) {
                 issues.AddIssue(NYql::TIssue(
-                    "INVALID_NATIVE_OPERATION_UID: expected 1-256 ASCII bytes from [A-Za-z0-9_.:-]"));
+                    "INVALID_NATIVE_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
                 return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
             }
             if (QueryAction != NKikimrKqp::QUERY_ACTION_EXECUTE || req->has_tx_control()
@@ -295,11 +286,6 @@ private:
                 issues.AddIssue(NYql::TIssue(
                     "IDEMPOTENCY_NOT_SUPPORTED: keyed execution requires SQL in NoTx mode without parameters"));
                 return ReplyFinishStream(Ydb::StatusIds::UNSUPPORTED, std::move(issues));
-            }
-            if (req->exec_mode() != Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID) {
-                issues.AddIssue(NYql::TIssue(
-                    "UID_GUARD_REQUIRED: uid requires EXEC_MODE_EXECUTE_WITH_UID"));
-                return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
             }
         }
 
@@ -325,11 +311,6 @@ private:
         auto queryType = req->concurrent_result_sets()
             ? NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY
             : NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY;
-        if (req->has_uid()) {
-            queryType = req->concurrent_result_sets()
-                ? NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID
-                : NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID;
-        }
 
         auto cachePolicy = google::protobuf::Arena::CreateMessage<Ydb::Table::QueryCachePolicy>(Request_->GetArena());
         cachePolicy->set_keep_in_cache(true);

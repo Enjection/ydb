@@ -125,13 +125,9 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             {"to", shardToRequest},
             {"ev", req->ToString()});
         if (req->Record.TransactionSize() == 1 && req->Record.GetTransaction(0).HasNativeOperationIdentity()) {
-            auto guarded = MakeHolder<NSchemeShard::TEvSchemeShard::TEvProposeNativeOperation>();
-            guarded->Record.Swap(&req->Record);
-            NTabletPipe::SendData(ctx, PipeClient, guarded.Release());
             ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++NativeRequestGeneration));
-        } else {
-            NTabletPipe::SendData(ctx, PipeClient, req.Release());
         }
+        NTabletPipe::SendData(ctx, PipeClient, req.Release());
     }
 
     THolder<TEvSchemeShardPropose> MakePropose(ui64 schemeshardIdToRequest) {
@@ -2047,12 +2043,11 @@ void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeyS
         return Die(ctx);
     }
     SchemeshardIdToRequest = GetShardToRequest(entry, ResolveForACL.front());
-    auto ordinary = MakePropose(SchemeshardIdToRequest);
+    auto request = MakePropose(SchemeshardIdToRequest);
     // Bind lookup to the authenticated database, before any source-path
     // adjustment. Only admission on a miss depends on the source collection.
-    ordinary->Record.MutableTransaction(0)->SetWorkingDir(GetRequestProto().GetDatabaseName());
-    auto request = MakeHolder<NSchemeShard::TEvSchemeShard::TEvLookupNativeOperation>();
-    request->Record.Swap(&ordinary->Record);
+    request->Record.MutableTransaction(0)->SetWorkingDir(GetRequestProto().GetDatabaseName());
+    request->Record.MutableTransaction(0)->MutableNativeOperationIdentity()->SetLookupOnly(true);
     if (UserToken) {
         request->Record.SetUserToken(UserToken->SerializeAsString());
     }

@@ -486,16 +486,11 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         PrepareTable(runtime, env, txId, "Table1");
     }
 
-    template <typename TEvent>
-    NKikimrScheme::TEvModifySchemeTransactionResult SubmitNativeWire(
-        TTestBasicRuntime& runtime, THolder<TEvSchemeShard::TEvModifySchemeTransaction> ordinary)
+    NKikimrScheme::TEvModifySchemeTransactionResult LookupNativeOperation(
+        TTestBasicRuntime& runtime, THolder<TEvSchemeShard::TEvModifySchemeTransaction> request)
     {
-        auto request = MakeHolder<TEvent>();
-        request->Record.Swap(&ordinary->Record);
-        const auto sender = runtime.AllocateEdgeActor();
-        runtime.SendToPipe(TTestTxConfig::SchemeShard, sender, request.Release(), 0, GetPipeConfigWithRetries());
-        const auto response = runtime.GrabEdgeEventRethrow<TEvSchemeShard::TEvModifySchemeTransactionResult>(sender);
-        return response->Get()->Record;
+        request->Record.MutableTransaction(0)->MutableNativeOperationIdentity()->SetLookupOnly(true);
+        return Submit(runtime, std::move(request));
     }
 
     Y_UNIT_TEST_TWIN(RetryRacingForgetHasOneConsistentOutcome, ForgetFirst) {
@@ -601,8 +596,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
             auto ordinary = MakeRequest(id, "backup:independent-tablets", ddl);
             ordinary->Record.SetTabletId(tablet);
             ordinary->Record.MutableTransaction(0)->SetWorkingDir(database);
-            auto request = MakeHolder<TEvSchemeShard::TEvProposeNativeOperation>();
-            request->Record.Swap(&ordinary->Record);
+            auto request = std::move(ordinary);
             const auto sender = runtime.AllocateEdgeActor();
             runtime.SendToPipe(tablet, sender, request.Release(), 0, GetPipeConfigWithRetries());
             const auto response = runtime.GrabEdgeEventRethrow<TEvSchemeShard::TEvModifySchemeTransactionResult>(sender);
@@ -754,7 +748,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         const auto accepted = Submit(runtime, originalId, "backup:metrics");
         UNIT_ASSERT_VALUES_EQUAL_C(accepted.GetStatus(), NKikimrScheme::StatusAccepted, accepted.ShortDebugString());
         env.TestWaitNotification(runtime, originalId);
-        const auto replay = SubmitNativeWire<TEvSchemeShard::TEvLookupNativeOperation>(runtime, MakeRequest(++txId, "backup:metrics"));
+        const auto replay = LookupNativeOperation(runtime, MakeRequest(++txId, "backup:metrics"));
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
         const auto conflict = Submit(runtime, ++txId, "backup:metrics", "BACKUP  `FullBackupCol1`;");
         UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
@@ -771,7 +765,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         ui64 txId = 100;
         Prepare(runtime, env, txId);
         const ui64 lookupId = ++txId;
-        const auto missing = SubmitNativeWire<TEvSchemeShard::TEvLookupNativeOperation>(
+        const auto missing = LookupNativeOperation(
             runtime, MakeRequest(lookupId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(missing.GetStatus(), NKikimrScheme::StatusSuccess, missing.ShortDebugString());
         UNIT_ASSERT(!missing.HasOperationId());
@@ -780,41 +774,28 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
 
         const ui64 originalId = ++txId;
         const TString ddl = "BACKUP `FullBackupCol1`; -- different from the lookup";
-        const auto admitted = SubmitNativeWire<TEvSchemeShard::TEvProposeNativeOperation>(
+        const auto admitted = Submit(
             runtime, MakeRequest(originalId, "backup:lookup", ddl));
         UNIT_ASSERT_VALUES_EQUAL_C(admitted.GetStatus(), NKikimrScheme::StatusAccepted, admitted.ShortDebugString());
         env.TestWaitNotification(runtime, originalId);
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
-        const auto replay = SubmitNativeWire<TEvSchemeShard::TEvLookupNativeOperation>(
+        const auto replay = LookupNativeOperation(
             runtime, MakeRequest(++txId, "backup:lookup", ddl));
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
         UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
-        const auto conflict = SubmitNativeWire<TEvSchemeShard::TEvLookupNativeOperation>(
+        const auto conflict = LookupNativeOperation(
             runtime, MakeRequest(++txId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
         UNIT_ASSERT(!conflict.HasOperationId());
         const auto forgotten = InternalForgetFullBackup(runtime, originalId, ++txId);
         UNIT_ASSERT_VALUES_EQUAL_C(forgotten.GetStatus(), Ydb::StatusIds::SUCCESS, forgotten.ShortDebugString());
-        const auto released = SubmitNativeWire<TEvSchemeShard::TEvLookupNativeOperation>(
+        const auto released = LookupNativeOperation(
             runtime, MakeRequest(++txId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(released.GetStatus(), NKikimrScheme::StatusSuccess, released.ShortDebugString());
         UNIT_ASSERT(!released.HasOperationId());
     }
 
-    Y_UNIT_TEST(GuardedProposalWithoutUidCannotExecute) {
-        TTestBasicRuntime runtime;
-        TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
-        ui64 txId = 100;
-        Prepare(runtime, env, txId);
-        const ui64 rejectedId = ++txId;
-        auto request = MakeRequest(rejectedId, "backup:guarded");
-        request->Record.MutableTransaction(0)->ClearNativeOperationIdentity();
-        const auto rejected = SubmitNativeWire<TEvSchemeShard::TEvProposeNativeOperation>(runtime, std::move(request));
-        UNIT_ASSERT_VALUES_EQUAL_C(rejected.GetStatus(), NKikimrScheme::StatusInvalidParameter, rejected.ShortDebugString());
-        UNIT_ASSERT_VALUES_EQUAL(InternalGetFullBackup(runtime, rejectedId).GetStatus(), Ydb::StatusIds::NOT_FOUND);
-    }
-
-    Y_UNIT_TEST(GuardedRequestsDoNotExposeIdentityInLogs) {
+    Y_UNIT_TEST(NativeRequestsDoNotExposeIdentityInLogs) {
         const auto check = []<typename TEvent>() {
             TEvent request;
             request.Record.SetUserToken("native-token-secret");
@@ -826,8 +807,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
             UNIT_ASSERT(!printed.Contains("native-uid-secret"));
             UNIT_ASSERT(!printed.Contains("native-ddl-secret"));
         };
-        check.template operator()<TEvSchemeShard::TEvLookupNativeOperation>();
-        check.template operator()<TEvSchemeShard::TEvProposeNativeOperation>();
+        check.template operator()<TEvSchemeShard::TEvModifySchemeTransaction>();
     }
 
     Y_UNIT_TEST(ReplayKeepsOriginalOperationAfterReboot) {
@@ -903,7 +883,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
         ui64 txId = 100;
         Prepare(runtime, env, txId);
-        for (const TString& key : TVector<TString>{"", "bad key", "bad/key", TString(257, 'a'), TString("a\0b", 3), "ключ"}) {
+        for (const TString& key : TVector<TString>{"", TString(129, 'a'), TString(127, 'a') + "я"}) {
             const auto response = Submit(runtime, ++txId, key);
             UNIT_ASSERT_VALUES_EQUAL_C(response.GetStatus(), NKikimrScheme::StatusInvalidParameter, response.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(InternalGetFullBackup(runtime, txId).GetStatus(), Ydb::StatusIds::NOT_FOUND);
@@ -1160,13 +1140,18 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         TTestEnv env(runtime, TTestEnvOptions().EnableBackupService(true));
         ui64 txId = 100;
         Prepare(runtime, env, txId);
-        for (const TString& key : TVector<TString>{"0", "A", "a", "a-_.:Z019", TString(256, 'x')}) {
+        for (const TString& key : TVector<TString>{"0", "A", "a", "a-_.:Z019", "with spaces/and?symbols!", "ключ", TString("a\0b", 3), TString(128, 'x'), TString(126, 'x') + "я"}) {
             const auto response = Submit(runtime, ++txId, key);
             UNIT_ASSERT_VALUES_EQUAL_C(response.GetStatus(), NKikimrScheme::StatusAccepted, response.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(response.GetOperationId(), ToString(txId));
             env.TestWaitNotification(runtime, txId);
             UNIT_ASSERT_VALUES_EQUAL(InternalGetFullBackup(runtime, txId).GetFullBackup().GetProgress(),
                 Ydb::Backup::BackupProgress::PROGRESS_DONE);
+            const ui64 originalId = txId;
+            RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
+            const auto replay = Submit(runtime, ++txId, key);
+            UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
+            UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
             // Native destination names have second precision. Ordinary workflow
             // admission still applies independently of the external key.
             runtime.AdvanceCurrentTime(TDuration::Seconds(1));

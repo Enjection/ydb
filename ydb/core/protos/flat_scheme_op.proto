@@ -2004,6 +2004,8 @@ message TSetColumnConstraintSettings {
 message TNativeOperationIdentity {
     optional string Uid = 1 [(Ydb.sensitive) = true];
     optional bytes OriginalDdl = 3 [(Ydb.sensitive) = true];
+    // Read retained identity without admitting an operation on a miss.
+    optional bool LookupOnly = 4 [default = false];
 }
 
 message TModifyScheme {

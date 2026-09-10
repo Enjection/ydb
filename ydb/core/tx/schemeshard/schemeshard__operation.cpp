@@ -379,10 +379,11 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
     const bool LookupOnly;
     TMaybe<ECumulativeCounters> NativeUidCounter;
 
-    TTxOperationPropose(TSchemeShard* self, TProposeRequest::TPtr request, bool lookupOnly = false)
+    TTxOperationPropose(TSchemeShard* self, TProposeRequest::TPtr request)
         : TBase(self)
         , Request(request)
-        , LookupOnly(lookupOnly)
+        , LookupOnly(Request->Get()->Record.TransactionSize() == 1
+            && Request->Get()->Record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly())
     {}
 
     TTxType GetTxType() const override { return TXTYPE_PROPOSE; }
@@ -415,7 +416,7 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
             const auto& identity = tx.GetNativeOperationIdentity();
             if (!NBackup::IsValidNativeOperationUid(identity.GetUid())) {
                 return reject(NKikimrScheme::StatusInvalidParameter,
-                    "INVALID_NATIVE_OPERATION_UID: expected 1-256 ASCII bytes from [A-Za-z0-9_.:-]");
+                    "INVALID_NATIVE_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
             }
             if (!identity.HasOriginalDdl() || identity.GetOriginalDdl().empty())
             {
@@ -430,16 +431,18 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
             if (const auto receipt = Self->FindNativeOperationByUid(*key)) {
                 // A known key is not authority to read another user's receipt.
                 // Check this before comparing or exposing the original request.
-                if (receipt->UserSID != UserSID) {
+                const auto match = CompareOperationUid(
+                    {receipt->DomainPathId, TStringBuf(receipt->UserSID), TStringBuf(receipt->OriginalDdl)},
+                    {workingDir.GetPathIdForDomain(), TStringBuf(UserSID), TStringBuf(identity.GetOriginalDdl())});
+                if (match == EUidReplayMatch::OwnerMismatch) {
                     return reject(NKikimrScheme::StatusAccessDenied, "Access to the operation receipt is denied");
                 }
-                if (receipt->DomainPathId != workingDir.GetPathIdForDomain()) {
+                if (match == EUidReplayMatch::DomainMismatch) {
                     NativeUidCounter = COUNTER_NATIVE_UID_CONFLICTS;
                     return reject(NKikimrScheme::StatusAlreadyExists,
                         "UID_NAMESPACE_COLLISION: UID is already in use");
                 }
-                if (receipt->OriginalDdl != identity.GetOriginalDdl())
-                {
+                if (match == EUidReplayMatch::RequestMismatch) {
                     NativeUidCounter = COUNTER_NATIVE_UID_CONFLICTS;
                     return reject(NKikimrScheme::StatusPreconditionFailed,
                         "UID_CONFLICT: the key belongs to a different request");
@@ -871,36 +874,6 @@ struct TSchemeShard::TTxOperationPlanStep: public NTabletFlatExecutor::TTransact
 
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxOperationPropose(TEvSchemeShard::TEvCancelTx::TPtr& ev) {
     return new TTxOperationProposeCancelTx(this, ev);
-}
-
-namespace {
-
-template <typename TEvent>
-TEvSchemeShard::TEvModifySchemeTransaction::TPtr UnwrapNativeOperation(typename TEvent::TPtr& ev) {
-    auto request = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>();
-    request->Record.Swap(&ev->Get()->Record);
-    TAutoPtr<IEventHandle> handle = new IEventHandle(ev->GetRecipientRewrite(), ev->Sender,
-        request.Release(), ev->Flags, ev->Cookie, nullptr, std::move(ev->TraceId));
-    return IEventHandle::Downcast<TEvSchemeShard::TEvModifySchemeTransaction>(std::move(handle));
-}
-
-} // namespace
-
-void TSchemeShard::Handle(TEvSchemeShard::TEvLookupNativeOperation::TPtr& ev, const TActorContext& ctx) {
-    auto request = UnwrapNativeOperation<TEvSchemeShard::TEvLookupNativeOperation>(ev);
-    Execute(new TTxOperationPropose(this, request, true), ctx);
-}
-
-void TSchemeShard::Handle(TEvSchemeShard::TEvProposeNativeOperation::TPtr& ev, const TActorContext& ctx) {
-    const auto& record = ev->Get()->Record;
-    if (record.TransactionSize() != 1 || !record.GetTransaction(0).HasNativeOperationIdentity()) {
-        ctx.Send(ev->Sender, new TEvSchemeShard::TEvModifySchemeTransactionResult(
-            NKikimrScheme::StatusInvalidParameter, record.GetTxId(), TabletID(),
-            "Native operation proposal requires exactly one UID-bearing operation"), 0, ev->Cookie);
-        return;
-    }
-    auto request = UnwrapNativeOperation<TEvSchemeShard::TEvProposeNativeOperation>(ev);
-    Handle(request, ctx);
 }
 
 NTabletFlatExecutor::ITransaction* TSchemeShard::CreateTxOperationPropose(TEvSchemeShard::TEvModifySchemeTransaction::TPtr& ev) {

@@ -449,9 +449,6 @@ public:
             case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT:
             case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT_STREAMING:
             case NKikimrKqp::QUERY_TYPE_UNDEFINED:
-            // These wire-only types are normalized by TEvQueryRequest::GetType.
-            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY_WITH_UID:
-            case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY_WITH_UID:
                 return false;
         }
     }
@@ -512,12 +509,6 @@ public:
                 {"traceId", TraceId()});
             ReplyProcessError(ev, Ydb::StatusIds::BAD_SESSION, "Session is under shutdown");
             CleanupAndPassAway();
-            return;
-        }
-
-        if (ev->Get()->HasNativeUidGuard() != ev->Get()->Record.GetRequest().HasUid()) {
-            ReplyProcessError(ev, Ydb::StatusIds::BAD_REQUEST,
-                "UID_GUARD_REQUIRED: UID metadata and guarded query type must be supplied together");
             return;
         }
 
@@ -1602,7 +1593,7 @@ public:
         }
         if (!NBackup::IsValidNativeOperationUid(*key)) {
             ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
-                "INVALID_NATIVE_OPERATION_UID: expected 1–256 ASCII bytes from [A-Za-z0-9_.:-]");
+                "INVALID_NATIVE_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
             return false;
         }
         if (!supported || QueryState->Statements.size() > 1 ||

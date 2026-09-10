@@ -320,9 +320,7 @@ public:
         }
 
         auto request = MakeRequest<Ydb::Query::ExecuteQueryRequest>();
-        request.set_exec_mode(settings.Uid_.has_value() && settings.ExecMode_ == EExecMode::Execute
-            ? ::Ydb::Query::EXEC_MODE_EXECUTE_WITH_UID
-            : ::Ydb::Query::ExecMode(settings.ExecMode_));
+        request.set_exec_mode(::Ydb::Query::ExecMode(settings.ExecMode_));
         request.set_stats_mode(::Ydb::Query::StatsMode(settings.StatsMode_));
         request.set_collect_affected_rows(settings.CollectAffectedRows_);
         request.set_pool_id(TStringType{settings.ResourcePool_});

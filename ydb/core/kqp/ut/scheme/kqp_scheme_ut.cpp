@@ -17243,7 +17243,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
 
         auto client = kikimr.GetQueryClient();
-        const TString query = "BACKUP `keyed_backup` WITH (uid = 'backup:sql');";
+        const TString query = "BACKUP `keyed_backup` WITH (uid = 'ключ с пробелами/и?символами!');";
         TString originalId;
         for (ui32 attempt = 0; attempt != 2; ++attempt) {
             const auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).GetValueSync();
@@ -17293,7 +17293,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
 
         auto client = kikimr.GetQueryClient();
-        const TString query = "BACKUP `request_keyed_backup` WITH (uid = 'backup:dual');";
+        const TString query = "BACKUP `request_keyed_backup` WITH (uid = 'ключ с пробелами/и?символами!');";
         const auto mismatch = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
             NYdb::NQuery::TExecuteQuerySettings().Uid("backup:other")).GetValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(mismatch.GetStatus(), EStatus::BAD_REQUEST, mismatch.GetIssues().ToString());
@@ -17303,7 +17303,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         for (ui32 attempt = 0; attempt != 2; ++attempt) {
             auto settings = NYdb::NQuery::TExecuteQuerySettings();
             if (attempt == 0) {
-                settings.Uid("backup:dual");
+                settings.Uid("ключ с пробелами/и?символами!");
             }
             const auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(), settings).GetValueSync();
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());

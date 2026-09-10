@@ -14,10 +14,10 @@ from ydb.query.session import QuerySession
 from ydb.retries import BackoffSettings, RetrySettings
 
 DDL = "-- keep original bytes\nBACKUP `daily`;"
-KEY = "Backup:AbC-019._"
+KEY = "ключ with spaces/and?symbols!"
 
 
-@pytest.mark.parametrize("key", [None, "", KEY, "a" * 256])
+@pytest.mark.parametrize("key", [None, "", KEY, "a" * 128, "я" * 64, "a\0b"])
 def test_request_presence_and_bytes(key):
     request = create_execute_query_request(
         query=DDL,
@@ -39,11 +39,7 @@ def test_request_presence_and_bytes(key):
     assert request.HasField("uid") == (key is not None)
     if key is not None:
         assert request.uid == key
-        # Older ExecuteQuery endpoints understand these modes and can ignore
-        # unknown UID fields. Keyed execution must use a guarded wire mode.
-        assert request.exec_mode not in {0, 10, 20, 30, 50}
-    else:
-        assert request.exec_mode == 50
+    assert request.exec_mode == QueryExecMode.EXECUTE
     assert request.query_content.text == DDL
     assert not request.HasField("tx_control")
 
@@ -107,7 +103,7 @@ def check_captured(driver, count):
     for request in driver.requests:
         assert request.HasField("uid")
         assert request.uid == KEY
-        assert request.exec_mode not in {0, 10, 20, 30, 50}
+        assert request.exec_mode == QueryExecMode.EXECUTE
         assert request.query_content.text == DDL
 
 
