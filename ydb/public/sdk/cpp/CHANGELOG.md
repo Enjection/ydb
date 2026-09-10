@@ -1,7 +1,3 @@
-* Added optional `TExecuteQuerySettings::Uid` for native backup and restore requests on servers supporting native UID deduplication. The caller's key and exact SQL are preserved across SDK retries. Keyed execution uses a distinct wire mode that older endpoints reject before execution.
-
-* Query and table stream/result accessors now throw `std::bad_optional_access` when the requested optional value is absent.
-
 * Added `EQ_HEIGHT_HISTOGRAM` to `EMultiColumnStatisticsType`.
 
 # v3.22.0
