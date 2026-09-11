@@ -112,7 +112,8 @@ public:
         const TString& database, TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
         bool temporary, bool createTmpDir, bool isCreateTableAs, TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
         bool expectsResult, TTxAllocatorState::TPtr txAlloc,
-        const TActorId& kqpTempTablesAgentActor)
+        const TActorId& kqpTempTablesAgentActor,
+        std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
         : PhyTx(phyTx)
         , QueryType(queryType)
         , QueryData(queryData)
@@ -129,6 +130,7 @@ public:
         , ExpectsResult(expectsResult)
         , TxAlloc(std::move(txAlloc))
         , KqpTempTablesAgentActor(kqpTempTablesAgentActor)
+        , OperationIdempotency(std::move(operationIdempotency))
     {
         YQL_ENSURE(RequestContext);
         YQL_ENSURE(PhyTx);
@@ -728,6 +730,10 @@ public:
                 return;
         }
 
+        if (OperationIdempotency) {
+            *ev->Record.MutableTransaction()->MutableModifyScheme()->MutableOperationIdempotency() = *OperationIdempotency;
+        }
+
         auto promise = NewPromise<IKqpGateway::TGenericResult>();
 
         bool successOnNotExist = false;
@@ -744,7 +750,8 @@ public:
             ev.Release(),
             promise,
             failedOnAlreadyExists,
-            successOnNotExist
+            successOnNotExist,
+            OperationIdempotency.has_value()
         );
         RegisterWithSameMailbox(requestHandler);
 
@@ -755,6 +762,7 @@ public:
             auto ev = MakeHolder<TEvPrivate::TEvResult>();
             ev->Result.SetStatus(value.Status());
             ev->Result.OperationId = value.OperationId;
+            ev->Result.IdempotencyStatus = value.IdempotencyStatus;
 
             if (value.Issues()) {
                 NYql::TIssue rootIssue(TStringBuilder() << "Executing " << NKikimrSchemeOp::EOperationType_Name(operationType));
@@ -821,6 +829,17 @@ public:
 
     void Bootstrap() {
         const auto& schemeOp = PhyTx->GetSchemeOperation();
+        if (OperationIdempotency) {
+            const auto kind = schemeOp.GetOperationCase();
+            if (kind != NKqpProto::TKqpSchemeOperation::kBackup
+                && kind != NKqpProto::TKqpSchemeOperation::kBackupIncremental
+                && kind != NKqpProto::TKqpSchemeOperation::kRestore)
+            {
+                ReplyErrorAndDie(Ydb::StatusIds::UNSUPPORTED,
+                    NYql::TIssue("IDEMPOTENCY_NOT_SUPPORTED: unsupported scheme operation"));
+                return;
+            }
+        }
         if (schemeOp.GetObjectType()) {
             MakeObjectRequest();
         } else if (IsCreateTableAs && schemeOp.GetOperationCase() == NKqpProto::TKqpSchemeOperation::kAlterTable) {
@@ -1305,10 +1324,10 @@ public:
     void HandleExecute(TEvPrivate::TEvResult::TPtr& ev) {
         auto& response = *ResponseEv->Record.MutableResponse();
 
-        response.SetStatus(GetYdbStatus(ev->Get()->Result));
+        response.SetStatus(ev->Get()->Result.IdempotencyStatus.GetOrElse(GetYdbStatus(ev->Get()->Result)));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
-        if (ExpectsResult && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
+        if (ExpectsResult && response.GetStatus() == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
             YQL_ENSURE(TxAlloc);
             auto guard = TxAlloc->TypeEnv.BindAllocator();
 
@@ -1465,6 +1484,7 @@ private:
     bool ExpectsResult = false;
     TTxAllocatorState::TPtr TxAlloc;
     const TActorId KqpTempTablesAgentActor;
+    const std::optional<NKikimrSchemeOp::TOperationIdempotency> OperationIdempotency;
     TActorId AnalyzeActorId;
 };
 
@@ -1476,12 +1496,13 @@ IActor* CreateKqpSchemeExecuter(
     TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
     bool temporary, bool createTmpDir, bool isCreateTableAs,
     TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
-    bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor)
+    bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor,
+    std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
 {
     return new TKqpSchemeExecuter(
         phyTx, queryType, queryData, target, requestType, database, userToken, clientAddress,
         temporary, createTmpDir, isCreateTableAs, tempDirName, std::move(ctx),
-        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor);
+        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor, std::move(operationIdempotency));
 }
 
 } // namespace NKikimr::NKqp

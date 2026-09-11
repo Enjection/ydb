@@ -5,6 +5,7 @@
 #include <ydb/core/external_sources/external_source_factory.h>
 #include <ydb/core/kqp/common/kqp.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
+#include <ydb/core/kqp/common/simple/query_ast.h>
 #include <ydb/core/kqp/opt/cbo/solver/kqp_opt_join_cbo_factory.h>
 #include <ydb/core/kqp/opt/kqp_query_plan.h>
 #include <ydb/core/kqp/provider/yql_kikimr_provider_impl.h>
@@ -1440,6 +1441,17 @@ private:
         YQL_ENSURE(queryAst);
         ctx.IssueManager.AddIssues(queryAst->Issues);
         if (!queryAst->IsOk()) {
+            return result;
+        }
+
+        // Legacy DDL/script execution can apply earlier statements while
+        // traversing the expression. Reject a key anywhere in that request
+        // before entering any transformer capable of executing DDL.
+        const auto backupOperation = InspectBackupOperationAst(queryAst->Root);
+        if (backupOperation.HasSqlKey && (SessionCtx->Query().Type != EKikimrQueryType::Query
+            || !backupOperation.IsSingleBackupOperation())) {
+            ctx.AddError(YqlIssue(TPosition(), TIssuesIds::KIKIMR_UNSUPPORTED,
+                "IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires one backup or restore statement in ExecuteQuery"));
             return result;
         }
 

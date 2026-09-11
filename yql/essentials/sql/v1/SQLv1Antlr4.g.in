@@ -772,8 +772,10 @@ backup_collection: BACKUP COLLECTION object_ref;
 backup_collection_settings: backup_collection_settings_entry (COMMA backup_collection_settings_entry)* COMMA?;
 backup_collection_settings_entry: an_id EQUALS table_setting_value;
 
-backup_stmt: BACKUP object_ref (INCREMENTAL)?;
-restore_stmt: RESTORE object_ref (AT STRING_VALUE)?;
+backup_stmt: BACKUP object_ref (INCREMENTAL)? backup_operation_settings?;
+restore_stmt: RESTORE object_ref (AT STRING_VALUE)? backup_operation_settings?;
+backup_operation_settings: WITH LPAREN backup_operation_setting (COMMA backup_operation_setting)* COMMA? RPAREN;
+backup_operation_setting: an_id EQUALS STRING_VALUE;
 
 alter_database_stmt: ALTER DATABASE an_id_schema alter_database_action;
 alter_database_action:

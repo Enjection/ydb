@@ -1,6 +1,7 @@
 #include "service_query.h"
 #include <ydb/core/actorlib_impl/long_timer.h>
 #include <ydb/core/base/appdata.h>
+#include <ydb/core/backup/common/idempotency.h>
 #include <ydb/core/grpc_services/audit_dml_operations.h>
 #include <ydb/core/grpc_services/base/base.h>
 #include <ydb/core/grpc_services/base/flow_control.h>
@@ -272,6 +273,22 @@ private:
             return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
         }
 
+        if (req->has_uid()) {
+            if (!NBackup::IsValidBackupOperationUid(req->uid())) {
+                issues.AddIssue(NYql::TIssue(
+                    "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
+                return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
+            }
+            if (QueryAction != NKikimrKqp::QUERY_ACTION_EXECUTE || req->has_tx_control()
+                || !req->parameters().empty()
+                || (syntax != Ydb::Query::SYNTAX_UNSPECIFIED && syntax != Ydb::Query::SYNTAX_YQL_V1))
+            {
+                issues.AddIssue(NYql::TIssue(
+                    "IDEMPOTENCY_NOT_SUPPORTED: keyed execution requires SQL in NoTx mode without parameters"));
+                return ReplyFinishStream(Ydb::StatusIds::UNSUPPORTED, std::move(issues));
+            }
+        }
+
         Ydb::Table::TransactionControl* txControl = nullptr;
         if (req->has_tx_control()) {
             txControl = google::protobuf::Arena::CreateMessage<Ydb::Table::TransactionControl>(Request_->GetArena());
@@ -294,7 +311,6 @@ private:
         auto queryType = req->concurrent_result_sets()
             ? NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY
             : NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY;
-
 
         auto cachePolicy = google::protobuf::Arena::CreateMessage<Ydb::Table::QueryCachePolicy>(Request_->GetArena());
         cachePolicy->set_keep_in_cache(true);
@@ -328,6 +344,9 @@ private:
         ev->SetProgressStatsPeriod(TDuration::MilliSeconds(req->stats_period_ms()));
         ev->Record.MutableRequest()->SetCollectDiagnostics(NeedCollectDiagnostics(*req));
         ev->Record.MutableRequest()->SetCollectAffectedRows(req->collect_affected_rows());
+        if (req->has_uid()) {
+            ev->Record.MutableRequest()->SetUid(req->uid());
+        }
 
         if (!ctx.Send(NKqp::MakeKqpProxyID(ctx.SelfID.NodeId()), ev.Release(), 0, 0, Span_.GetTraceId())) {
             NYql::TIssues issues;

@@ -22,6 +22,8 @@ DEPENDS(
 )
 
 PEERDIR(
+    contrib/python/grpcio
+    ydb/public/api/grpc
     contrib/python/pyarrow
     ydb/tests/library
     ydb/tests/library/fixtures

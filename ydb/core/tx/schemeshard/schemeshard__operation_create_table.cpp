@@ -380,6 +380,7 @@ public:
 
 class TCreateTable: public TSubOperation {
     bool AllowShadowData = false;
+    bool TableCountIncremented = false;
     THashSet<TString> LocalSequences;
 
     static TTxState::ETxState NextState() {
@@ -717,7 +718,21 @@ public:
             return result;
         }
 
-        dstPath.MaterializeLeaf(owner);
+        auto guard = context.DbGuard();
+        const TPathId allocatedPathId = context.SS->AllocatePathId();
+        context.MemChanges.GrabNewPath(context.SS, allocatedPathId);
+        context.MemChanges.GrabPath(context.SS, parentPath.Base()->PathId);
+        context.MemChanges.GrabNewTxState(context.SS, OperationId);
+        context.MemChanges.GrabDomain(context.SS, parentPath.GetPathIdForDomain());
+        context.MemChanges.GrabNewTable(context.SS, allocatedPathId);
+
+        context.DbChanges.PersistPath(allocatedPathId);
+        context.DbChanges.PersistPath(parentPath.Base()->PathId);
+        context.DbChanges.PersistApplyUserAttrs(allocatedPathId);
+        context.DbChanges.PersistTable(allocatedPathId);
+        context.DbChanges.PersistTxState(OperationId);
+
+        dstPath.MaterializeLeaf(owner, allocatedPathId);
         result->SetPathId(dstPath.Base()->PathId.LocalPathId);
 
         TPathElement::TPtr newTable = dstPath.Base();
@@ -726,8 +741,6 @@ public:
         newTable->PathState = TPathElement::EPathState::EPathStateCreate;
         newTable->PathType = TPathElement::EPathType::EPathTypeTable;
         newTable->UserAttrs->AlterData = userAttrs;
-
-        NIceDb::TNiceDb db(context.GetDB());
 
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxCreateTable, newTable->PathId);
 
@@ -745,6 +758,7 @@ public:
 
         context.SS->Tables[newTable->PathId] = tableInfo;
         context.SS->TabletCounters->Simple()[COUNTER_TABLE_COUNT].Add(1);
+        TableCountIncremented = true;
         context.SS->IncrementPathDbRefCount(newTable->PathId, "new path created");
 
         if ((parentPath.Base()->IsDirectory() || parentPath.Base()->IsDomainRoot()) && parentPath.Base()->HasActiveChanges()) {
@@ -752,37 +766,25 @@ public:
             context.OnComplete.Dependence(parentTxId, OperationId.GetTxId());
         }
 
-        context.SS->ChangeTxState(db, OperationId, TTxState::CreateParts);
+        txState.State = TTxState::CreateParts;
         context.OnComplete.ActivateTx(OperationId);
-
-        context.SS->ApplyAndPersistUserAttrs(db, newTable->PathId);
 
         if (!acl.empty()) {
             newTable->ApplyACL(acl);
         }
-        context.SS->PersistPath(db, newTable->PathId);
-        context.SS->PersistTable(db, newTable->PathId);
-        context.SS->PersistTxState(db, OperationId);
-
-        context.SS->PersistUpdateNextPathId(db);
-        context.SS->PersistUpdateNextShardIdx(db);
-        // Persist new shards info
+        // Track shard creation for proposal rollback and deferred persistence.
         for (const auto& shardIdx : tableInfo->GetPartitionStore() | std::views::keys) {
             Y_ABORT_UNLESS(context.SS->ShardInfos.contains(shardIdx), "shard info is set before");
-            auto tabletType = context.SS->ShardInfos[shardIdx].TabletType;
-            const auto& bindedChannels = context.SS->ShardInfos[shardIdx].BindedChannels;
-            context.SS->PersistShardMapping(db, shardIdx, InvalidTabletId, newTable->PathId, OperationId.GetTxId(), tabletType);
-            context.SS->PersistChannelsBinding(db, shardIdx, bindedChannels);
+            context.MemChanges.GrabNewShard(context.SS, shardIdx);
+            context.DbChanges.PersistShard(shardIdx);
 
             if (storePerShardConfig) {
                 tableInfo->PerShardPartitionConfig[shardIdx].CopyFrom(perShardConfig);
-                context.SS->PersistAddTableShardPartitionConfig(db, shardIdx, perShardConfig);
             }
         }
 
         if (parentPath.Base()->IsDirectory() || parentPath.Base()->IsDomainRoot()) {
             ++parentPath.Base()->DirAlterVersion;
-            context.SS->PersistPathDirAlterVersion(db, parentPath.Base());
         }
         context.SS->ClearDescribePathCaches(parentPath.Base());
         context.OnComplete.PublishToSchemeBoard(OperationId, parentPath.Base()->PathId);
@@ -795,7 +797,7 @@ public:
         dstPath.DomainInfo()->AddInternalShards(txState, context.SS);
 
         dstPath.Base()->IncShardsInside(shardsToCreate);
-        IncAliveChildrenDirect(OperationId, parentPath, context); // for correct discard of ChildrenExist prop
+        IncAliveChildrenSafeWithUndo(OperationId, parentPath, context); // for correct discard of ChildrenExist prop
 
         LOG_TRACE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                 "TCreateTable Propose creating new table"
@@ -810,8 +812,12 @@ public:
         return result;
     }
 
-    void AbortPropose(TOperationContext&) override {
-        Y_ABORT("no AbortPropose for TCreateTable");
+    void AbortPropose(TOperationContext& context) override {
+        // Path, table, shards, transaction and domain state are restored by
+        // TMemoryChanges; counters need an explicit inverse.
+        if (TableCountIncremented) {
+            context.SS->TabletCounters->Simple()[COUNTER_TABLE_COUNT].Sub(1);
+        }
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {

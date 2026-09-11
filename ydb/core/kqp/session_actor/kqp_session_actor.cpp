@@ -4,6 +4,8 @@
 #include "kqp_query_state.h"
 #include "kqp_query_stats.h"
 
+#include <ydb/core/backup/common/idempotency.h>
+
 #include <ydb/core/kqp/common/buffer/buffer.h>
 #include <ydb/core/kqp/common/buffer/events.h>
 #include <ydb/core/kqp/common/kqp_data_integrity_trails.h>
@@ -517,6 +519,18 @@ public:
 
         auto action = QueryState->GetAction();
 
+        if (QueryState->RequestEv->Record.GetRequest().HasUid()) {
+            const auto type = QueryState->GetType();
+            if (action != NKikimrKqp::QUERY_ACTION_EXECUTE
+                || (type != NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY
+                    && type != NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY))
+            {
+                ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                    "IDEMPOTENCY_NOT_SUPPORTED: keyed requests require ExecuteQuery");
+                return;
+            }
+        }
+
         LWTRACK(KqpSessionQueryRequest,
             QueryState->Orbit,
             QueryState->GetDatabase(),
@@ -1009,6 +1023,17 @@ public:
 
     void Handle(TEvKqp::TEvParseResponse::TPtr& ev) {
         QueryState->SaveAndCheckParseResult(std::move(*ev->Get()));
+        if (QueryState->Statements.size() > 1) {
+            bool keyed = QueryState->RequestEv->Record.GetRequest().HasUid();
+            for (const auto& statement : QueryState->Statements) {
+                keyed |= statement.Ast && HasSqlBackupOperationUid(statement.Ast->Root);
+            }
+            if (keyed) {
+                ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                    "IDEMPOTENCY_NOT_SUPPORTED: keyed multi-statement requests are not supported");
+                return;
+            }
+        }
         CompileStatement();
     }
 
@@ -1129,6 +1154,9 @@ public:
     }
 
     void OnSuccessCompileRequest() {
+        if (!ValidateOperationIdempotency()) {
+            co_return;
+        }
         if (WmPostCompileClassify()) {
             co_return;
         }
@@ -1526,6 +1554,59 @@ public:
             QueryState->TxCtx->EffectiveIsolationLevel = NKqpProto::ISOLATION_LEVEL_UNDEFINED;
         }
 
+        return true;
+    }
+
+    bool ValidateOperationIdempotency() {
+        const auto& request = *QueryState->RequestEv;
+        const auto& phyQuery = QueryState->PreparedQuery->GetPhysicalQuery();
+        TMaybe<TString> key;
+        if (request.Record.GetRequest().HasUid()) {
+            key = request.Record.GetRequest().GetUid();
+        }
+
+        bool supported = phyQuery.TransactionsSize() == 1;
+        for (const auto& tx : phyQuery.GetTransactions()) {
+            const NKikimrSchemeOp::TModifyScheme* backupOperation = nullptr;
+            if (tx.GetType() == NKqpProto::TKqpPhyTx::TYPE_SCHEME) {
+                const auto& op = tx.GetSchemeOperation();
+                switch (op.GetOperationCase()) {
+                    case NKqpProto::TKqpSchemeOperation::kBackup: backupOperation = &op.GetBackup(); break;
+                    case NKqpProto::TKqpSchemeOperation::kBackupIncremental: backupOperation = &op.GetBackupIncremental(); break;
+                    case NKqpProto::TKqpSchemeOperation::kRestore: backupOperation = &op.GetRestore(); break;
+                    default: break;
+                }
+            }
+            supported &= backupOperation != nullptr;
+            if (backupOperation && backupOperation->HasOperationIdempotency()) {
+                const auto& sqlKey = backupOperation->GetOperationIdempotency().GetUid();
+                if (key.Defined() && *key != sqlKey) {
+                    ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
+                        "UID_MISMATCH: SQL and request keys must match");
+                    return false;
+                }
+                key = sqlKey;
+            }
+        }
+        if (!key.Defined()) {
+            return true;
+        }
+        if (!NBackup::IsValidBackupOperationUid(*key)) {
+            ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
+                "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
+            return false;
+        }
+        if (!supported || QueryState->Statements.size() > 1 ||
+            QueryState->GetAction() != NKikimrKqp::QUERY_ACTION_EXECUTE ||
+            QueryState->HasTxControl() || !request.GetYdbParameters().empty() ||
+            (request.GetSyntax() != Ydb::Query::SYNTAX_UNSPECIFIED && request.GetSyntax() != Ydb::Query::SYNTAX_YQL_V1)) {
+            ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one backup or restore statement in NoTx execution mode");
+            return false;
+        }
+        auto& identity = QueryState->OperationIdempotency.emplace();
+        identity.SetUid(*key);
+        identity.SetOriginalDdl(request.GetQuery());
         return true;
     }
 
@@ -2250,7 +2331,7 @@ public:
             temporary, /* createTmpDir */ temporary && !TempTablesState.NeedCleaning,
             QueryState->IsCreateTableAs(), TempTablesState.TempDirName, QueryState->UserRequestContext,
             expectsResult, expectsResult ? QueryState->QueryData->GetAllocState() : nullptr,
-            KqpTempTablesAgentActor);
+            KqpTempTablesAgentActor, QueryState->OperationIdempotency);
 
         ExecuterId = RegisterWithSameMailbox(executerActor);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "schemeshard_identificators.h"
+#include "schemeshard_idempotency.h"
 #include "schemeshard_info_types.h"
 #include "schemeshard_path_element.h"
 
@@ -33,6 +34,8 @@ class TMemoryChanges: public TSimpleRefCount<TMemoryChanges> {
 
     using TTableState = std::pair<TPathId, TTableInfo::TPtr>;
     TStack<TTableState> Tables;
+
+    TStack<std::pair<TPathId, TTopicInfo::TPtr>> Topics;
 
     using TColumnTableState = std::pair<TPathId, TColumnTableInfo::TPtr>;
     TStack<TColumnTableState> ColumnTables;
@@ -80,6 +83,7 @@ class TMemoryChanges: public TSimpleRefCount<TMemoryChanges> {
     // Mirrors IncrementalBackups: UnDo erases the id from Self->FullBackups.
     using TFullBackupState = std::pair<ui64, TFullBackupInfo::TPtr>;
     TStack<TFullBackupState> FullBackups;
+    TStack<TBackupOperationUidKey> BackupOperationUidKeys;
 
     // UnDo erases the (bcPathId -> id) entry, keeping BCPathToFullBackup atomic with FullBackups.
     using TBCPathToFullBackupState = std::pair<TPathId, std::optional<ui64>>;
@@ -107,6 +111,8 @@ public:
 
     void GrabNewTable(TSchemeShard* ss, const TPathId& pathId);
     void GrabTable(TSchemeShard* ss, const TPathId& pathId);
+
+    void GrabTopic(TSchemeShard* ss, const TPathId& pathId);
 
     void GrabNewColumnTable(TSchemeShard* ss, const TPathId& pathId);
     void GrabColumnTable(TSchemeShard* ss, const TPathId& pathId);
@@ -154,6 +160,7 @@ public:
     void GrabNewLongIncrementalBackupOp(TSchemeShard* ss, ui64 id);
 
     void GrabNewFullBackupOp(TSchemeShard* ss, ui64 id);
+    void GrabNewBackupOperationUidKey(TSchemeShard* ss, const TBackupOperationUidKey& key);
     void GrabNewBCPathToFullBackup(TSchemeShard* ss, const TPathId& bcPathId);
 
     void GrabNewSecret(TSchemeShard* ss, const TPathId& pathId);

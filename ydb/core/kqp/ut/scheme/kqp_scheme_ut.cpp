@@ -17231,6 +17231,119 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
             "[[#;#;#;#;#;3]]");
     }
 
+    Y_UNIT_TEST(BackupSqlIdempotencyReplaysOriginalOperation) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config).SetEnableBackupService(true));
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        const auto create = session.ExecuteSchemeQuery(R"(
+            CREATE BACKUP COLLECTION `keyed_backup` (TABLE `/Root/KeyValue`)
+            WITH (STORAGE = 'cluster');
+        )").GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
+
+        auto client = kikimr.GetQueryClient();
+        const TString query = "BACKUP `keyed_backup` WITH (uid = 'ключ с пробелами/и?символами!');";
+        TString originalId;
+        for (ui32 attempt = 0; attempt != 2; ++attempt) {
+            const auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx()).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            UNIT_ASSERT_VALUES_EQUAL(result.GetResultSets().size(), 1);
+            TResultSetParser parser(result.GetResultSet(0));
+            UNIT_ASSERT(parser.TryNextRow());
+            const auto id = parser.ColumnParser("operation_id").GetUtf8();
+            UNIT_ASSERT(!id.empty());
+            if (attempt == 0) {
+                originalId = id;
+            } else {
+                UNIT_ASSERT_VALUES_EQUAL(id, originalId);
+            }
+        }
+
+        const auto conflict = client.ExecuteQuery(query + " -- different bytes", NYdb::NQuery::TTxControl::NoTx()).GetValueSync();
+        UNIT_ASSERT(!conflict.IsSuccess());
+        UNIT_ASSERT_STRING_CONTAINS(conflict.GetIssues().ToString(), "UID_CONFLICT");
+    }
+
+    Y_UNIT_TEST_QUAD(BackupSqlIdempotencyRejectsBatchBeforeEffects, AstCache, PerStatement) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableTableServiceConfig()->SetEnableAstCache(AstCache);
+        config.MutableTableServiceConfig()->SetEnablePerStatementQueryExecution(PerStatement);
+        TKikimrRunner kikimr{NKqp::TKikimrSettings(config)};
+        auto client = kikimr.GetQueryClient();
+        const auto result = client.ExecuteQuery(R"(
+            CREATE TABLE `/Root/BeforeKeyedBackup` (key Uint64, PRIMARY KEY (key));
+            BACKUP `missing` WITH (uid = 'backup:batch');
+        )", NYdb::NQuery::TTxControl::NoTx()).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::UNSUPPORTED, result.GetIssues().ToString());
+        UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "IDEMPOTENCY_NOT_SUPPORTED");
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        UNIT_ASSERT(!session.DescribeTable("/Root/BeforeKeyedBackup").GetValueSync().IsSuccess());
+    }
+
+    Y_UNIT_TEST(BackupRequestIdempotencyReplaysAndChecksDualKeys) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableBackupService(true);
+        TKikimrRunner kikimr(NKqp::TKikimrSettings(config).SetEnableBackupService(true));
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        const auto create = session.ExecuteSchemeQuery(R"(
+            CREATE BACKUP COLLECTION `request_keyed_backup` (TABLE `/Root/KeyValue`)
+            WITH (STORAGE = 'cluster');
+        )").GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(create.GetStatus(), EStatus::SUCCESS, create.GetIssues().ToString());
+
+        auto client = kikimr.GetQueryClient();
+        const TString query = "BACKUP `request_keyed_backup` WITH (uid = 'ключ с пробелами/и?символами!');";
+        const auto mismatch = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(),
+            NYdb::NQuery::TExecuteQuerySettings().Uid("backup:other")).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(mismatch.GetStatus(), EStatus::BAD_REQUEST, mismatch.GetIssues().ToString());
+        UNIT_ASSERT_STRING_CONTAINS(mismatch.GetIssues().ToString(), "UID_MISMATCH");
+
+        TString originalId;
+        for (ui32 attempt = 0; attempt != 2; ++attempt) {
+            auto settings = NYdb::NQuery::TExecuteQuerySettings();
+            if (attempt == 0) {
+                settings.Uid("ключ с пробелами/и?символами!");
+            }
+            const auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(), settings).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            TResultSetParser parser(result.GetResultSet(0));
+            UNIT_ASSERT(parser.TryNextRow());
+            const auto id = parser.ColumnParser("operation_id").GetUtf8();
+            UNIT_ASSERT(!id.empty());
+            if (attempt == 0) {
+                originalId = id;
+            } else {
+                UNIT_ASSERT_VALUES_EQUAL(id, originalId);
+            }
+        }
+    }
+
+    Y_UNIT_TEST_QUAD(BackupRequestIdempotencyRejectsUnsupportedBeforeEffects, AstCache, PerStatement) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableTableServiceConfig()->SetEnableAstCache(AstCache);
+        config.MutableTableServiceConfig()->SetEnablePerStatementQueryExecution(PerStatement);
+        TKikimrRunner kikimr{NKqp::TKikimrSettings(config)};
+        auto client = kikimr.GetQueryClient();
+        const auto settings = NYdb::NQuery::TExecuteQuerySettings().Uid("backup:unsupported");
+        for (const TString& query : TVector<TString>{
+                 "SELECT 1;",
+                 "CREATE TABLE `/Root/UnsupportedKeyedTable` (key Uint64, PRIMARY KEY (key));",
+                 "CREATE TABLE `/Root/UnsupportedKeyedTable` (key Uint64, PRIMARY KEY (key)); SELECT 1;"})
+        {
+            const auto result = client.ExecuteQuery(query, NYdb::NQuery::TTxControl::NoTx(), settings).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::UNSUPPORTED, result.GetIssues().ToString());
+            UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "IDEMPOTENCY_NOT_SUPPORTED");
+        }
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        UNIT_ASSERT(!session.DescribeTable("/Root/UnsupportedKeyedTable").GetValueSync().IsSuccess());
+
+        const auto empty = client.ExecuteQuery("SELECT 1;", NYdb::NQuery::TTxControl::NoTx(),
+            NYdb::NQuery::TExecuteQuerySettings().Uid("")).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(empty.GetStatus(), EStatus::BAD_REQUEST, empty.GetIssues().ToString());
+        UNIT_ASSERT_STRING_CONTAINS(empty.GetIssues().ToString(), "INVALID_BACKUP_OPERATION_UID");
+    }
+
     Y_UNIT_TEST(BackupReturnsOperationId) {
         NKikimrConfig::TAppConfig config;
         config.MutableFeatureFlags()->SetEnableBackupService(true);

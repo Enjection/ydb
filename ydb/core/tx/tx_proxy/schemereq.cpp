@@ -61,6 +61,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     TActorId Source;
     TActorId PipeClient;
     ui64 SchemeshardIdToRequest;
+    ui64 IdempotencyRequestGeneration = 0;
 
     struct TPathToResolve {
         const NKikimrSchemeOp::TModifyScheme& ModifyScheme;
@@ -123,6 +124,9 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             {"txId", TxId},
             {"to", shardToRequest},
             {"ev", req->ToString()});
+        if (req->Record.TransactionSize() == 1 && req->Record.GetTransaction(0).HasOperationIdempotency()) {
+            ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++IdempotencyRequestGeneration));
+        }
         NTabletPipe::SendData(ctx, PipeClient, req.Release());
     }
 
@@ -1654,6 +1658,13 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     }
 
 
+    void Handle(TEvents::TEvWakeup::TPtr& ev, const TActorContext& ctx) {
+        if (ev->Get()->Tag == IdempotencyRequestGeneration) {
+            ReportStatus(TEvTxUserProxy::TResultStatus::ProxyShardNotAvailable, ctx);
+            Die(ctx);
+        }
+    }
+
     void Handle(TEvTabletPipe::TEvClientConnected::TPtr &ev, const TActorContext &ctx) {
         TEvTabletPipe::TEvClientConnected *msg = ev->Get();
         YDB_LOG_DEBUG_CTX(ctx, "Handle TEvClientConnected",
@@ -1893,6 +1904,25 @@ struct TFlatSchemeReq : public TBaseSchemeReq<TFlatSchemeReq> {
     void ProcessRequest(const TActorContext &ctx);
 
     void HandleWorkingDir(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr &ev, const TActorContext &ctx);
+    void HandleIdempotencyDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx);
+    void HandleIdempotencyLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx);
+    bool IdempotencyLookupFinished = false;
+
+    STFUNC(StateWaitIdempotencyDatabase) {
+        switch (ev->GetTypeRewrite()) {
+            HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, HandleIdempotencyDatabase);
+        }
+    }
+
+    STFUNC(StateWaitIdempotencyLookup) {
+        switch (ev->GetTypeRewrite()) {
+            HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, HandleIdempotencyLookup);
+            HFunc(TEvTabletPipe::TEvClientConnected, Handle);
+            HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
+            HFunc(TEvents::TEvWakeup, Handle);
+        }
+    }
+
 
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::TX_PROXY_SCHEMEREQ;
@@ -1927,6 +1957,7 @@ struct TFlatSchemeReq : public TBaseSchemeReq<TFlatSchemeReq> {
 
     STFUNC(StateWaitPrepare) {
         switch (ev->GetTypeRewrite()) {
+            HFunc(TEvents::TEvWakeup, Handle);
             HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, Handle);
             HFunc(TEvTabletPipe::TEvClientConnected, Handle);
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
@@ -1948,6 +1979,22 @@ void TFlatSchemeReq::Bootstrap(const TActorContext &ctx) {
 }
 
 void TFlatSchemeReq::Start(const TActorContext &ctx) {
+    if (GetModifyScheme().HasOperationIdempotency() && !IdempotencyLookupFinished) {
+        ResolveForACL.clear();
+        auto database = TPathToResolve(GetModifyScheme());
+        database.Path = SplitPath(GetRequestProto().GetDatabaseName());
+        database.RequireAccess = NACLib::EAccessRights::ConnectDatabase;
+        ResolveForACL.push_back(database);
+        auto request = ResolveRequestForACL();
+        if (!request) {
+            ReportStatus(TEvTxUserProxy::TResultStatus::ResolveError, ctx);
+            return Die(ctx);
+        }
+        ctx.Send(Services.SchemeCache, new TEvTxProxySchemeCache::TEvNavigateKeySet(request));
+        Become(&TThis::StateWaitIdempotencyDatabase);
+        return;
+    }
+
     //NOTE: split-merge operations here bypass access checks:
     // - internal requests should not follow general rules
     // - external requests are checked for admin rights elsewhere
@@ -1978,6 +2025,50 @@ void TFlatSchemeReq::Start(const TActorContext &ctx) {
 
     ProcessRequest(ctx);
  }
+
+void TFlatSchemeReq::HandleIdempotencyDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx) {
+    auto& navigate = *ev->Get()->Request;
+    if (navigate.ErrorCount || navigate.ResultSet.size() != 1) {
+        InterpretResolveError(&navigate, ctx);
+        return Die(ctx);
+    }
+    if (UserToken && !CheckAccess(navigate.ResultSet, ctx)) {
+        return Die(ctx);
+    }
+    auto& entry = navigate.ResultSet.front();
+    const bool rootDatabase = entry.Kind == NSchemeCache::TSchemeCacheNavigate::KindPath && entry.Self
+        && entry.Self->Info.GetPathId() == entry.Self->Info.GetParentPathId();
+    if ((!IsDB(entry) && !rootDatabase) || !entry.DomainInfo) {
+        ReportStatus(TEvTxUserProxy::TResultStatus::ResolveError, ctx);
+        return Die(ctx);
+    }
+    SchemeshardIdToRequest = GetShardToRequest(entry, ResolveForACL.front());
+    auto request = MakePropose(SchemeshardIdToRequest);
+    request->Record.MutableTransaction(0)->MutableOperationIdempotency()->SetLookupOnly(true);
+    if (UserToken) {
+        request->Record.SetUserToken(UserToken->SerializeAsString());
+    }
+    NTabletPipe::TClientConfig config;
+    config.RetryPolicy = {.RetryLimitCount = 3};
+    PipeClient = ctx.RegisterWithSameMailbox(NTabletPipe::CreateClient(ctx.SelfID, SchemeshardIdToRequest, config));
+    NTabletPipe::SendData(ctx, PipeClient, request.Release());
+    ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++IdempotencyRequestGeneration));
+    Become(&TThis::StateWaitIdempotencyLookup);
+}
+
+void TFlatSchemeReq::HandleIdempotencyLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx) {
+    const auto& record = ev->Get()->Record;
+    if (record.GetStatus() != NKikimrScheme::StatusSuccess || record.HasOperationId()) {
+        TBase::Handle(ev, ctx);
+        return;
+    }
+    NTabletPipe::CloseClient(ctx, PipeClient);
+    PipeClient = {};
+    ++IdempotencyRequestGeneration;
+    IdempotencyLookupFinished = true;
+    ResolveForACL.clear();
+    Start(ctx);
+}
 
 void TFlatSchemeReq::ProcessRequest(const TActorContext &ctx) {
     if (!ExtractResolveForACL(GetModifyScheme())) {
@@ -2094,6 +2185,7 @@ struct TSchemeTransactionalReq : public TBaseSchemeReq<TSchemeTransactionalReq> 
 
     STFUNC(StateWaitPrepare) {
         switch (ev->GetTypeRewrite()) {
+            HFunc(TEvents::TEvWakeup, Handle);
             HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, Handle);
             HFunc(TEvTabletPipe::TEvClientConnected, Handle);
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
