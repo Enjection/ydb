@@ -14,6 +14,7 @@
 #include <ydb/core/tx/schemeshard/schemeshard_identificators.h>
 #include <ydb/core/tx/schemeshard/schemeshard_import.h>
 #include <ydb/core/tx/schemeshard/schemeshard_path_footprint.h>
+#include <ydb/core/tx/schemeshard/ut_helpers/path_footprint_gate.h>
 
 #include <ydb/library/ydb_issue/proto/issue_id.pb.h>
 
@@ -100,6 +101,13 @@ namespace NSchemeShardUT_Private {
         // Published to TAppData before the schemeshard boots, so bootstrap
         // parts (the system views) are observed too.
         OPTION(NKikimr::NSchemeShard::IPathFootprintObserver*, PathFootprintObserver, nullptr);
+        // Every path a part's Propose() resolves must be covered by that
+        // part's path footprint. On by default for every suite; TTestEnv
+        // installs a TReadSetGate (in front of PathFootprintObserver, when one
+        // is given) and reports violations from its destructor. Turn it off
+        // per test with AssertReadSetCoverage(false), or process-wide with
+        // YDB_SCHEMESHARD_READSET_GATE=0.
+        OPTION(bool, AssertReadSetCoverage, true);
 
         #undef OPTION
     };
@@ -137,6 +145,7 @@ namespace NSchemeShardUT_Private {
             ~TObserverInstall();
         };
         THolder<TObserverInstall> ObserverInstall;
+        THolder<TReadSetGate> ReadSetGate;
 
     public:
         static bool ENABLE_SCHEMESHARD_LOG;

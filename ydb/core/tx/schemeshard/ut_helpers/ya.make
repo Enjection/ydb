@@ -41,6 +41,8 @@ SRCS(
     mon_helpers.h
     olap_helpers.cpp
     olap_helpers.h
+    path_footprint_gate.cpp
+    path_footprint_gate.h
     schemeshard_counters.cpp
     schemeshard_counters.h
     shred_helpers.cpp
