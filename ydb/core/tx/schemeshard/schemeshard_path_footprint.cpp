@@ -307,6 +307,70 @@ TStringBuf PathRefRoleName(EPathRefRole role) {
 
 namespace {
 
+// Compact, separator-free rendering: TPathId::Out() emits ", " inside itself,
+// which the log line format cannot carry.
+TString JoinPathIds(const TVector<TPathId>& pathIds) {
+    TStringBuilder joined;
+    for (size_t i = 0; i < pathIds.size(); ++i) {
+        if (i) {
+            joined << ',';
+        }
+        joined << pathIds[i].OwnerId << ':' << pathIds[i].LocalPathId;
+    }
+    return joined;
+}
+
+TStringBuilder FormatPathFootprintPrefix(const TPathFootprint& footprint, ui64 txId,
+        TStringBuf prefix) {
+    TStringBuilder line;
+    line << prefix
+         << " txId# " << txId
+         << ", partId# ";
+    if (footprint.PartId == InvalidSubTxId) {
+        line << "<request>";
+    } else {
+        line << ui32(footprint.PartId);
+    }
+    line << ", originalTxIndex# " << footprint.OriginalTxIndex
+         << ", partOpType# " << NKikimrSchemeOp::EOperationType_Name(footprint.PartOpType)
+         << ", proposeStatus# " << NKikimrScheme::EStatus_Name(footprint.ProposeStatus)
+         << ", writeSet# " << footprint.WriteSet.size()
+         << ", published# " << footprint.Published.size()
+         << ", incomplete# " << (footprint.WriteSetMayBeIncomplete ? 1 : 0);
+    return line;
+}
+
+}  // namespace
+
+TString FormatPathFootprintWriteSetLine(const TPathFootprint& footprint, ui64 txId) {
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId, "PathFootprint");
+    return line << ", fieldPath# <writeSet>"
+                << ", writeSetPaths# " << JoinPathIds(footprint.WriteSet)
+                << ", publishedPaths# " << JoinPathIds(footprint.Published);
+}
+
+TString FormatPathFootprintLine(const TPathFootprint& footprint,
+        const TPathFootprintEntry* entry, ui64 txId, TStringBuf prefix) {
+    TStringBuilder line = FormatPathFootprintPrefix(footprint, txId, prefix);
+    line << ", workingDir# " << footprint.WorkingDir
+         << ", workingDirRelToDb# " << footprint.WorkingDirRelToDb;
+    if (!entry) {
+        return line << ", fieldPath# <none>";
+    }
+    line << ", fieldPath# " << entry->Ref.FieldPath
+         << ", kind# " << PathRefKindName(entry->Ref.Kind)
+         << ", role# " << PathRefRoleName(entry->Ref.Role)
+         << ", absPath# " << entry->AbsPath
+         << ", pathId# " << entry->PathId
+         << ", exists# " << (entry->Exists ? 1 : 0)
+         << ", relToParent# " << entry->RelPathToParent
+         << ", relToDb# " << entry->RelPathToDatabase
+         << ", relToWorkingDir# " << entry->RelPathToWorkingDir;
+    return line;
+}
+
+namespace {
+
 template <NKikimrSchemeOp::EOperationType Type>
 using TOperationTag = std::integral_constant<NKikimrSchemeOp::EOperationType, Type>;
 
@@ -1264,6 +1328,210 @@ TString JoinPathRef(TStringBuf workingDir, const TPathRef& ref, const TVector<TS
         return TString();
     }
     return TString();
+}
+
+namespace {
+
+// Mirrors what Propose() does for a relative-or-absolute path field.
+TPath ResolveRelativeOrAbsolute(TSchemeShard* ss, const TString& workingDir, const TString& value) {
+    if (value.StartsWith('/')) {
+        return TPath::Resolve(value, ss);
+    }
+    return TPath::Resolve(JoinPath({workingDir, value}), ss);
+}
+
+TString StripPrefix(const TString& abs, const TString& prefix) {
+    if (prefix.empty() || prefix == "/") {
+        return abs.StartsWith('/') ? abs.substr(1) : abs;
+    }
+    if (abs == prefix) {
+        return TString();
+    }
+    if (abs.StartsWith(prefix) && abs.size() > prefix.size() && abs[prefix.size()] == '/') {
+        return abs.substr(prefix.size() + 1);
+    }
+    return abs;
+}
+
+// The ref, with everything a footprint keeps copied out of the request proto.
+TPathRefOwned Materialize(const TPathRef& ref) {
+    TPathRefOwned owned;
+    owned.Field = ref.Field;
+    owned.FieldPath = FieldPath(ref);
+    owned.Index = ref.Index;
+    owned.Value = TString(ref.Value);
+    owned.OwnerId = ref.OwnerId;
+    owned.LocalPathId = ref.LocalPathId;
+    owned.Kind = ref.Kind;
+    owned.Role = ref.Role;
+    owned.BasePath = TString(ref.BasePath);
+    owned.AnchorIndex = ref.AnchorIndex;
+    return owned;
+}
+
+}  // namespace
+
+namespace {
+
+// The parts whose Propose() resolves its destination with
+// TPath::ResolveWithInactive rather than with a plain TPath::Resolve:
+// schemeshard__operation_move_table.cpp, schemeshard__operation_move_sequence.cpp
+// and index/operation_move_table_index.cpp. ESchemeOpMoveIndex is not one of
+// them — it is a top-level op that expands into MoveTableIndex parts, and it
+// carries its paths as LeafUnderSibling, not Absolute.
+bool ResolvesTargetWithInactive(NKikimrSchemeOp::EOperationType type) {
+    switch (type) {
+    case NKikimrSchemeOp::ESchemeOpMoveTable:
+    case NKikimrSchemeOp::ESchemeOpMoveTableIndex:
+    case NKikimrSchemeOp::ESchemeOpMoveSequence:
+        return true;
+    default:
+        return false;
+    }
+}
+
+}  // namespace
+
+TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss,
+        TOperationId opId) {
+    TPathFootprint footprint;
+    footprint.WorkingDir = tx.GetWorkingDir();
+    footprint.PartOpType = tx.GetOperationType();
+    // ResolveWithInactive needs a live sub-operation to walk back from, so it
+    // is only reachable from the part-level hook.
+    const bool inactiveAwareTarget = bool(opId) && ResolvesTargetWithInactive(footprint.PartOpType);
+
+    // Resolved once per footprint and reused by every entry below.
+    const TPath workingDirPath = TPath::Resolve(footprint.WorkingDir, ss);
+    // The canonized working dir, which is what the entries' AbsPath is built
+    // from. Stripping against tx.GetWorkingDir() would silently fail whenever
+    // the raw proto string is not already canonical.
+    const TString workingDirCanon = workingDirPath.PathString();
+    footprint.WorkingDirCanon = workingDirCanon;
+
+    TString dbPath;
+    {
+        const TPath existing = workingDirPath.FirstExistedParent();
+        if (existing.IsResolved()) {
+            footprint.DatabasePathId = existing.GetPathIdForDomain();
+            dbPath = existing.GetDomainPathString();
+        }
+        footprint.WorkingDirRelToDb = StripPrefix(workingDirCanon, dbPath);
+    }
+
+    for (const auto& rawRef : ExtractPathRefs(tx)) {
+        TPathFootprintEntry entry;
+        // Everything below reads the owned copy: the raw ref only points into
+        // tx, which does not outlive the footprint.
+        entry.Ref = Materialize(rawRef);
+        const TPathRefOwned& ref = entry.Ref;
+
+        if (ref.Kind == EPathRefKind::Implicit) {
+            // The touched set is enumerated at Propose/Execute time from the
+            // children of the anchor, so report the anchor's resolved path.
+            // Exists stays false: the entry stands for paths, not one path.
+            if (ref.AnchorIndex >= 0 && size_t(ref.AnchorIndex) < footprint.Entries.size()) {
+                const auto& anchor = footprint.Entries[ref.AnchorIndex];
+                entry.AbsPath = anchor.AbsPath;
+                entry.PathId = anchor.PathId;
+                entry.ParentPathId = anchor.ParentPathId;
+                entry.DatabasePathId = anchor.DatabasePathId;
+                entry.RelPathToParent = anchor.RelPathToParent;
+                entry.RelPathToDatabase = anchor.RelPathToDatabase;
+                entry.RelPathToWorkingDir = anchor.RelPathToWorkingDir;
+            }
+            footprint.Entries.push_back(std::move(entry));
+            continue;
+        }
+
+        TPath path(ss);
+        switch (ref.Kind) {
+        case EPathRefKind::LeafUnderWorkingDir:
+            path = workingDirPath.Child(ref.Value);
+            break;
+        case EPathRefKind::PathUnderWorkingDirSplit:
+            // TPath::Child(value, TSplitChildTag{}). Stays under the working
+            // dir even if the value happens to start with a slash, which is
+            // what makes this different from PathUnderWorkingDir.
+            path = workingDirPath.Child(ref.Value, TPath::TSplitChildTag{});
+            break;
+        case EPathRefKind::PathUnderWorkingDir:
+            if (ref.Value.empty()) {
+                path = TPath(workingDirPath);
+            } else {
+                path = ResolveRelativeOrAbsolute(ss, footprint.WorkingDir, ref.Value);
+            }
+            break;
+        case EPathRefKind::Absolute:
+            // Propose() resolves these fields on their own, so WorkingDir is
+            // never joined in — not even when the value has no leading slash.
+            if (ref.Value.empty()) {
+                path = TPath(workingDirPath);
+            } else if (inactiveAwareTarget && ref.Role == EPathRefRole::Target) {
+                path = TPath::ResolveWithInactive(opId, ref.Value, ss);
+            } else {
+                path = TPath::Resolve(ref.Value, ss);
+            }
+            break;
+        case EPathRefKind::LeafUnderSibling:
+            if (ref.BasePath.empty() && ref.AnchorIndex >= 0
+                    && size_t(ref.AnchorIndex) < footprint.Entries.size()) {
+                // The base is another entry of this same footprint, used when
+                // it cannot be written as a raw string (by-id addressing, or a
+                // split child). An unresolvable base leaves the path empty.
+                const TString& base = footprint.Entries[ref.AnchorIndex].AbsPath;
+                if (!base.empty()) {
+                    path = TPath::Resolve(base, ss).Child(ref.Value);
+                }
+            } else {
+                path = ResolveRelativeOrAbsolute(ss, footprint.WorkingDir, ref.BasePath).Child(ref.Value);
+            }
+            break;
+        case EPathRefKind::ById: {
+            const TPathId pathId = ref.OwnerId
+                ? TPathId(TOwnerId(ref.OwnerId), TLocalPathId(ref.LocalPathId))
+                : ss->MakeLocalId(TLocalPathId(ref.LocalPathId));
+            path = TPath::Init(pathId, ss);
+            break;
+        }
+        case EPathRefKind::Implicit:
+            break;
+        }
+
+        entry.AbsPath = path.IsEmpty() ? TString() : path.PathString();
+        entry.RelPathToParent = path.IsEmpty() ? TString() : path.LeafName();
+        entry.Exists = path.IsResolved() && !path.IsDeleted();
+        if (path.IsResolved()) {
+            entry.PathId = path.Base()->PathId;
+        }
+
+        TPath ancestor = path.FirstExistedParent();
+        if (ancestor.IsResolved()) {
+            entry.ParentPathId = ancestor.Base()->PathId;
+            entry.DatabasePathId = ancestor.GetPathIdForDomain();
+            // Almost always the working dir's own domain, whose path string was
+            // already built above; only walk again when it genuinely differs.
+            entry.RelPathToDatabase = StripPrefix(entry.AbsPath,
+                entry.DatabasePathId == footprint.DatabasePathId
+                    ? dbPath
+                    : ancestor.GetDomainPathString());
+        } else {
+            entry.RelPathToDatabase = entry.AbsPath;
+        }
+        if (entry.Exists) {
+            entry.ParentPathId = path.Parent().IsResolved()
+                ? path.Parent().Base()->PathId
+                : entry.ParentPathId;
+        }
+
+        entry.RelPathToWorkingDir = entry.AbsPath.empty()
+            ? entry.Ref.Value
+            : StripPrefix(entry.AbsPath, workingDirCanon);
+
+        footprint.Entries.push_back(std::move(entry));
+    }
+
+    return footprint;
 }
 
 }  // namespace NKikimr::NSchemeShard
