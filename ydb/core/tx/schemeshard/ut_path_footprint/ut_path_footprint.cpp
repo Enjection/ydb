@@ -264,6 +264,125 @@ void RequireReadSetCoverage(const TDeque<TObservedFootprint>& parts) {
     UNIT_FAIL("read set escapes the footprint:" << dump);
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Rewrite helpers.
+//
+// The layer-3 rewriters take a footprint that ResolvePathFootprint produced on
+// the schemeshard that owns the paths. A pure test has no schemeshard, so it
+// builds the footprint from the real extractor and fakes only the resolution:
+// the field identities, kinds, roles and raw values under test are the
+// production ones, and the AbsPath is whatever the test says the path is.
+
+TString JoinAbs(TStringBuf dir, TStringBuf leaf) {
+    if (leaf.empty()) {
+        return TString(dir);
+    }
+    if (dir.empty() || dir == "/") {
+        return TStringBuilder() << '/' << leaf;
+    }
+    return TStringBuilder() << dir << '/' << leaf;
+}
+
+TString StripDbPrefix(TStringBuf abs, TStringBuf db) {
+    if (db.empty() || db == "/") {
+        return TString(abs.StartsWith('/') ? abs.substr(1) : abs);
+    }
+    if (abs == db) {
+        return TString();
+    }
+    if (abs.StartsWith(db) && abs.size() > db.size() && abs[db.size()] == '/') {
+        return TString(abs.substr(db.size() + 1));
+    }
+    return TString(abs);
+}
+
+TString LeafOf(TStringBuf abs) {
+    const size_t slash = abs.rfind('/');
+    return TString(slash == TStringBuf::npos ? abs : abs.substr(slash + 1));
+}
+
+// Absolute path of a value resolved the way ResolvePathFootprint would.
+// `byId` maps a local path id to the path it stands for; an id missing from it
+// is an id that did not resolve.
+TPathFootprint FakeResolve(const NKikimrSchemeOp::TModifyScheme& tx, const TString& databasePath,
+        const THashMap<ui64, TString>& byId = {})
+{
+    const TString workingDir = tx.GetWorkingDir();
+
+    TPathFootprint fp;
+    fp.WorkingDir = workingDir;
+    fp.WorkingDirCanon = workingDir;
+    fp.WorkingDirRelToDb = StripDbPrefix(workingDir, databasePath);
+    fp.PartOpType = tx.GetOperationType();
+
+    const auto relativeOrAbsolute = [&](TStringBuf value) {
+        return value.StartsWith('/') ? TString(value) : JoinAbs(workingDir, value);
+    };
+
+    for (const auto& ref : ExtractPathRefs(tx)) {
+        TPathFootprintEntry entry;
+        entry.Ref.Field = ref.Field;
+        entry.Ref.FieldPath = FieldPath(ref);
+        entry.Ref.Value = TString(ref.Value);
+        entry.Ref.OwnerId = ref.OwnerId;
+        entry.Ref.LocalPathId = ref.LocalPathId;
+        entry.Ref.Kind = ref.Kind;
+        entry.Ref.Role = ref.Role;
+        entry.Ref.BasePath = TString(ref.BasePath);
+        entry.Ref.AnchorIndex = ref.AnchorIndex;
+        entry.Ref.Index = ref.Index;
+
+        const auto anchor = [&]() -> const TPathFootprintEntry* {
+            return ref.AnchorIndex >= 0 && size_t(ref.AnchorIndex) < fp.Entries.size()
+                ? &fp.Entries[ref.AnchorIndex]
+                : nullptr;
+        };
+
+        switch (ref.Kind) {
+        case EPathRefKind::LeafUnderWorkingDir:
+            entry.AbsPath = JoinAbs(workingDir, ref.Value);
+            break;
+        case EPathRefKind::PathUnderWorkingDirSplit:
+            entry.AbsPath = JoinAbs(workingDir,
+                ref.Value.StartsWith('/') ? ref.Value.substr(1) : ref.Value);
+            break;
+        case EPathRefKind::PathUnderWorkingDir:
+            entry.AbsPath = ref.Value.empty() ? workingDir : relativeOrAbsolute(ref.Value);
+            break;
+        case EPathRefKind::Absolute:
+            entry.AbsPath = ref.Value.empty() ? workingDir : TString(ref.Value);
+            break;
+        case EPathRefKind::LeafUnderSibling:
+            if (ref.BasePath.empty()) {
+                if (const auto* base = anchor(); base && !base->AbsPath.empty()) {
+                    entry.AbsPath = JoinAbs(base->AbsPath, ref.Value);
+                }
+            } else {
+                entry.AbsPath = JoinAbs(relativeOrAbsolute(ref.BasePath), ref.Value);
+            }
+            break;
+        case EPathRefKind::ById:
+            if (const auto* resolved = byId.FindPtr(ref.LocalPathId)) {
+                entry.AbsPath = *resolved;
+            }
+            break;
+        case EPathRefKind::Implicit:
+            if (const auto* base = anchor()) {
+                entry.AbsPath = base->AbsPath;
+            }
+            break;
+        }
+
+        entry.Exists = !entry.AbsPath.empty();
+        entry.RelPathToParent = LeafOf(entry.AbsPath);
+        entry.RelPathToDatabase = StripDbPrefix(entry.AbsPath, databasePath);
+        entry.RelPathToWorkingDir = StripDbPrefix(entry.AbsPath, workingDir);
+        fp.Entries.push_back(std::move(entry));
+    }
+
+    return fp;
+}
+
 // Sends a hand-built TModifyScheme; helpers.h exports no such entry point.
 
 }  // namespace
@@ -2447,4 +2566,116 @@ Y_UNIT_TEST(ContinuousBackupReportsWhatItCreates) {
         UNIT_ASSERT_VALUES_EQUAL(AuditPaths(tx), "/MyRoot/T");
     }
 }
+}
+
+Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintRewrite) {
+
+    Y_UNIT_TEST(CanonicalizeDropTableById) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
+        tx.MutableDrop()->SetId(42);
+        auto fp = FakeResolve(tx, "/MyRoot", {{42, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT(result.Untransformable.empty());
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetDrop().GetName(), "T");
+        UNIT_ASSERT_C(!copy.GetDrop().HasId(), "the id must go: rmdir.cpp:32 takes it over the name");
+        // The request the footprint was resolved from is never touched.
+        UNIT_ASSERT(tx.GetDrop().HasId());
+
+        // The footprint follows the rewrite, so RelocatePaths sees the working
+        // dir canonicalization invented rather than the one the client sent.
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDir, "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirCanon, "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDirRelToDb, "Dir");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries.size(), 2u);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Field, EPathField::Drop_Name);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Kind, EPathRefKind::LeafUnderWorkingDir);
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.Value, "T");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.FieldPath, "Drop.Name");
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].RelPathToWorkingDir, "T");
+    }
+
+    Y_UNIT_TEST(CanonicalizeAlterTableByPathIdClearsBothIdForms) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpAlterTable, "/MyRoot");
+        TPathId(TOwnerId(72057594046678944ull), TLocalPathId(7)).ToProto(
+            tx.MutableAlterTable()->MutablePathId());
+        tx.MutableAlterTable()->SetId_Deprecated(7);
+        auto* column = tx.MutableAlterTable()->AddColumns();
+        column->SetName("added");
+        column->SetType("Uint64");
+        auto fp = FakeResolve(tx, "/MyRoot", {{7, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot/Dir");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().GetName(), "T");
+        UNIT_ASSERT(!copy.GetAlterTable().HasPathId());
+        UNIT_ASSERT(!copy.GetAlterTable().HasId_Deprecated());
+        // Everything else survives untouched.
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().ColumnsSize(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetAlterTable().GetColumns(0).GetName(), "added");
+    }
+
+    Y_UNIT_TEST(CanonicalizeSplitMergeKeepsTheAbsoluteTablePath) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpSplitMergeTablePartitions, "/MyRoot");
+        auto& info = *tx.MutableSplitMergeTablePartitions();
+        info.SetTableOwnerId(72057594046678944ull);
+        info.SetTableLocalId(11);
+        auto fp = FakeResolve(tx, "/MyRoot", {{11, "/MyRoot/Dir/T"}});
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(result.Changed);
+        // split_merge.cpp:849 resolves TablePath absolutely, WorkingDir is not
+        // consulted and must not be rewritten.
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetSplitMergeTablePartitions().GetTablePath(), "/MyRoot/Dir/T");
+        UNIT_ASSERT_VALUES_EQUAL(copy.GetWorkingDir(), "/MyRoot");
+        UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableOwnerId());
+        UNIT_ASSERT(!copy.GetSplitMergeTablePartitions().HasTableLocalId());
+
+        // The footprint now describes the request as rewritten, so relocation
+        // reads an Absolute TablePath instead of a path id.
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries.size(), 1u);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Field,
+            EPathField::SplitMergeTablePartitions_TablePath);
+        UNIT_ASSERT_EQUAL(fp.Entries[0].Ref.Kind, EPathRefKind::Absolute);
+        UNIT_ASSERT_VALUES_EQUAL(fp.Entries[0].Ref.Value, "/MyRoot/Dir/T");
+        UNIT_ASSERT_VALUES_EQUAL(fp.WorkingDir, "/MyRoot");
+    }
+
+    Y_UNIT_TEST(CanonicalizeUnknownIdIsUntransformable) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot");
+        tx.MutableDrop()->SetId(42);
+        // Nothing resolves the id: it names a path this schemeshard does not have.
+        auto fp = FakeResolve(tx, "/MyRoot");
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(!result.Changed);
+        UNIT_ASSERT_VALUES_EQUAL(result.Untransformable.size(), 1u);
+        UNIT_ASSERT_EQUAL(result.Untransformable[0], EPathField::Drop_Id);
+        UNIT_ASSERT_VALUES_EQUAL(copy.DebugString(), tx.DebugString());
+    }
+
+    Y_UNIT_TEST(CanonicalizeLeavesAByNameRequestAlone) {
+        auto tx = MakeTx(NKikimrSchemeOp::ESchemeOpDropTable, "/MyRoot/Dir");
+        tx.MutableDrop()->SetName("T");
+        auto fp = FakeResolve(tx, "/MyRoot");
+
+        auto copy = tx;
+        const auto result = CanonicalizeToPaths(copy, fp);
+
+        UNIT_ASSERT(!result.Changed);
+        UNIT_ASSERT(result.Untransformable.empty());
+        UNIT_ASSERT_VALUES_EQUAL(copy.DebugString(), tx.DebugString());
+    }
+
 }
