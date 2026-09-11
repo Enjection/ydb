@@ -751,16 +751,15 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintExtract) {
             const auto* value = descriptor->value(i);
             const TString name(value->name());
             const auto type = static_cast<NKikimrSchemeOp::EOperationType>(value->number());
-            const auto support = GetSchemeOperationSupport(type);
-            UNIT_ASSERT_C(support != ESchemeOperationSupport::Unknown, name);
+            const auto* entry = FindSchemeOperation(type);
+            UNIT_ASSERT_C(entry, name);
+            const auto support = entry->Support;
             auto tx = MakeTx(type, "/MyRoot");
             const auto refs = ExtractPathRefs(tx);
             if (support == ESchemeOperationSupport::Unsupported) {
                 continue;
             }
-            if (emptyRequests.contains(name)
-                    || support == ESchemeOperationSupport::Stub
-                    || support == ESchemeOperationSupport::Deprecated) {
+            if (emptyRequests.contains(name)) {
                 UNIT_ASSERT_VALUES_EQUAL_C(refs.size(), 0u, name);
             } else {
                 UNIT_ASSERT_C(!refs.empty(), "no path refs extracted for " << name);
