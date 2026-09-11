@@ -1026,7 +1026,7 @@ public:
         if (QueryState->Statements.size() > 1) {
             bool keyed = QueryState->RequestEv->Record.GetRequest().HasUid();
             for (const auto& statement : QueryState->Statements) {
-                keyed |= statement.Ast && HasSqlNativeOperationUid(statement.Ast->Root);
+                keyed |= statement.Ast && HasSqlBackupOperationUid(statement.Ast->Root);
             }
             if (keyed) {
                 ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
@@ -1154,7 +1154,7 @@ public:
     }
 
     void OnSuccessCompileRequest() {
-        if (!ValidateNativeOperationIdentity()) {
+        if (!ValidateOperationIdempotency()) {
             co_return;
         }
         if (WmPostCompileClassify()) {
@@ -1557,7 +1557,7 @@ public:
         return true;
     }
 
-    bool ValidateNativeOperationIdentity() {
+    bool ValidateOperationIdempotency() {
         const auto& request = *QueryState->RequestEv;
         const auto& phyQuery = QueryState->PreparedQuery->GetPhysicalQuery();
         TMaybe<TString> key;
@@ -1567,19 +1567,19 @@ public:
 
         bool supported = phyQuery.TransactionsSize() == 1;
         for (const auto& tx : phyQuery.GetTransactions()) {
-            const NKikimrSchemeOp::TModifyScheme* native = nullptr;
+            const NKikimrSchemeOp::TModifyScheme* backupOperation = nullptr;
             if (tx.GetType() == NKqpProto::TKqpPhyTx::TYPE_SCHEME) {
                 const auto& op = tx.GetSchemeOperation();
                 switch (op.GetOperationCase()) {
-                    case NKqpProto::TKqpSchemeOperation::kBackup: native = &op.GetBackup(); break;
-                    case NKqpProto::TKqpSchemeOperation::kBackupIncremental: native = &op.GetBackupIncremental(); break;
-                    case NKqpProto::TKqpSchemeOperation::kRestore: native = &op.GetRestore(); break;
+                    case NKqpProto::TKqpSchemeOperation::kBackup: backupOperation = &op.GetBackup(); break;
+                    case NKqpProto::TKqpSchemeOperation::kBackupIncremental: backupOperation = &op.GetBackupIncremental(); break;
+                    case NKqpProto::TKqpSchemeOperation::kRestore: backupOperation = &op.GetRestore(); break;
                     default: break;
                 }
             }
-            supported &= native != nullptr;
-            if (native && native->HasNativeOperationIdentity()) {
-                const auto& sqlKey = native->GetNativeOperationIdentity().GetUid();
+            supported &= backupOperation != nullptr;
+            if (backupOperation && backupOperation->HasOperationIdempotency()) {
+                const auto& sqlKey = backupOperation->GetOperationIdempotency().GetUid();
                 if (key.Defined() && *key != sqlKey) {
                     ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
                         "UID_MISMATCH: SQL and request keys must match");
@@ -1591,9 +1591,9 @@ public:
         if (!key.Defined()) {
             return true;
         }
-        if (!NBackup::IsValidNativeOperationUid(*key)) {
+        if (!NBackup::IsValidBackupOperationUid(*key)) {
             ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
-                "INVALID_NATIVE_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
+                "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
             return false;
         }
         if (!supported || QueryState->Statements.size() > 1 ||
@@ -1601,10 +1601,10 @@ public:
             QueryState->HasTxControl() || !request.GetYdbParameters().empty() ||
             (request.GetSyntax() != Ydb::Query::SYNTAX_UNSPECIFIED && request.GetSyntax() != Ydb::Query::SYNTAX_YQL_V1)) {
             ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
-                "IDEMPOTENCY_NOT_SUPPORTED: expected one native backup or restore statement in NoTx execution mode");
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one backup or restore statement in NoTx execution mode");
             return false;
         }
-        auto& identity = QueryState->NativeOperationIdentity.emplace();
+        auto& identity = QueryState->OperationIdempotency.emplace();
         identity.SetUid(*key);
         identity.SetOriginalDdl(request.GetQuery());
         return true;
@@ -2331,7 +2331,7 @@ public:
             temporary, /* createTmpDir */ temporary && !TempTablesState.NeedCleaning,
             QueryState->IsCreateTableAs(), TempTablesState.TempDirName, QueryState->UserRequestContext,
             expectsResult, expectsResult ? QueryState->QueryData->GetAllocState() : nullptr,
-            KqpTempTablesAgentActor, QueryState->NativeOperationIdentity);
+            KqpTempTablesAgentActor, QueryState->OperationIdempotency);
 
         ExecuterId = RegisterWithSameMailbox(executerActor);
 

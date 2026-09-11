@@ -24,7 +24,7 @@ public:
     bool Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& core, size_t statementNumber);
 
 private:
-    bool ParseNativeOperationSettings(const TRule_native_operation_settings& node, TMaybe<TString>& key);
+    bool ParseBackupOperationSettings(const TRule_backup_operation_settings& node, TMaybe<TString>& key);
     bool DeclareStatement(const TRule_declare_stmt& stmt);
     bool ExportStatement(const TRule_export_stmt& stmt);
     bool AlterTableAction(const TRule_alter_table_action& node, TAlterTableParameters& params);

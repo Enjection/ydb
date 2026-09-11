@@ -192,9 +192,9 @@ void TMemoryChanges::GrabNewFullBackupOp(TSchemeShard* ss, ui64 id) {
     FullBackups.emplace(id, nullptr);
 }
 
-void TMemoryChanges::GrabNewNativeOperationKey(TSchemeShard* ss, const TNativeOperationKey& key) {
-    Y_ABORT_UNLESS(!ss->NativeOperationsByUid.contains(key));
-    NativeOperationKeys.push(key);
+void TMemoryChanges::GrabNewBackupOperationUidKey(TSchemeShard* ss, const TBackupOperationUidKey& key) {
+    Y_ABORT_UNLESS(!ss->BackupOperationsByUid.contains(key));
+    BackupOperationUidKeys.push(key);
 }
 
 void TMemoryChanges::GrabNewBCPathToFullBackup(TSchemeShard* ss, const TPathId& bcPathId) {
@@ -453,13 +453,13 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
         IncrementalBackups.pop();
     }
 
-    while (NativeOperationKeys) {
-        const auto& key = NativeOperationKeys.top();
+    while (BackupOperationUidKeys) {
+        const auto& key = BackupOperationUidKeys.top();
         if (key.first == NKikimrSchemeOp::ESchemeOpRestoreBackupCollection) {
-            ss->IncrementalRestoreStates.erase(ss->NativeOperationsByUid.at(key));
+            ss->IncrementalRestoreStates.erase(ss->BackupOperationsByUid.at(key));
         }
-        ss->NativeOperationsByUid.erase(key);
-        NativeOperationKeys.pop();
+        ss->BackupOperationsByUid.erase(key);
+        BackupOperationUidKeys.pop();
     }
 
     while (FullBackups) {

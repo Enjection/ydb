@@ -161,7 +161,7 @@ void CleanupIncrementalRestoreState(const TPathId& backupCollectionPathId, TOper
         auto* state = context.SS->IncrementalRestoreStates.FindPtr(stateId);
         context.SS->CleanupIncrementalRestoreItems(stateId, db, state);
         if (state && state->Uid) {
-            context.SS->NativeOperationsByUid.erase({NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state->Uid});
+            context.SS->BackupOperationsByUid.erase({NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state->Uid});
         }
         context.SS->IncrementalRestoreStates.erase(stateId);
         db.Table<Schema::IncrementalRestoreState>().Key(stateId).Delete();
@@ -490,7 +490,7 @@ public:
                 .Delete();
             
             if (const auto* state = context.SS->IncrementalRestoreStates.FindPtr(opId); state && state->Uid) {
-                context.SS->NativeOperationsByUid.erase({NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state->Uid});
+                context.SS->BackupOperationsByUid.erase({NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state->Uid});
             }
             context.SS->IncrementalRestoreStates.erase(opId);
             

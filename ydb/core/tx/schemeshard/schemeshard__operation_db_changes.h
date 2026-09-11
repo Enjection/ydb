@@ -57,7 +57,7 @@ class TStorageChanges: public TSimpleRefCount<TStorageChanges> {
 
     // Full-backup control op ids to flush on Apply(); same shape as IncrementalBackups.
     TDeque<ui64> FullBackups;
-    TDeque<TNativeOperationKey> NativeOperationKeys;
+    TDeque<TBackupOperationUidKey> BackupOperationUidKeys;
 
     TDeque<TPathId> StreamingQueries;
 
@@ -191,8 +191,8 @@ public:
         FullBackups.emplace_back(id);
     }
 
-    void PersistNativeOperationKey(const TNativeOperationKey& key) {
-        NativeOperationKeys.emplace_back(key);
+    void PersistBackupOperationUidKey(const TBackupOperationUidKey& key) {
+        BackupOperationUidKeys.emplace_back(key);
     }
 
     void PersistStreamingQuery(const TPathId& pathId) {

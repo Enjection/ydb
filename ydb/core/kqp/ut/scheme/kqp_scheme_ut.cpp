@@ -17341,7 +17341,7 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
         const auto empty = client.ExecuteQuery("SELECT 1;", NYdb::NQuery::TTxControl::NoTx(),
             NYdb::NQuery::TExecuteQuerySettings().Uid("")).GetValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(empty.GetStatus(), EStatus::BAD_REQUEST, empty.GetIssues().ToString());
-        UNIT_ASSERT_STRING_CONTAINS(empty.GetIssues().ToString(), "INVALID_NATIVE_OPERATION_UID");
+        UNIT_ASSERT_STRING_CONTAINS(empty.GetIssues().ToString(), "INVALID_BACKUP_OPERATION_UID");
     }
 
     Y_UNIT_TEST(BackupReturnsOperationId) {

@@ -61,7 +61,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
     TActorId Source;
     TActorId PipeClient;
     ui64 SchemeshardIdToRequest;
-    ui64 NativeRequestGeneration = 0;
+    ui64 IdempotencyRequestGeneration = 0;
 
     struct TPathToResolve {
         const NKikimrSchemeOp::TModifyScheme& ModifyScheme;
@@ -124,8 +124,8 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
             {"txId", TxId},
             {"to", shardToRequest},
             {"ev", req->ToString()});
-        if (req->Record.TransactionSize() == 1 && req->Record.GetTransaction(0).HasNativeOperationIdentity()) {
-            ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++NativeRequestGeneration));
+        if (req->Record.TransactionSize() == 1 && req->Record.GetTransaction(0).HasOperationIdempotency()) {
+            ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++IdempotencyRequestGeneration));
         }
         NTabletPipe::SendData(ctx, PipeClient, req.Release());
     }
@@ -1659,7 +1659,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
 
 
     void Handle(TEvents::TEvWakeup::TPtr& ev, const TActorContext& ctx) {
-        if (ev->Get()->Tag == NativeRequestGeneration) {
+        if (ev->Get()->Tag == IdempotencyRequestGeneration) {
             ReportStatus(TEvTxUserProxy::TResultStatus::ProxyShardNotAvailable, ctx);
             Die(ctx);
         }
@@ -1904,19 +1904,19 @@ struct TFlatSchemeReq : public TBaseSchemeReq<TFlatSchemeReq> {
     void ProcessRequest(const TActorContext &ctx);
 
     void HandleWorkingDir(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr &ev, const TActorContext &ctx);
-    void HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx);
-    void HandleNativeLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx);
-    bool NativeLookupFinished = false;
+    void HandleIdempotencyDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx);
+    void HandleIdempotencyLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx);
+    bool IdempotencyLookupFinished = false;
 
-    STFUNC(StateWaitNativeDatabase) {
+    STFUNC(StateWaitIdempotencyDatabase) {
         switch (ev->GetTypeRewrite()) {
-            HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, HandleNativeDatabase);
+            HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, HandleIdempotencyDatabase);
         }
     }
 
-    STFUNC(StateWaitNativeLookup) {
+    STFUNC(StateWaitIdempotencyLookup) {
         switch (ev->GetTypeRewrite()) {
-            HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, HandleNativeLookup);
+            HFunc(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult, HandleIdempotencyLookup);
             HFunc(TEvTabletPipe::TEvClientConnected, Handle);
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
             HFunc(TEvents::TEvWakeup, Handle);
@@ -1979,7 +1979,7 @@ void TFlatSchemeReq::Bootstrap(const TActorContext &ctx) {
 }
 
 void TFlatSchemeReq::Start(const TActorContext &ctx) {
-    if (GetModifyScheme().HasNativeOperationIdentity() && !NativeLookupFinished) {
+    if (GetModifyScheme().HasOperationIdempotency() && !IdempotencyLookupFinished) {
         ResolveForACL.clear();
         auto database = TPathToResolve(GetModifyScheme());
         database.Path = SplitPath(GetRequestProto().GetDatabaseName());
@@ -1991,7 +1991,7 @@ void TFlatSchemeReq::Start(const TActorContext &ctx) {
             return Die(ctx);
         }
         ctx.Send(Services.SchemeCache, new TEvTxProxySchemeCache::TEvNavigateKeySet(request));
-        Become(&TThis::StateWaitNativeDatabase);
+        Become(&TThis::StateWaitIdempotencyDatabase);
         return;
     }
 
@@ -2026,7 +2026,7 @@ void TFlatSchemeReq::Start(const TActorContext &ctx) {
     ProcessRequest(ctx);
  }
 
-void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx) {
+void TFlatSchemeReq::HandleIdempotencyDatabase(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext& ctx) {
     auto& navigate = *ev->Get()->Request;
     if (navigate.ErrorCount || navigate.ResultSet.size() != 1) {
         InterpretResolveError(&navigate, ctx);
@@ -2044,7 +2044,7 @@ void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeyS
     }
     SchemeshardIdToRequest = GetShardToRequest(entry, ResolveForACL.front());
     auto request = MakePropose(SchemeshardIdToRequest);
-    request->Record.MutableTransaction(0)->MutableNativeOperationIdentity()->SetLookupOnly(true);
+    request->Record.MutableTransaction(0)->MutableOperationIdempotency()->SetLookupOnly(true);
     if (UserToken) {
         request->Record.SetUserToken(UserToken->SerializeAsString());
     }
@@ -2052,11 +2052,11 @@ void TFlatSchemeReq::HandleNativeDatabase(TEvTxProxySchemeCache::TEvNavigateKeyS
     config.RetryPolicy = {.RetryLimitCount = 3};
     PipeClient = ctx.RegisterWithSameMailbox(NTabletPipe::CreateClient(ctx.SelfID, SchemeshardIdToRequest, config));
     NTabletPipe::SendData(ctx, PipeClient, request.Release());
-    ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++NativeRequestGeneration));
-    Become(&TThis::StateWaitNativeLookup);
+    ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup(++IdempotencyRequestGeneration));
+    Become(&TThis::StateWaitIdempotencyLookup);
 }
 
-void TFlatSchemeReq::HandleNativeLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx) {
+void TFlatSchemeReq::HandleIdempotencyLookup(NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult::TPtr& ev, const TActorContext& ctx) {
     const auto& record = ev->Get()->Record;
     if (record.GetStatus() != NKikimrScheme::StatusSuccess || record.HasOperationId()) {
         TBase::Handle(ev, ctx);
@@ -2064,8 +2064,8 @@ void TFlatSchemeReq::HandleNativeLookup(NSchemeShard::TEvSchemeShard::TEvModifyS
     }
     NTabletPipe::CloseClient(ctx, PipeClient);
     PipeClient = {};
-    ++NativeRequestGeneration;
-    NativeLookupFinished = true;
+    ++IdempotencyRequestGeneration;
+    IdempotencyLookupFinished = true;
     ResolveForACL.clear();
     Start(ctx);
 }

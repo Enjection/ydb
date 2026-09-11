@@ -83,7 +83,7 @@ class TMemoryChanges: public TSimpleRefCount<TMemoryChanges> {
     // Mirrors IncrementalBackups: UnDo erases the id from Self->FullBackups.
     using TFullBackupState = std::pair<ui64, TFullBackupInfo::TPtr>;
     TStack<TFullBackupState> FullBackups;
-    TStack<TNativeOperationKey> NativeOperationKeys;
+    TStack<TBackupOperationUidKey> BackupOperationUidKeys;
 
     // UnDo erases the (bcPathId -> id) entry, keeping BCPathToFullBackup atomic with FullBackups.
     using TBCPathToFullBackupState = std::pair<TPathId, std::optional<ui64>>;
@@ -160,7 +160,7 @@ public:
     void GrabNewLongIncrementalBackupOp(TSchemeShard* ss, ui64 id);
 
     void GrabNewFullBackupOp(TSchemeShard* ss, ui64 id);
-    void GrabNewNativeOperationKey(TSchemeShard* ss, const TNativeOperationKey& key);
+    void GrabNewBackupOperationUidKey(TSchemeShard* ss, const TBackupOperationUidKey& key);
     void GrabNewBCPathToFullBackup(TSchemeShard* ss, const TPathId& bcPathId);
 
     void GrabNewSecret(TSchemeShard* ss, const TPathId& pathId);

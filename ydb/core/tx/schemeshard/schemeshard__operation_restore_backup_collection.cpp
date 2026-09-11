@@ -299,7 +299,7 @@ public:
             op.AddIncrementalBackupTrimmedNames(TString(incrBackupName));
         }
 
-        // Native restore metadata is keyed by the parent transaction, as on restart
+        // Restore metadata is keyed by the parent transaction, as on restart
         // and in finalization; the control part can have a nonzero suboperation ID.
         const TOperationId restoreId(OperationId.GetTxId(), 0);
         context.MemChanges.GrabNewLongIncrementalRestoreOp(context.SS, restoreId);

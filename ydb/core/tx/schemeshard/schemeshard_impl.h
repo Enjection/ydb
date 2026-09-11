@@ -1796,12 +1796,12 @@ public:
     // Items are keyed by destination TPathId because CCT children are not 1-1 with user-visible items.
     TMap<ui64, TFullBackupInfo::TPtr> FullBackups;
 
-    // Family-separated UID indexes, rebuilt from native operation records.
-    TMap<TNativeOperationKey, ui64> NativeOperationsByUid;
-    TMaybe<TNativeOperationReplay> FindNativeOperationByUid(const TNativeOperationKey& key) const;
-    void BindNativeOperationUid(const TNativeOperationKey& key, ui64 id,
+    // UID index keyed by operation type and UID, rebuilt from backup and restore operation records.
+    TMap<TBackupOperationUidKey, ui64> BackupOperationsByUid;
+    TMaybe<TBackupOperationReplay> FindBackupOperationByUid(const TBackupOperationUidKey& key) const;
+    void BindBackupOperationUid(const TBackupOperationUidKey& key, ui64 id,
         const NKikimrSchemeOp::TModifyScheme& tx, const TString& userSID);
-    void PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeOperationKey& key);
+    void PersistBackupOperationUidKey(NIceDb::TNiceDb& db, const TBackupOperationUidKey& key);
 
     // Reverse index: backup-collection TPathId -> running control op id.
     // Rebuilt at TTxInit from non-terminal rows; used by the control op's Propose

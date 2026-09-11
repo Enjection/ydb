@@ -1997,17 +1997,17 @@ message TSetColumnConstraintSettings {
 
 // End Set Column Constraints
 
-// Request for scheme modification
-// Has only one of the operations
-// Identity of an external native operation submission. Child operations must
+// Idempotency metadata for an operation submission. Child operations must
 // retain their parent's operation identity rather than admit this key again.
-message TNativeOperationIdentity {
+message TOperationIdempotency {
     optional string Uid = 1 [(Ydb.sensitive) = true];
     optional bytes OriginalDdl = 3 [(Ydb.sensitive) = true];
     // Read retained identity without admitting an operation on a miss.
     optional bool LookupOnly = 4 [default = false];
 }
 
+// Request for scheme modification
+// Has only one of the operations
 message TModifyScheme {
     optional string WorkingDir = 1;
     optional EOperationType OperationType = 2;
@@ -2144,7 +2144,7 @@ message TModifyScheme {
 
     optional TCreateTestShardSet CreateTestShardSet = 96;
 
-    optional TNativeOperationIdentity NativeOperationIdentity = 97;
+    optional TOperationIdempotency OperationIdempotency = 97;
 
     // Some entries are grouped by semantics, so are out of order
 }

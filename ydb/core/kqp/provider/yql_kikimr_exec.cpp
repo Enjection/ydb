@@ -38,7 +38,7 @@ using namespace NCommon;
 using namespace NThreading;
 
 namespace {
-    TMaybe<TString> GetNativeOperationKey(const TExprNode& node) {
+    TMaybe<TString> GetBackupOperationUidKey(const TExprNode& node) {
         // The optional settings child is absent in older internal ASTs.
         if (node.ChildrenSize() > 4) {
             for (const auto& setting : node.Child(4)->Children()) {
@@ -4154,7 +4154,7 @@ public:
 
             TBackupSettings settings;
             settings.Name = TString(backup.BackupCollection());
-            settings.Uid = GetNativeOperationKey(backup.Ref());
+            settings.Uid = GetBackupOperationUidKey(backup.Ref());
 
             auto cluster = TString(backup.DataSink().Cluster());
             auto future = Gateway->Backup(cluster, settings);
@@ -4177,7 +4177,7 @@ public:
 
             TBackupSettings settings;
             settings.Name = TString(backupIncremental.BackupCollection());
-            settings.Uid = GetNativeOperationKey(backupIncremental.Ref());
+            settings.Uid = GetBackupOperationUidKey(backupIncremental.Ref());
 
             auto cluster = TString(backupIncremental.DataSink().Cluster());
             auto future = Gateway->BackupIncremental(cluster, settings);
@@ -4200,7 +4200,7 @@ public:
 
             TBackupSettings settings;
             settings.Name = TString(restore.BackupCollection());
-            settings.Uid = GetNativeOperationKey(restore.Ref());
+            settings.Uid = GetBackupOperationUidKey(restore.Ref());
 
             auto cluster = TString(restore.DataSink().Cluster());
             auto future = Gateway->Restore(cluster, settings);

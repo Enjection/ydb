@@ -25,33 +25,33 @@ EUidReplayMatch CompareOperationUid(const TOperationUidIdentity& stored, const T
 }
 
 
-TMaybe<TNativeOperationReplay> TSchemeShard::FindNativeOperationByUid(const TNativeOperationKey& key) const {
-    const auto* id = FindOperationByUid(NativeOperationsByUid, key);
+TMaybe<TBackupOperationReplay> TSchemeShard::FindBackupOperationByUid(const TBackupOperationUidKey& key) const {
+    const auto* id = FindOperationByUid(BackupOperationsByUid, key);
     if (!id) {
         return Nothing();
     }
     switch (key.first) {
         case NKikimrSchemeOp::ESchemeOpBackupBackupCollection: {
             const auto& info = *FullBackups.at(*id);
-            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
+            return TBackupOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
         }
         case NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection: {
             const auto& info = *IncrementalBackups.at(*id);
-            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
+            return TBackupOperationReplay{*id, info.OriginalDdl, info.UserSID.GetOrElse(TString())};
         }
         case NKikimrSchemeOp::ESchemeOpRestoreBackupCollection: {
             const auto& info = IncrementalRestoreStates.at(*id);
-            return TNativeOperationReplay{*id, info.OriginalDdl, info.UserSID};
+            return TBackupOperationReplay{*id, info.OriginalDdl, info.UserSID};
         }
         default:
-            Y_ABORT("Unexpected native UID operation family");
+            Y_ABORT("Unexpected backup operation type");
     }
 }
 
-void TSchemeShard::BindNativeOperationUid(const TNativeOperationKey& key, ui64 id,
+void TSchemeShard::BindBackupOperationUid(const TBackupOperationUidKey& key, ui64 id,
     const NKikimrSchemeOp::TModifyScheme& tx, const TString& userSID)
 {
-    const auto& ddl = tx.GetNativeOperationIdentity().GetOriginalDdl();
+    const auto& ddl = tx.GetOperationIdempotency().GetOriginalDdl();
     switch (key.first) {
         case NKikimrSchemeOp::ESchemeOpBackupBackupCollection: {
             auto& info = *FullBackups.at(id);
@@ -82,13 +82,13 @@ void TSchemeShard::BindNativeOperationUid(const TNativeOperationKey& key, ui64 i
             break;
         }
         default:
-            Y_ABORT("Unexpected native UID operation family");
+            Y_ABORT("Unexpected backup operation type");
     }
-    Y_ABORT_UNLESS(NativeOperationsByUid.emplace(key, id).second);
+    Y_ABORT_UNLESS(BackupOperationsByUid.emplace(key, id).second);
 }
 
-void TSchemeShard::PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeOperationKey& key) {
-    const auto id = NativeOperationsByUid.at(key);
+void TSchemeShard::PersistBackupOperationUidKey(NIceDb::TNiceDb& db, const TBackupOperationUidKey& key) {
+    const auto id = BackupOperationsByUid.at(key);
     switch (key.first) {
         case NKikimrSchemeOp::ESchemeOpBackupBackupCollection: {
             const auto& info = *FullBackups.at(id);
@@ -119,7 +119,7 @@ void TSchemeShard::PersistNativeOperationKey(NIceDb::TNiceDb& db, const TNativeO
             break;
         }
         default:
-            Y_ABORT("Unexpected native UID operation family");
+            Y_ABORT("Unexpected backup operation type");
     }
 }
 

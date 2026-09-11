@@ -13,7 +13,7 @@ namespace NKikimr::NKqp {
 
     using namespace NYdb;
 
-    Y_UNIT_TEST_SUITE(NativeBackupIdempotency) {
+    Y_UNIT_TEST_SUITE(BackupIdempotency) {
         Y_UNIT_TEST_TWIN(UidLengthRejectedBeforeAdmission, Sql) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
@@ -28,7 +28,7 @@ namespace NKikimr::NKqp {
                 }
                 const auto result = kikimr.GetQueryClient().ExecuteQuery(ddl, NQuery::TTxControl::NoTx(), settings).GetValueSync();
                 UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
-                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_NATIVE_OPERATION_UID");
+                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_BACKUP_OPERATION_UID");
             }
         }
 
@@ -122,14 +122,14 @@ namespace NKikimr::NKqp {
             using TResponse = NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult;
             using TAction = NActors::TTestActorRuntimeBase::EEventAction;
             const auto status = AccessDenied ? NKikimrScheme::StatusAccessDenied : NKikimrScheme::StatusAlreadyExists;
-            const TString reason = AccessDenied ? "Access to the operation is denied" : "Native backup already exists";
+            const TString reason = AccessDenied ? "Access to the operation is denied" : "Backup already exists";
             const auto intercepted = std::make_shared<std::atomic<bool>>(false);
             auto* runtime = kikimr.GetTestServer().GetRuntime();
             const auto previousObserver = runtime->SetObserverFunc([runtime, intercepted, status, reason](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TRequest::EventType) {
                     const auto& record = event->Get<TRequest>()->Record;
-                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:status") {
-                        // Model SchemeShard's refusal before it admits any native
+                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetOperationIdempotency().GetLookupOnly() && record.GetTransaction(0).GetOperationIdempotency().GetUid() == "backup:status") {
+                        // Model SchemeShard's refusal before it admits any backup or restore
                         // work, exercising TxProxy, KQP, gRPC, and SDK conversion.
                         auto response = MakeHolder<TResponse>(status, record.GetTxId(), record.GetTabletId(), reason);
                         runtime->Send(new IEventHandle(event->Sender, event->GetRecipientRewrite(), response.Release()), 0, true);
@@ -152,7 +152,7 @@ namespace NKikimr::NKqp {
             UNIT_ASSERT(result.GetResultSets().empty());
         }
 
-        Y_UNIT_TEST_TWIN(NativeRequestTimeoutAllowsRetry, Admission) {
+        Y_UNIT_TEST_TWIN(IdempotencyRequestTimeoutAllowsRetry, Admission) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
             TKikimrRunner kikimr(NKqp::TKikimrSettings(config)
@@ -175,8 +175,8 @@ namespace NKikimr::NKqp {
             const auto previous = runtime->SetObserverFunc([intercepted](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TRequest::EventType) {
                     const auto& record = event->Get<TRequest>()->Record;
-                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() != Admission
-                        && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:old-tablet") {
+                    if (record.TransactionSize() == 1 && record.GetTransaction(0).GetOperationIdempotency().GetLookupOnly() != Admission
+                        && record.GetTransaction(0).GetOperationIdempotency().GetUid() == "backup:old-tablet") {
                         intercepted->store(true);
                         return TAction::DROP; // Model a lost lookup or admission request.
                     }
@@ -189,7 +189,7 @@ namespace NKikimr::NKqp {
             auto future = kikimr.RunInThreadPool([&] {
                 return client.ExecuteQuery(sql, NQuery::TTxControl::NoTx(), settings).GetValueSync();
             });
-            runtime->WaitFor("native request", [&] { return intercepted->load(); });
+            runtime->WaitFor("idempotency request", [&] { return intercepted->load(); });
             runtime->SimulateSleep(TDuration::Seconds(31));
             const auto failed = runtime->WaitFuture(future);
             runtime->SetObserverFunc(previous);
@@ -229,7 +229,7 @@ namespace NKikimr::NKqp {
             const auto previous = runtime->SetObserverFunc([originalId, proposals, lost](TAutoPtr<IEventHandle>& event) {
                 if (event->GetTypeRewrite() == TPropose::EventType) {
                     const auto& record = event->Get<TPropose>()->Record;
-                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetNativeOperationIdentity().GetLookupOnly() && record.GetTransaction(0).GetNativeOperationIdentity().GetUid() == "backup:lost-api") {
+                    if (record.TransactionSize() == 1 && !record.GetTransaction(0).GetOperationIdempotency().GetLookupOnly() && record.GetTransaction(0).GetOperationIdempotency().GetUid() == "backup:lost-api") {
                         if (++*proposals == 1) {
                             originalId->store(record.GetTxId());
                         }
@@ -329,6 +329,6 @@ namespace NKikimr::NKqp {
                                    .GetValueSync();
             UNIT_ASSERT_VALUES_EQUAL_C(fresh.GetStatus(), EStatus::SCHEME_ERROR, fresh.GetIssues().ToString());
         }
-    } // Y_UNIT_TEST_SUITE(NativeBackupIdempotency)
+    } // Y_UNIT_TEST_SUITE(BackupIdempotency)
 
 } // namespace NKikimr::NKqp

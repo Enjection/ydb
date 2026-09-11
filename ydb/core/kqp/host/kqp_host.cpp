@@ -1447,11 +1447,11 @@ private:
         // Legacy DDL/script execution can apply earlier statements while
         // traversing the expression. Reject a key anywhere in that request
         // before entering any transformer capable of executing DDL.
-        const auto nativeOperation = InspectNativeOperationAst(queryAst->Root);
-        if (nativeOperation.HasSqlKey && (SessionCtx->Query().Type != EKikimrQueryType::Query
-            || !nativeOperation.IsSingleNativeOperation())) {
+        const auto backupOperation = InspectBackupOperationAst(queryAst->Root);
+        if (backupOperation.HasSqlKey && (SessionCtx->Query().Type != EKikimrQueryType::Query
+            || !backupOperation.IsSingleBackupOperation())) {
             ctx.AddError(YqlIssue(TPosition(), TIssuesIds::KIKIMR_UNSUPPORTED,
-                "IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires one native backup or restore in ExecuteQuery"));
+                "IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires one backup or restore statement in ExecuteQuery"));
             return result;
         }
 

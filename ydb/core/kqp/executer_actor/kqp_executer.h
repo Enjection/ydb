@@ -197,7 +197,7 @@ IActor* CreateKqpSchemeExecuter(
     bool temporary, bool createTmpDir, bool isCreateTableAs, TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
     bool expectsResult = false, TTxAllocatorState::TPtr txAlloc = nullptr,
     const TActorId& kqpTempTablesAgentActor = TActorId(),
-    std::optional<NKikimrSchemeOp::TNativeOperationIdentity> nativeOperationIdentity = std::nullopt);
+    std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency = std::nullopt);
 
 std::unique_ptr<TEvKqpExecuter::TEvTxResponse> ExecuteLiteral(
     IKqpGateway::TExecPhysicalRequest&& request, TKqpRequestCounters::TPtr counters, TActorId owner, const TIntrusivePtr<TUserRequestContext>& userRequestContext);

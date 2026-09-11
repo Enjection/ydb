@@ -274,9 +274,9 @@ private:
         }
 
         if (req->has_uid()) {
-            if (!NBackup::IsValidNativeOperationUid(req->uid())) {
+            if (!NBackup::IsValidBackupOperationUid(req->uid())) {
                 issues.AddIssue(NYql::TIssue(
-                    "INVALID_NATIVE_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
+                    "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
                 return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
             }
             if (QueryAction != NKikimrKqp::QUERY_ACTION_EXECUTE || req->has_tx_control()

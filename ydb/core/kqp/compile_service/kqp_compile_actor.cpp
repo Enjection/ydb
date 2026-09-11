@@ -553,16 +553,16 @@ private:
         // This check must precede compilation: a mixed DDL/result batch may
         // fail in the compiler before the session can inspect a physical plan.
         // It also applies when per-statement execution is disabled.
-        bool keyed = QueryId.Settings.RequireNativeOperation;
-        bool singleNativeOperation = astStatements.size() == 1;
+        bool keyed = QueryId.Settings.RequireBackupOperation;
+        bool singleBackupOperation = astStatements.size() == 1;
         for (const auto& statement : astStatements) {
-            const auto info = InspectNativeOperationAst(statement.Ast->Root);
+            const auto info = InspectBackupOperationAst(statement.Ast->Root);
             keyed |= info.HasSqlKey;
-            singleNativeOperation &= info.IsSingleNativeOperation();
+            singleBackupOperation &= info.IsSingleBackupOperation();
         }
-        if (keyed && !singleNativeOperation) {
+        if (keyed && !singleBackupOperation) {
             ReplyError(Ydb::StatusIds::UNSUPPORTED, {NYql::TIssue(NYql::TPosition(),
-                "IDEMPOTENCY_NOT_SUPPORTED: expected one native backup or restore statement")});
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one backup or restore statement")});
             return;
         }
 

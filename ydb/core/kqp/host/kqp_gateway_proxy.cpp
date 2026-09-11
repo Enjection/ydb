@@ -2031,7 +2031,7 @@ public:
             op.SetName(pathPair.second);
 
             if (settings.Uid.Defined()) {
-                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+                tx.MutableOperationIdempotency()->SetUid(*settings.Uid);
             }
 
             if (IsPrepare()) {
@@ -2086,7 +2086,7 @@ public:
             op.SetName(pathPair.second);
 
             if (settings.Uid.Defined()) {
-                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+                tx.MutableOperationIdempotency()->SetUid(*settings.Uid);
             }
 
             if (IsPrepare()) {
@@ -2141,7 +2141,7 @@ public:
             op.SetName(pathPair.second);
 
             if (settings.Uid.Defined()) {
-                tx.MutableNativeOperationIdentity()->SetUid(*settings.Uid);
+                tx.MutableOperationIdempotency()->SetUid(*settings.Uid);
             }
 
             if (IsPrepare()) {

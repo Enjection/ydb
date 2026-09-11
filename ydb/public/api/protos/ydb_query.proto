@@ -245,7 +245,7 @@ message ExecuteQueryRequest {
     // Enabling this setting can lead to overheads.
     bool collect_affected_rows = 15;
 
-    // Optional durable submission identity for supported native operations.
+    // Optional durable submission identity for supported backup or restore statements.
     // 1-128 bytes with no UID-specific character restrictions, compared case-sensitively.
     // Reusing a key requires byte-identical original query text.
     // Unsupported statements, batches, and execution modes are rejected.

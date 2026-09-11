@@ -441,7 +441,7 @@ NKikimrBackup::TEvForgetFullBackupResponse InternalForgetFullBackup(
 
 }  // namespace
 
-Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
+Y_UNIT_TEST_SUITE(TBackupIdempotency) {
     THolder<TEvSchemeShard::TEvModifySchemeTransaction> MakeRequest(
         ui64 txId, const TString& key,
         const TString& ddl = "BACKUP `FullBackupCol1`;",
@@ -456,7 +456,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         } else {
             tx.MutableBackupBackupCollection()->SetName(".backups/collections/" DEFAULT_NAME_1);
         }
-        auto& identity = *tx.MutableNativeOperationIdentity();
+        auto& identity = *tx.MutableOperationIdempotency();
         identity.SetUid(key);
         identity.SetOriginalDdl(ddl);
         return request;
@@ -486,10 +486,10 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         PrepareTable(runtime, env, txId, "Table1");
     }
 
-    NKikimrScheme::TEvModifySchemeTransactionResult LookupNativeOperation(
+    NKikimrScheme::TEvModifySchemeTransactionResult LookupBackupOperation(
         TTestBasicRuntime& runtime, THolder<TEvSchemeShard::TEvModifySchemeTransaction> request)
     {
-        request->Record.MutableTransaction(0)->MutableNativeOperationIdentity()->SetLookupOnly(true);
+        request->Record.MutableTransaction(0)->MutableOperationIdempotency()->SetLookupOnly(true);
         return Submit(runtime, std::move(request));
     }
 
@@ -748,15 +748,15 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         const auto accepted = Submit(runtime, originalId, "backup:metrics");
         UNIT_ASSERT_VALUES_EQUAL_C(accepted.GetStatus(), NKikimrScheme::StatusAccepted, accepted.ShortDebugString());
         env.TestWaitNotification(runtime, originalId);
-        const auto replay = LookupNativeOperation(runtime, MakeRequest(++txId, "backup:metrics"));
+        const auto replay = LookupBackupOperation(runtime, MakeRequest(++txId, "backup:metrics"));
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
         const auto conflict = Submit(runtime, ++txId, "backup:metrics", "BACKUP  `FullBackupCol1`;");
         UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
-        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/NativeUid/Admitted"), 1);
-        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/NativeUid/Replayed"), 1);
-        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/NativeUid/Conflicts"), 1);
+        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/BackupUid/Admitted"), 1);
+        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/BackupUid/Replayed"), 1);
+        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/BackupUid/Conflicts"), 1);
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
-        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/NativeUid/RecoveredRecords"), 1);
+        UNIT_ASSERT_VALUES_EQUAL(GetCumulativeCounter(runtime, "SchemeShard/BackupUid/RecoveredRecords"), 1);
     }
 
     Y_UNIT_TEST(LookupMissDoesNotReserveUidAndReplaySurvivesReboot) {
@@ -765,7 +765,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         ui64 txId = 100;
         Prepare(runtime, env, txId);
         const ui64 lookupId = ++txId;
-        const auto missing = LookupNativeOperation(
+        const auto missing = LookupBackupOperation(
             runtime, MakeRequest(lookupId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(missing.GetStatus(), NKikimrScheme::StatusSuccess, missing.ShortDebugString());
         UNIT_ASSERT(!missing.HasOperationId());
@@ -779,33 +779,33 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         UNIT_ASSERT_VALUES_EQUAL_C(admitted.GetStatus(), NKikimrScheme::StatusAccepted, admitted.ShortDebugString());
         env.TestWaitNotification(runtime, originalId);
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
-        const auto replay = LookupNativeOperation(
+        const auto replay = LookupBackupOperation(
             runtime, MakeRequest(++txId, "backup:lookup", ddl));
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
         UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
-        const auto conflict = LookupNativeOperation(
+        const auto conflict = LookupBackupOperation(
             runtime, MakeRequest(++txId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
         UNIT_ASSERT(!conflict.HasOperationId());
         const auto forgotten = InternalForgetFullBackup(runtime, originalId, ++txId);
         UNIT_ASSERT_VALUES_EQUAL_C(forgotten.GetStatus(), Ydb::StatusIds::SUCCESS, forgotten.ShortDebugString());
-        const auto released = LookupNativeOperation(
+        const auto released = LookupBackupOperation(
             runtime, MakeRequest(++txId, "backup:lookup"));
         UNIT_ASSERT_VALUES_EQUAL_C(released.GetStatus(), NKikimrScheme::StatusSuccess, released.ShortDebugString());
         UNIT_ASSERT(!released.HasOperationId());
     }
 
-    Y_UNIT_TEST(NativeRequestsDoNotExposeIdentityInLogs) {
+    Y_UNIT_TEST(IdempotencyRequestsDoNotExposeIdentityInLogs) {
         const auto check = []<typename TEvent>() {
             TEvent request;
-            request.Record.SetUserToken("native-token-secret");
-            auto* identity = request.Record.AddTransaction()->MutableNativeOperationIdentity();
-            identity->SetUid("native-uid-secret");
-            identity->SetOriginalDdl("native-ddl-secret");
+            request.Record.SetUserToken("backup-token-secret");
+            auto* identity = request.Record.AddTransaction()->MutableOperationIdempotency();
+            identity->SetUid("backup-uid-secret");
+            identity->SetOriginalDdl("backup-ddl-secret");
             const auto printed = request.ToString();
-            UNIT_ASSERT(!printed.Contains("native-token-secret"));
-            UNIT_ASSERT(!printed.Contains("native-uid-secret"));
-            UNIT_ASSERT(!printed.Contains("native-ddl-secret"));
+            UNIT_ASSERT(!printed.Contains("backup-token-secret"));
+            UNIT_ASSERT(!printed.Contains("backup-uid-secret"));
+            UNIT_ASSERT(!printed.Contains("backup-ddl-secret"));
         };
         check.template operator()<TEvSchemeShard::TEvModifySchemeTransaction>();
     }
@@ -1111,7 +1111,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
         Prepare(runtime, env, txId);
         for (unsigned i = 0; i != 2; ++i) {
             auto request = MakeRequest(++txId, "backup:identity");
-            auto* identity = request->Record.MutableTransaction(0)->MutableNativeOperationIdentity();
+            auto* identity = request->Record.MutableTransaction(0)->MutableOperationIdempotency();
             if (i == 0) {
                 identity->ClearOriginalDdl();
             } else {
@@ -1156,7 +1156,7 @@ Y_UNIT_TEST_SUITE(TNativeBackupIdempotency) {
             const auto replay = Submit(runtime, ++txId, key);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
-            // Native destination names have second precision. Ordinary workflow
+            // Backup destination names have second precision. Ordinary workflow
             // admission still applies independently of the external key.
             runtime.AdvanceCurrentTime(TDuration::Seconds(1));
         }

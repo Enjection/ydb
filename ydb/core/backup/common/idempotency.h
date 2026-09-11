@@ -4,7 +4,7 @@
 
 namespace NKikimr::NBackup {
 
-inline bool IsValidNativeOperationUid(TStringBuf key) {
+inline bool IsValidBackupOperationUid(TStringBuf key) {
     return !key.empty() && key.size() <= 128;
 }
 

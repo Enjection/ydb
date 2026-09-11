@@ -6072,7 +6072,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                 state.OriginalOperationId = operationId;
                 state.AwaitingInitialRestore = rowset.GetValueOrDefault<Schema::IncrementalRestoreState::AwaitingInitialRestore>();
                 if (state.Uid) {
-                    Self->NativeOperationsByUid[{NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state.Uid}] = operationId;
+                    Self->BackupOperationsByUid[{NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, state.Uid}] = operationId;
                 }
                 state.State = static_cast<TIncrementalRestoreState::EState>(stateValue);
                 state.CurrentIncrementalIdx = currentIdx;
@@ -6286,7 +6286,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
 
         for (auto& [operationId, state] : Self->IncrementalRestoreStates) {
             if (state.AwaitingInitialRestore) {
-                continue; // The native control operation or orphan recovery starts this stage.
+                continue; // The backup control operation or orphan recovery starts this stage.
             }
             // Finalizing without a surviving finalize sub-op: reset to Running so the
             // orchestrator re-triggers it (SyncIndexSchemaVersions/ReleasePathState are idempotent).
@@ -6353,7 +6353,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                     backupInfo->Uid = rowset.GetValueOrDefault<Schema::IncrementalBackups::Uid>();
                     backupInfo->OriginalDdl = rowset.GetValueOrDefault<Schema::IncrementalBackups::OriginalDdl>();
                     if (backupInfo->Uid) {
-                        Self->NativeOperationsByUid[{NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection, backupInfo->Uid}] = id;
+                        Self->BackupOperationsByUid[{NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection, backupInfo->Uid}] = id;
                     }
 
                     Self->IncrementalBackups[id] = backupInfo;
@@ -6430,7 +6430,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
                     backupInfo->Uid = rowset.GetValueOrDefault<Schema::FullBackups::Uid>();
                     backupInfo->OriginalDdl = rowset.GetValueOrDefault<Schema::FullBackups::OriginalDdl>();
                     if (backupInfo->Uid) {
-                        Self->NativeOperationsByUid[{NKikimrSchemeOp::ESchemeOpBackupBackupCollection, backupInfo->Uid}] = id;
+                        Self->BackupOperationsByUid[{NKikimrSchemeOp::ESchemeOpBackupBackupCollection, backupInfo->Uid}] = id;
                     }
 
                     Self->FullBackups[id] = backupInfo;
@@ -6760,7 +6760,7 @@ struct TSchemeShard::TTxInit : public TTransactionBase<TSchemeShard> {
             return;
         }
 
-        Self->TabletCounters->Cumulative()[COUNTER_NATIVE_UID_RECOVERED_RECORDS].Increment(Self->NativeOperationsByUid.size());
+        Self->TabletCounters->Cumulative()[COUNTER_BACKUP_UID_RECOVERED_RECORDS].Increment(Self->BackupOperationsByUid.size());
 
         auto delayPublications = OnComplete.ExtractPublicationsToSchemeBoard(); //there no Populator exist jet
         for (auto& [txId, pathIds] : Publications) {

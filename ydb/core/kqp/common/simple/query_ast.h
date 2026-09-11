@@ -23,19 +23,19 @@ struct TQueryAst {
     TMaybe<TString> CommandTagName;
 };
 
-struct TNativeOperationAstInfo {
+struct TBackupOperationAstInfo {
     bool HasSqlKey = false;
     ui32 Writes = 0;
-    ui32 NativeWrites = 0;
+    ui32 BackupWrites = 0;
     bool HasReads = false;
 
-    bool IsSingleNativeOperation() const {
-        return Writes == 1 && NativeWrites == 1 && !HasReads;
+    bool IsSingleBackupOperation() const {
+        return Writes == 1 && BackupWrites == 1 && !HasReads;
     }
 };
 
-inline TNativeOperationAstInfo InspectNativeOperationAst(const NYql::TAstNode* root) {
-    TNativeOperationAstInfo result;
+inline TBackupOperationAstInfo InspectBackupOperationAst(const NYql::TAstNode* root) {
+    TBackupOperationAstInfo result;
     const auto unquote = [](const NYql::TAstNode* node) {
         if (node->IsListOfSize(2) && node->GetChild(0)->IsAtom()
             && node->GetChild(0)->GetContent() == "quote")
@@ -60,7 +60,7 @@ inline TNativeOperationAstInfo InspectNativeOperationAst(const NYql::TAstNode* r
             result.HasReads |= callable == "Read!";
             if (callable == "Write!") {
                 ++result.Writes;
-                bool native = false;
+                bool backupOperation = false;
                 const auto* settings = node->IsListOfSize(6) ? unquote(node->GetChild(5)) : nullptr;
                 if (settings && settings->IsList()) {
                     for (const auto* setting : settings->GetChildren()) {
@@ -76,11 +76,11 @@ inline TNativeOperationAstInfo InspectNativeOperationAst(const NYql::TAstNode* r
                         result.HasSqlKey |= name->GetContent() == "uid";
                         if (name->GetContent() == "mode" && value->IsAtom()) {
                             const auto mode = value->GetContent();
-                            native |= mode == "backup" || mode == "backupIncremental" || mode == "restore";
+                            backupOperation |= mode == "backup" || mode == "backupIncremental" || mode == "restore";
                         }
                     }
                 }
-                result.NativeWrites += native;
+                result.BackupWrites += backupOperation;
             }
         }
         for (const auto* child : node->GetChildren()) {
@@ -90,8 +90,8 @@ inline TNativeOperationAstInfo InspectNativeOperationAst(const NYql::TAstNode* r
     return result;
 }
 
-inline bool HasSqlNativeOperationUid(const NYql::TAstNode* root) {
-    return InspectNativeOperationAst(root).HasSqlKey;
+inline bool HasSqlBackupOperationUid(const NYql::TAstNode* root) {
+    return InspectBackupOperationAst(root).HasSqlKey;
 }
 
 } // namespace NKikimr::NKqp

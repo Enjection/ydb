@@ -27,11 +27,11 @@ public:
         , FailedOnAlreadyExists(failedOnAlreadyExists)
         {}
 
-    TSchemeOpRequestHandler(TRequest* request, NThreading::TPromise<TResult> promise, bool failedOnAlreadyExists, bool successOnNotExist, bool nativeOperationUid = false)
+    TSchemeOpRequestHandler(TRequest* request, NThreading::TPromise<TResult> promise, bool failedOnAlreadyExists, bool successOnNotExist, bool backupOperationUid = false)
         : TBase(request, promise, {})
         , FailedOnAlreadyExists(failedOnAlreadyExists)
         , SuccessOnNotExist(successOnNotExist)
-        , NativeOperationUid(nativeOperationUid)
+        , BackupOperationUid(backupOperationUid)
         {}
 
 
@@ -53,7 +53,7 @@ public:
             {"status", status},
             {"shardStatus", response.GetSchemeShardStatus()});
 
-        if (NativeOperationUid &&
+        if (BackupOperationUid &&
             (response.GetSchemeShardStatus() == NKikimrScheme::StatusAlreadyExists ||
              response.GetSchemeShardStatus() == NKikimrScheme::StatusAccessDenied))
         {
@@ -63,7 +63,7 @@ public:
             auto result = NYql::NCommon::ResultFromIssues<TResult>(
                 denied ? NYql::TIssuesIds::KIKIMR_ACCESS_DENIED : NYql::TIssuesIds::DEFAULT_ERROR,
                 response.GetSchemeShardReason(), issues);
-            result.NativeOperationStatus = denied ? Ydb::StatusIds::UNAUTHORIZED : Ydb::StatusIds::ALREADY_EXISTS;
+            result.IdempotencyStatus = denied ? Ydb::StatusIds::UNAUTHORIZED : Ydb::StatusIds::ALREADY_EXISTS;
             Promise.SetValue(std::move(result));
             this->Die(ctx);
             return;
@@ -276,7 +276,7 @@ private:
     TString OperationId;
     bool FailedOnAlreadyExists = false;
     bool SuccessOnNotExist = false;
-    bool NativeOperationUid = false;
+    bool BackupOperationUid = false;
 };
 
 } // namespace NKqp

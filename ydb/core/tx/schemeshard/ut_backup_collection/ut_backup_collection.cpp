@@ -4276,7 +4276,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
     }
 
 
-    TActorId SendKeyedNativeOperation(
+    TActorId SendKeyedBackupOperation(
         TTestBasicRuntime& runtime, ui64 txId, NKikimrSchemeOp::EOperationType kind,
         const TString& key, const TString& ddl)
     {
@@ -4295,9 +4295,9 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
                 tx->MutableRestoreBackupCollection()->SetName(".backups/collections/" DEFAULT_NAME_1);
                 break;
             default:
-                UNIT_FAIL("Unexpected native operation kind");
+                UNIT_FAIL("Unexpected backup operation type");
         }
-        auto* identity = tx->MutableNativeOperationIdentity();
+        auto* identity = tx->MutableOperationIdempotency();
         identity->SetUid(key);
         identity->SetOriginalDdl(ddl);
         const auto sender = runtime.AllocateEdgeActor();
@@ -4305,11 +4305,11 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         return sender;
     }
 
-    NKikimrScheme::TEvModifySchemeTransactionResult SubmitKeyedNativeOperation(
+    NKikimrScheme::TEvModifySchemeTransactionResult SubmitKeyedBackupOperation(
         TTestBasicRuntime& runtime, ui64 txId, NKikimrSchemeOp::EOperationType kind,
         const TString& key, const TString& ddl)
     {
-        const auto sender = SendKeyedNativeOperation(runtime, txId, kind, key, ddl);
+        const auto sender = SendKeyedBackupOperation(runtime, txId, kind, key, ddl);
         const auto response = runtime.GrabEdgeEventRethrow<TEvSchemeShard::TEvModifySchemeTransactionResult>(sender);
         return response->Get()->Record;
     }
@@ -4355,7 +4355,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         });
         const ui64 originalId = ++txId;
         const TString ddl = "RESTORE `MyCollection1`;";
-        const auto accepted = SubmitKeyedNativeOperation(runtime, originalId,
+        const auto accepted = SubmitKeyedBackupOperation(runtime, originalId,
             NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, "restore:finalizing", ddl);
         UNIT_ASSERT_VALUES_EQUAL_C(accepted.GetStatus(), NKikimrScheme::StatusAccepted, accepted.ShortDebugString());
         env.TestWaitNotification(runtime, originalId);
@@ -4371,11 +4371,11 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         UNIT_ASSERT_VALUES_EQUAL(pending.GetBackupCollectionRestore().GetProgressPercent(), 99);
 
         TestForgetBackupCollectionRestore(runtime, ++txId, "/MyRoot", originalId, Ydb::StatusIds::PRECONDITION_FAILED);
-        const auto replay = SubmitKeyedNativeOperation(runtime, ++txId,
+        const auto replay = SubmitKeyedBackupOperation(runtime, ++txId,
             NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, "restore:finalizing", ddl);
         UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
         UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
-        const auto conflict = SubmitKeyedNativeOperation(runtime, ++txId,
+        const auto conflict = SubmitKeyedBackupOperation(runtime, ++txId,
             NKikimrSchemeOp::ESchemeOpRestoreBackupCollection, "restore:finalizing", ddl + " -- changed");
         UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
 
@@ -4415,14 +4415,14 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             }
             redoLimit = 2; // One MiB remains after executor overhead.
             const ui64 rejectedId = ++txId;
-            const auto rejected = SubmitKeyedNativeOperation(runtime, rejectedId, kind, "redo:all-kinds",
+            const auto rejected = SubmitKeyedBackupOperation(runtime, rejectedId, kind, "redo:all-kinds",
                 "-- " + TString(1 << 20, 'a') + "\n" + ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(rejected.GetStatus(), NKikimrScheme::StatusSchemeError, rejected.ShortDebugString());
             UNIT_ASSERT_STRING_CONTAINS(rejected.GetReason(), "local tx commit redo size");
             // Reuse immediately, with a different body, to detect in-memory
             // UID or suboperation state left behind by the aborted proposal.
             const ui64 originalId = ++txId;
-            const auto accepted = SubmitKeyedNativeOperation(runtime, originalId, kind, "redo:all-kinds", ddl);
+            const auto accepted = SubmitKeyedBackupOperation(runtime, originalId, kind, "redo:all-kinds", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(accepted.GetStatus(), NKikimrScheme::StatusAccepted, accepted.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(accepted.GetOperationId(), ToString(originalId));
             redoLimit = 200;
@@ -4446,7 +4446,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             } else {
                 TestGetBackupCollectionRestore(runtime, rejectedId, "/MyRoot", Ydb::StatusIds::NOT_FOUND);
             }
-            const auto replay = SubmitKeyedNativeOperation(runtime, ++txId, kind, "redo:all-kinds", ddl);
+            const auto replay = SubmitKeyedBackupOperation(runtime, ++txId, kind, "redo:all-kinds", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
             runtime.AdvanceCurrentTime(TDuration::Seconds(1));
@@ -4481,8 +4481,8 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             const ui64 secondId = ++txId;
             const TString secondDdl = DifferentBodies ? ddl + " -- changed body" : ddl;
             // Both independent clients submit before either admission reply is read.
-            const auto firstSender = SendKeyedNativeOperation(runtime, firstId, kind, "concurrent:all-kinds", ddl);
-            const auto secondSender = SendKeyedNativeOperation(runtime, secondId, kind, "concurrent:all-kinds", secondDdl);
+            const auto firstSender = SendKeyedBackupOperation(runtime, firstId, kind, "concurrent:all-kinds", ddl);
+            const auto secondSender = SendKeyedBackupOperation(runtime, secondId, kind, "concurrent:all-kinds", secondDdl);
             ui64 originalId = 0;
             unsigned accepted = 0;
             unsigned conflicts = 0;
@@ -4523,7 +4523,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             }
             RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
             const TString& originalDdl = originalId == firstId ? ddl : secondDdl;
-            const auto replay = SubmitKeyedNativeOperation(runtime, ++txId, kind, "concurrent:all-kinds", originalDdl);
+            const auto replay = SubmitKeyedBackupOperation(runtime, ++txId, kind, "concurrent:all-kinds", originalDdl);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
             runtime.AdvanceCurrentTime(TDuration::Seconds(1));
@@ -4585,10 +4585,10 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             });
             // The reply is emitted after commit. Stop either before dispatch
             // or after a DataShard prepares a child schema transaction.
-            const auto admitted = SubmitKeyedNativeOperation(runtime, originalId, kind, "recovery:all-kinds", ddl);
+            const auto admitted = SubmitKeyedBackupOperation(runtime, originalId, kind, "recovery:all-kinds", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(admitted.GetStatus(), NKikimrScheme::StatusAccepted, admitted.ShortDebugString());
             if (ChildPrepared) {
-                runtime.WaitFor("native child transaction prepared", [&] { return childPrepared; });
+                runtime.WaitFor("backup child transaction prepared", [&] { return childPrepared; });
             }
             RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
             env.TestWaitNotification(runtime, originalId);
@@ -4610,13 +4610,13 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
             runtime.SetObserverFunc(previous);
             // Only after autonomous recovery completes does the delayed older
             // submission arrive. It must resolve to the winning newer ID.
-            const auto delayed = SubmitKeyedNativeOperation(runtime, delayedId, kind, "recovery:all-kinds", ddl);
+            const auto delayed = SubmitKeyedBackupOperation(runtime, delayedId, kind, "recovery:all-kinds", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(delayed.GetStatus(), NKikimrScheme::StatusAccepted, delayed.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(delayed.GetOperationId(), ToString(originalId));
-            const auto replay = SubmitKeyedNativeOperation(runtime, ++txId, kind, "recovery:all-kinds", ddl);
+            const auto replay = SubmitKeyedBackupOperation(runtime, ++txId, kind, "recovery:all-kinds", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
-            const auto conflict = SubmitKeyedNativeOperation(runtime, ++txId, kind, "recovery:all-kinds", ddl + " -- changed");
+            const auto conflict = SubmitKeyedBackupOperation(runtime, ++txId, kind, "recovery:all-kinds", ddl + " -- changed");
             UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
             runtime.AdvanceCurrentTime(TDuration::Seconds(1));
         }
@@ -4649,15 +4649,15 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
                 env.TestWaitNotification(runtime, txId);
             }
             const ui64 originalId = ++txId;
-            const auto accepted = SubmitKeyedNativeOperation(runtime, originalId, kind, "same-key", ddl);
+            const auto accepted = SubmitKeyedBackupOperation(runtime, originalId, kind, "same-key", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(accepted.GetStatus(), NKikimrScheme::StatusAccepted, accepted.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(accepted.GetOperationId(), ToString(originalId));
             originals.push_back(originalId);
 
             // Replay while the operation may still be active. A new incoming
-            // transaction ID must not create another native operation.
+            // transaction ID must not create another backup operation.
             const ui64 retryId = ++txId;
-            const auto replay = SubmitKeyedNativeOperation(runtime, retryId, kind, "same-key", ddl);
+            const auto replay = SubmitKeyedBackupOperation(runtime, retryId, kind, "same-key", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetTxId(), originalId);
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originalId));
@@ -4676,15 +4676,15 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
         for (size_t i = 0; i != operations.size(); ++i) {
             const auto& [kind, ddl] = operations[i];
-            const auto replay = SubmitKeyedNativeOperation(runtime, ++txId, kind, "same-key", ddl);
+            const auto replay = SubmitKeyedBackupOperation(runtime, ++txId, kind, "same-key", ddl);
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originals[i]));
-            const auto conflict = SubmitKeyedNativeOperation(runtime, ++txId, kind, "same-key", ddl + " -- changed");
+            const auto conflict = SubmitKeyedBackupOperation(runtime, ++txId, kind, "same-key", ddl + " -- changed");
             UNIT_ASSERT_VALUES_EQUAL_C(conflict.GetStatus(), NKikimrScheme::StatusPreconditionFailed, conflict.ShortDebugString());
             UNIT_ASSERT_STRING_CONTAINS(conflict.GetReason(), "UID_CONFLICT");
         }
 
-        // Forget releases the UID in each native family, durably. This is
+        // Forget releases the UID in each operation type, durably. This is
         // independent of deleting the backup snapshots themselves.
         for (size_t i = 0; i != operations.size(); ++i) {
             const auto kind = operations[i].first;
@@ -4709,7 +4709,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
                 env.TestWaitNotification(runtime, txId);
             }
             const ui64 nextId = ++txId;
-            const auto next = SubmitKeyedNativeOperation(runtime, nextId, kind, "same-key", ddl + " -- new operation");
+            const auto next = SubmitKeyedBackupOperation(runtime, nextId, kind, "same-key", ddl + " -- new operation");
             UNIT_ASSERT_VALUES_EQUAL_C(next.GetStatus(), NKikimrScheme::StatusAccepted, next.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(next.GetTxId(), nextId);
             UNIT_ASSERT_VALUES_EQUAL(next.GetOperationId(), ToString(nextId));
@@ -4727,7 +4727,7 @@ Y_UNIT_TEST_SUITE(TBackupCollectionTests) {
         RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
         for (size_t i = 0; i != operations.size(); ++i) {
             const auto& [kind, ddl] = operations[i];
-            const auto replay = SubmitKeyedNativeOperation(runtime, ++txId, kind, "same-key", ddl + " -- new operation");
+            const auto replay = SubmitKeyedBackupOperation(runtime, ++txId, kind, "same-key", ddl + " -- new operation");
             UNIT_ASSERT_VALUES_EQUAL_C(replay.GetStatus(), NKikimrScheme::StatusAccepted, replay.ShortDebugString());
             UNIT_ASSERT_VALUES_EQUAL(replay.GetOperationId(), ToString(originals[i]));
         }

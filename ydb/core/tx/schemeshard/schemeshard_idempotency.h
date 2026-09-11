@@ -15,7 +15,7 @@ namespace NKikimr::NSchemeShard {
 
 TString GetUid(const Ydb::Operations::OperationParams& operationParams);
 
-// All operation families keep independent indexes and native-record lifetimes.
+// Each operation type has an independent UID index; UIDs live with their operation records.
 template <typename TIndex, typename TKey>
 const typename TIndex::mapped_type* FindOperationByUid(const TIndex& index, const TKey& key) {
     const auto it = index.find(key);
@@ -35,13 +35,13 @@ enum class EUidReplayMatch {
     RequestMismatch,
 };
 
-// Import/export compare domains; native SQL compares owner and DDL.
+// Import/export compare domains; backup/restore SQL compares owner and DDL.
 EUidReplayMatch CompareOperationUid(const TOperationUidIdentity& stored, const TOperationUidIdentity& requested);
 
-// A UID belongs to an operation family on this SchemeShard tablet.
-using TNativeOperationKey = std::pair<ui32, TString>;
+// A UID belongs to an operation type on this SchemeShard tablet.
+using TBackupOperationUidKey = std::pair<ui32, TString>;
 
-struct TNativeOperationReplay {
+struct TBackupOperationReplay {
     ui64 OperationId = 0;
     TString OriginalDdl;
     TString UserSID;

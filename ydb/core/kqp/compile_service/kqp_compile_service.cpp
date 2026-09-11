@@ -514,7 +514,7 @@ private:
             request.Deadline,
             ev->Get()->Split
                 ? ECompileActorAction::SPLIT
-                : ((TableServiceConfig.GetEnableAstCache() || request.Query->Settings.RequireNativeOperation) && !request.QueryAst)
+                : ((TableServiceConfig.GetEnableAstCache() || request.Query->Settings.RequireBackupOperation) && !request.QueryAst)
                     ? ECompileActorAction::PARSE
                     : ECompileActorAction::COMPILE,
             request.IsWarmupCompilation);
@@ -523,7 +523,7 @@ private:
             ev->Get()->UserRequestContext, std::move(ev->Get()->Orbit), std::move(compileServiceSpan),
             std::move(ev->Get()->TempTablesState), Nothing(), request.SplitCtx, std::move(request.SplitExpr), request.UsePessimisticLocks);
 
-        if ((TableServiceConfig.GetEnableAstCache() || compileRequest.Query.Settings.RequireNativeOperation) && request.QueryAst) {
+        if ((TableServiceConfig.GetEnableAstCache() || compileRequest.Query.Settings.RequireBackupOperation) && request.QueryAst) {
             return CompileByAst(*request.QueryAst, std::move(compileRequest), ctx);
         }
 
@@ -586,7 +586,7 @@ private:
                 request.Deadline,
                 ev->Get()->Split
                     ? ECompileActorAction::SPLIT
-                : ((TableServiceConfig.GetEnableAstCache() || query.Settings.RequireNativeOperation) && !request.QueryAst)
+                : ((TableServiceConfig.GetEnableAstCache() || query.Settings.RequireBackupOperation) && !request.QueryAst)
                         ? ECompileActorAction::PARSE
                         : ECompileActorAction::COMPILE);
             if (compileResult) {
@@ -605,7 +605,7 @@ private:
                 std::move(compileServiceSpan), std::move(ev->Get()->TempTablesState), Nothing(), nullptr, nullptr, request.UsePessimisticLocks);
                 compileRequest.FindInCache = false;
 
-            if ((TableServiceConfig.GetEnableAstCache() || compileRequest.Query.Settings.RequireNativeOperation) && request.QueryAst) {
+            if ((TableServiceConfig.GetEnableAstCache() || compileRequest.Query.Settings.RequireBackupOperation) && request.QueryAst) {
                 return CompileByAst(*request.QueryAst, std::move(compileRequest), ctx);
             }
 

@@ -518,7 +518,7 @@ class QuerySession(BaseQuerySession["SyncDriver"]):
          2) QueryResultSetFormat.ARROW.
         :param arrow_format_settings: Settings for Arrow format when result_set_format is ARROW.
         :param pool_id: Optional resource pool ID for routing the query to a specific compute pool.
-        :param uid: Optional key for a supported native backup or restore.
+        :param uid: Optional key for a supported backup or restore statement.
          Preserve the key and exact SQL across retries; requires server capability.
          Keys are case-sensitive, 1-128 bytes with no UID-specific character restrictions.
 

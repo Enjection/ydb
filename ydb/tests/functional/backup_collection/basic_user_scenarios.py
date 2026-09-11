@@ -22,7 +22,7 @@ logger.setLevel(logging.INFO)
 
 
 @contextmanager
-def lose_native_admission_response(endpoint, database):
+def lose_backup_admission_response(endpoint, database):
     """Forward real Query RPCs, dropping one admitted operation's result stream."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -2777,13 +2777,13 @@ class TestFullCycleOperationIdPolling(BaseTestBackupInFiles):
             sql, request_uid = identity(statement, uid)
             before = self.operation_list_ids(kind)
             endpoint = f"localhost:{self.cluster.nodes[1].grpc_port}"
-            with lose_native_admission_response(endpoint, self.root_dir) as (driver, proxy):
+            with lose_backup_admission_response(endpoint, self.root_dir) as (driver, proxy):
                 with ydb.QuerySessionPool(driver) as pool:
                     with pytest.raises(ydb.Unavailable, match="injected admission response loss"):
                         pool.execute_with_retries(
                             sql, uid=request_uid, retry_settings=ydb.RetrySettings(max_retries=0),
                         )
-                assert proxy.lost_id, "the fault must follow actual native admission"
+                assert proxy.lost_id, "the fault must follow actual backup admission"
                 original = self._wrap_operation_id(kind, proxy.lost_id)
             # Only the fault proxy retains the first ID as a test oracle. A new
             # SDK pool recovers it using the original UID/SQL after the failed RPC.
@@ -2806,7 +2806,7 @@ class TestFullCycleOperationIdPolling(BaseTestBackupInFiles):
         full_id = stage(f"BACKUP `{collection}`", "uid:full", "fullbackup")
         data = DataHelper(self, table)
         data.modify(add_rows=[(2, 200, "updated-two"), (4, 40, "four")], remove_ids=[1])
-        time.sleep(1.1)  # Native snapshot directory names use wall-clock seconds.
+        time.sleep(1.1)  # Backup snapshot directory names use wall-clock seconds.
         incremental_id = stage(f"BACKUP `{collection}` INCREMENTAL", "uid:incremental-1", "incbackup")
         data.modify(add_rows=[(4, 400, "updated-four"), (5, 50, "five")], remove_ids=[3])
         expected = self._capture_snapshot(table)

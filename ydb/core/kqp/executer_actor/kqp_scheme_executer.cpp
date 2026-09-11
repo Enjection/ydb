@@ -113,7 +113,7 @@ public:
         bool temporary, bool createTmpDir, bool isCreateTableAs, TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
         bool expectsResult, TTxAllocatorState::TPtr txAlloc,
         const TActorId& kqpTempTablesAgentActor,
-        std::optional<NKikimrSchemeOp::TNativeOperationIdentity> nativeOperationIdentity)
+        std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
         : PhyTx(phyTx)
         , QueryType(queryType)
         , QueryData(queryData)
@@ -130,7 +130,7 @@ public:
         , ExpectsResult(expectsResult)
         , TxAlloc(std::move(txAlloc))
         , KqpTempTablesAgentActor(kqpTempTablesAgentActor)
-        , NativeOperationIdentity(std::move(nativeOperationIdentity))
+        , OperationIdempotency(std::move(operationIdempotency))
     {
         YQL_ENSURE(RequestContext);
         YQL_ENSURE(PhyTx);
@@ -730,8 +730,8 @@ public:
                 return;
         }
 
-        if (NativeOperationIdentity) {
-            *ev->Record.MutableTransaction()->MutableModifyScheme()->MutableNativeOperationIdentity() = *NativeOperationIdentity;
+        if (OperationIdempotency) {
+            *ev->Record.MutableTransaction()->MutableModifyScheme()->MutableOperationIdempotency() = *OperationIdempotency;
         }
 
         auto promise = NewPromise<IKqpGateway::TGenericResult>();
@@ -751,7 +751,7 @@ public:
             promise,
             failedOnAlreadyExists,
             successOnNotExist,
-            NativeOperationIdentity.has_value()
+            OperationIdempotency.has_value()
         );
         RegisterWithSameMailbox(requestHandler);
 
@@ -762,7 +762,7 @@ public:
             auto ev = MakeHolder<TEvPrivate::TEvResult>();
             ev->Result.SetStatus(value.Status());
             ev->Result.OperationId = value.OperationId;
-            ev->Result.NativeOperationStatus = value.NativeOperationStatus;
+            ev->Result.IdempotencyStatus = value.IdempotencyStatus;
 
             if (value.Issues()) {
                 NYql::TIssue rootIssue(TStringBuilder() << "Executing " << NKikimrSchemeOp::EOperationType_Name(operationType));
@@ -829,7 +829,7 @@ public:
 
     void Bootstrap() {
         const auto& schemeOp = PhyTx->GetSchemeOperation();
-        if (NativeOperationIdentity) {
+        if (OperationIdempotency) {
             const auto kind = schemeOp.GetOperationCase();
             if (kind != NKqpProto::TKqpSchemeOperation::kBackup
                 && kind != NKqpProto::TKqpSchemeOperation::kBackupIncremental
@@ -1324,7 +1324,7 @@ public:
     void HandleExecute(TEvPrivate::TEvResult::TPtr& ev) {
         auto& response = *ResponseEv->Record.MutableResponse();
 
-        response.SetStatus(ev->Get()->Result.NativeOperationStatus.GetOrElse(GetYdbStatus(ev->Get()->Result)));
+        response.SetStatus(ev->Get()->Result.IdempotencyStatus.GetOrElse(GetYdbStatus(ev->Get()->Result)));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
         if (ExpectsResult && response.GetStatus() == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
@@ -1484,7 +1484,7 @@ private:
     bool ExpectsResult = false;
     TTxAllocatorState::TPtr TxAlloc;
     const TActorId KqpTempTablesAgentActor;
-    const std::optional<NKikimrSchemeOp::TNativeOperationIdentity> NativeOperationIdentity;
+    const std::optional<NKikimrSchemeOp::TOperationIdempotency> OperationIdempotency;
     TActorId AnalyzeActorId;
 };
 
@@ -1497,12 +1497,12 @@ IActor* CreateKqpSchemeExecuter(
     bool temporary, bool createTmpDir, bool isCreateTableAs,
     TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
     bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor,
-    std::optional<NKikimrSchemeOp::TNativeOperationIdentity> nativeOperationIdentity)
+    std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
 {
     return new TKqpSchemeExecuter(
         phyTx, queryType, queryData, target, requestType, database, userToken, clientAddress,
         temporary, createTmpDir, isCreateTableAs, tempDirName, std::move(ctx),
-        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor, std::move(nativeOperationIdentity));
+        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor, std::move(operationIdempotency));
 }
 
 } // namespace NKikimr::NKqp

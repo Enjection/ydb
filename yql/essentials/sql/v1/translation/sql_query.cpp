@@ -54,11 +54,11 @@ void TSqlQuery::AddStatementToBlocks(TVector<TNodePtr>& blocks, TNodePtr node) {
     blocks.emplace_back(node);
 }
 
-bool TSqlQuery::ParseNativeOperationSettings(const TRule_native_operation_settings& node, TMaybe<TString>& key) {
-    const auto parse = [&](const TRule_native_operation_setting& entry) {
+bool TSqlQuery::ParseBackupOperationSettings(const TRule_backup_operation_settings& node, TMaybe<TString>& key) {
+    const auto parse = [&](const TRule_backup_operation_setting& entry) {
         const auto name = IdEx(entry.GetRule_an_id1(), *this);
         if (to_lower(name.Name) != "uid") {
-            Ctx_.Error() << "Unknown native operation setting: " << name.Name;
+            Ctx_.Error() << "Unknown backup or restore statement setting: " << name.Name;
             return false;
         }
         if (key.Defined()) {
@@ -72,11 +72,11 @@ bool TSqlQuery::ParseNativeOperationSettings(const TRule_native_operation_settin
         key = value->Content;
         return true;
     };
-    if (!parse(node.GetRule_native_operation_setting3())) {
+    if (!parse(node.GetRule_backup_operation_setting3())) {
         return false;
     }
     for (const auto& block : node.GetBlock4()) {
-        if (!parse(block.GetRule_native_operation_setting2())) {
+        if (!parse(block.GetRule_backup_operation_setting2())) {
             return false;
         }
     }
@@ -1912,7 +1912,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
             break;
         }
         case TRule_sql_stmt_core::kAltSqlStmtCore55: {
-            // backup_stmt: BACKUP object_ref (INCREMENTAL)? native_operation_settings?;
+            // backup_stmt: BACKUP object_ref (INCREMENTAL)? backup_operation_settings?;
             auto& node = core.GetAlt_sql_stmt_core55().GetRule_backup_stmt1();
             TObjectOperatorContext context(Ctx_.Scoped);
             if (node.GetRule_object_ref2().HasBlock1()) {
@@ -1924,7 +1924,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
 
             bool incremental = node.HasBlock3();
             TMaybe<TString> uid;
-            if (node.HasBlock4() && !ParseNativeOperationSettings(node.GetBlock4().GetRule_native_operation_settings1(), uid)) {
+            if (node.HasBlock4() && !ParseBackupOperationSettings(node.GetBlock4().GetRule_backup_operation_settings1(), uid)) {
                 return false;
             }
 
@@ -1942,7 +1942,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
             break;
         }
         case TRule_sql_stmt_core::kAltSqlStmtCore56: {
-            // restore_stmt: RESTORE object_ref (AT STRING_VALUE)? native_operation_settings?;
+            // restore_stmt: RESTORE object_ref (AT STRING_VALUE)? backup_operation_settings?;
             auto& node = core.GetAlt_sql_stmt_core56().GetRule_restore_stmt1();
             TObjectOperatorContext context(Ctx_.Scoped);
             if (node.GetRule_object_ref2().HasBlock1()) {
@@ -1953,7 +1953,7 @@ bool TSqlQuery::Statement(TVector<TNodePtr>& blocks, const TRule_sql_stmt_core& 
             }
 
             TMaybe<TString> uid;
-            if (node.HasBlock4() && !ParseNativeOperationSettings(node.GetBlock4().GetRule_native_operation_settings1(), uid)) {
+            if (node.HasBlock4() && !ParseBackupOperationSettings(node.GetBlock4().GetRule_backup_operation_settings1(), uid)) {
                 return false;
             }
 
