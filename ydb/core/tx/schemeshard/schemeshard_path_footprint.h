@@ -535,6 +535,71 @@ struct TPathFootprint {
 TPathFootprint ResolvePathFootprint(const NKikimrSchemeOp::TModifyScheme& tx, TSchemeShard* ss,
     TOperationId opId = InvalidOperationId);
 
+////////////////////////////////////////////////////////////////////////////////
+// Observation channels.
+
+class TPath;
+
+// Records every path resolution TPath performs while it is installed on
+// TSchemeShard::PathResolutionObserver. Null in production; the pointer is
+// tested on the hot path of TPath::Dive/Init, so this must stay a plain
+// virtual call behind a raw pointer, not a std::function.
+class IPathResolutionObserver {
+public:
+    virtual ~IPathResolutionObserver() = default;
+
+    // `path` is the TPath as it stands after the step, so a caller that wants
+    // the requested string reads path.PathString() and a caller that wants to
+    // know whether it landed on a TPathElement reads path.IsResolved().
+    // byPathId tells the two choke points apart: false for a name step
+    // (TPath::Dive), true for an id lookup (TPath::Init).
+    virtual void OnPathResolved(const TPath& path, bool byPathId) = 0;
+};
+
+// Production observation channel for path footprints. Registered on TAppData,
+// like NSchemeShard::IOperationFactory. Called synchronously from inside the
+// schemeshard's Propose transaction, on the tablet's actor thread: an
+// implementation must not block, must not Send from a foreign thread, and must
+// not outlive the TAppData that publishes it.
+//
+// Installing an observer is also what makes the footprints be computed at all:
+// without one they are computed only when FLAT_TX_SCHEMESHARD logging admits
+// DEBUG, and TOperation::PathFootprints/RequestFootprints stay empty otherwise.
+class IPathFootprintObserver {
+public:
+    virtual ~IPathFootprintObserver() = default;
+
+    // One call per transaction of the client request, from IgniteOperation,
+    // before any part is constructed. footprint.OriginalTxIndex is its index
+    // in TEvModifySchemeTransaction.Transaction.
+    virtual void OnRequestFootprint(TTxId txId, const TPathFootprint& footprint) = 0;
+
+    // One call per constructed part, from ProcessOperationParts, after that
+    // part's Propose() returned. Covers rejected parts.
+    virtual void OnPartFootprint(TTxId txId, const TPathFootprint& footprint) = 0;
+
+    // True to also fill TPathFootprint::ReadSet with every path each part's
+    // Propose() resolved. Off by default: it puts a virtual call on
+    // TPath::Dive for the duration of Propose().
+    virtual bool WantReadSet() const { return false; }
+};
+
+// Fills a TPathFootprint::ReadSet. Collapses one walk into one entry: a step
+// that extends the path recorded immediately before it replaces that entry, so
+// TPath::Resolve("/MyRoot/a/b/T") contributes one read, not four. Ancestors are
+// still covered, because a longer path implies every prefix of it was walked.
+class TPathReadSetRecorder final: public IPathResolutionObserver {
+public:
+    explicit TPathReadSetRecorder(TVector<TPathRead>& sink)
+        : Sink(sink)
+    {}
+
+    void OnPathResolved(const TPath& path, bool byPathId) override;
+
+private:
+    TVector<TPathRead>& Sink;
+};
+
 TStringBuf PathRefKindName(EPathRefKind kind);
 TStringBuf PathRefRoleName(EPathRefRole role);
 

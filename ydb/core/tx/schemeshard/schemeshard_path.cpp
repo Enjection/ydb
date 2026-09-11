@@ -2,6 +2,7 @@
 
 #include "schemeshard_system_names.h"
 #include "schemeshard_impl.h"
+#include "schemeshard_path_footprint.h"
 
 #include <ydb/core/base/auth.h>
 #include <ydb/core/base/path.h>
@@ -1425,9 +1426,17 @@ bool TPath::IsDomain() const {
 }
 
 TPath& TPath::Dive(const TString& name) {
+    DiveImpl(name);
+    if (Y_UNLIKELY(SS->PathResolutionObserver)) {
+        SS->PathResolutionObserver->OnPathResolved(*this, /* byPathId */ false);
+    }
+    return *this;
+}
+
+void TPath::DiveImpl(const TString& name) {
     if (!SS->IsSchemeShardConfigured()) {
         NameParts.push_back(name);
-        return *this;
+        return;
     }
 
     if (Elements.empty() && NameParts.size() < SS->RootPathElements.size()) {
@@ -1440,12 +1449,12 @@ TPath& TPath::Dive(const TString& name) {
             NameParts = {Elements.front()->Name};
         }
 
-        return *this;
+        return;
     }
 
     if (Elements.size() != NameParts.size()) {
         NameParts.push_back(name);
-        return *this;
+        return;
     }
 
     NameParts.push_back(name);
@@ -1454,11 +1463,10 @@ TPath& TPath::Dive(const TString& name) {
     TPathId* childId = last->FindChild(name);
 
     if (nullptr == childId) {
-        return *this;
+        return;
     }
 
     Elements.push_back(SS->PathsById.at(*childId));
-    return *this;
 }
 
 TPath TPath::Child(const TString& name) const {
@@ -1543,7 +1551,11 @@ TPath TPath::Init(const TPathId pathId, TSchemeShard* ss) {
     Y_ABORT_UNLESS(ss);
 
     if (!ss->PathsById.contains(pathId)) {
-        return TPath(ss);
+        TPath unknown(ss);
+        if (Y_UNLIKELY(ss->PathResolutionObserver)) {
+            ss->PathResolutionObserver->OnPathResolved(unknown, /* byPathId */ true);
+        }
+        return unknown;
     }
 
     TVector<TPathElement::TPtr> parts;
@@ -1558,7 +1570,11 @@ TPath TPath::Init(const TPathId pathId, TSchemeShard* ss) {
     parts.push_back(cur); // add root
     std::reverse(parts.begin(), parts.end());
 
-    return TPath(std::move(parts), ss);
+    TPath result(std::move(parts), ss);
+    if (Y_UNLIKELY(ss->PathResolutionObserver)) {
+        ss->PathResolutionObserver->OnPathResolved(result, /* byPathId */ true);
+    }
+    return result;
 }
 
 TPathElement::TPtr TPath::Base() const {
