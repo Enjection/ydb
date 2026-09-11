@@ -134,6 +134,18 @@ const TObservedEntry& RequireEntry(const TVector<TObservedEntry>& entries,
     return *found;
 }
 
+const TObservedEntry& RequireEntryByAbsPath(const TVector<TObservedEntry>& entries,
+        TStringBuf opType, TStringBuf absPath)
+{
+    for (const auto& observed : entries) {
+        if (observed.OpType() == opType && observed.AbsPath() == absPath) {
+            return observed;
+        }
+    }
+    UNIT_FAIL("no footprint entry for " << opType << " at " << absPath);
+    return entries.front();
+}
+
 TVector<TString> AbsPaths(const TVector<TObservedEntry>& entries,
         TStringBuf opType, TStringBuf fieldPath)
 {
@@ -1219,6 +1231,458 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
     // The observer replaced the log as the test channel, but the DEBUG line is
     // still the production rendering: it must keep rendering the same fields
     // once FLAT_TX_SCHEMESHARD admits DEBUG.
+    Y_UNIT_TEST(DebugLogStillRendersTheFootprint) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        TTestEnv env(runtime);
+        // TTestEnv already raises FLAT_TX_SCHEMESHARD to DEBUG; pinned here so
+        // the test does not silently depend on that default.
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_DEBUG);
+        ui64 txId = 100;
+
+        const size_t mark = log.size();
+        TestMkDir(runtime, ++txId, "/MyRoot", "LoggedDir");
+        env.TestWaitNotification(runtime, txId);
+
+        bool foundPart = false;
+        bool foundRequest = false;
+        bool foundWriteSet = false;
+        for (size_t i = mark; i < log.size(); ++i) {
+            const TStringBuf line = log[i];
+            if (line.find("PathFootprint") == TStringBuf::npos) {
+                continue;
+            }
+            if (line.find("absPath# /MyRoot/LoggedDir") == TStringBuf::npos) {
+                foundWriteSet = foundWriteSet
+                    || line.find("fieldPath# <writeSet>") != TStringBuf::npos;
+                continue;
+            }
+            UNIT_ASSERT_C(line.find("fieldPath# MkDir.Name") != TStringBuf::npos, line);
+            UNIT_ASSERT_C(line.find("partOpType# ESchemeOpMkDir") != TStringBuf::npos, line);
+            if (line.find("PathFootprint request") != TStringBuf::npos) {
+                foundRequest = true;
+            } else {
+                foundPart = true;
+            }
+        }
+        UNIT_ASSERT_C(foundPart, "no part-level PathFootprint DEBUG line");
+        UNIT_ASSERT_C(foundRequest, "no request-level PathFootprint DEBUG line");
+        UNIT_ASSERT_C(foundWriteSet, "no write set PathFootprint DEBUG line");
+    }
+
+    // ... and with neither an observer nor DEBUG logging, nothing is computed
+    // at all. TTestEnv::SetupLogging leaves FLAT_TX_SCHEMESHARD at DEBUG
+    // (ENABLE_SCHEMESHARD_LOG defaults to true), so the production default has
+    // to be asked for explicitly.
+    Y_UNIT_TEST(NoObserverAndNoDebugLogMeansNoFootprint) {
+        TVector<TString> log;
+        TTestBasicRuntime runtime;
+        runtime.SetLogBackend(new TLogRecordCollector(&log));
+        // The default read-set gate is itself an observer, so it has to be off
+        // for this test to mean what its name says.
+        TTestEnv env(runtime, TTestEnvOptions().AssertReadSetCoverage(false));
+        runtime.SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_NOTICE);
+        ui64 txId = 100;
+
+        const size_t mark = log.size();
+        TestMkDir(runtime, ++txId, "/MyRoot", "QuietDir");
+        env.TestWaitNotification(runtime, txId);
+
+        for (size_t i = mark; i < log.size(); ++i) {
+            UNIT_ASSERT_C(TStringBuf(log[i]).find("PathFootprint") == TStringBuf::npos, log[i]);
+        }
+    }
+
+    Y_UNIT_TEST(CreateIndexedTable) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Table"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts);
+
+        // The client request itself is not a part; the parts are the derived
+        // CreateTable / CreateTableIndex / CreateTable(implTable) protos, each
+        // already carrying an absolute WorkingDir and a leaf Name.
+        UNIT_ASSERT_VALUES_EQUAL(
+            AbsPaths(entries, "ESchemeOpCreateTable", "CreateTable.Name"),
+            (TVector<TString>{"/MyRoot/Table", "/MyRoot/Table/byValue/indexImplTable"}));
+
+        const auto& index = RequireEntry(entries, "ESchemeOpCreateTableIndex", "CreateTableIndex.Name");
+        UNIT_ASSERT_VALUES_EQUAL(index.Entry->AbsPath, "/MyRoot/Table/byValue");
+        UNIT_ASSERT_VALUES_EQUAL(index.Entry->RelPathToDatabase, "Table/byValue");
+
+        const auto& impl = RequireEntryByAbsPath(entries,
+            "ESchemeOpCreateTable", "/MyRoot/Table/byValue/indexImplTable");
+        UNIT_ASSERT_VALUES_EQUAL(impl.Entry->RelPathToWorkingDir, "indexImplTable");
+        UNIT_ASSERT_VALUES_EQUAL(impl.Part->WorkingDirRelToDb, "Table/byValue");
+    }
+
+    Y_UNIT_TEST(CreateCdcStream) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions()
+            .EnableProtoSourceIdInfo(true)
+            .PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint64" }
+            Columns { Name: "value" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const size_t mark = collector.Parts.size();
+        TestCreateCdcStream(runtime, ++txId, "/MyRoot", R"(
+            TableName: "Table"
+            StreamDescription {
+              Name: "Stream"
+              Mode: ECdcStreamModeKeysOnly
+              Format: ECdcStreamFormatProto
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts, mark);
+
+        const auto& atTable = RequireEntry(entries,
+            "ESchemeOpCreateCdcStreamAtTable", "CreateCdcStream.TableName");
+        UNIT_ASSERT_VALUES_EQUAL(atTable.Entry->AbsPath, "/MyRoot/Table");
+        UNIT_ASSERT_VALUES_EQUAL(atTable.Entry->Exists, true);
+        UNIT_ASSERT(atTable.Entry->PathId);
+
+        const auto& impl = RequireEntry(entries,
+            "ESchemeOpCreateCdcStreamImpl", "CreateCdcStream.StreamDescription.Name");
+        UNIT_ASSERT_VALUES_EQUAL(impl.Entry->AbsPath, "/MyRoot/Table/Stream");
+        UNIT_ASSERT_VALUES_EQUAL(impl.Entry->RelPathToDatabase, "Table/Stream");
+
+        // The AtTable part resolves the stream leaf too (it fills
+        // txState.CdcPathId from it), so the footprint must report it.
+        const auto& atTableStream = RequireEntry(entries,
+            "ESchemeOpCreateCdcStreamAtTable", "CreateCdcStream.StreamDescription.Name");
+        UNIT_ASSERT_VALUES_EQUAL(atTableStream.Entry->AbsPath, "/MyRoot/Table/Stream");
+        UNIT_ASSERT_VALUES_EQUAL(
+            TString(PathRefKindName(atTableStream.Entry->Ref.Kind)), "LeafUnderSibling");
+        UNIT_ASSERT_VALUES_EQUAL(atTableStream.Entry->RelPathToWorkingDir, "Table/Stream");
+    }
+
+    Y_UNIT_TEST(MoveTable) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const size_t mark = collector.Parts.size();
+        TestMoveTable(runtime, ++txId, "/MyRoot/Table", "/MyRoot/Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts, mark);
+
+        const auto& src = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.SrcPath");
+        UNIT_ASSERT_VALUES_EQUAL(src.Entry->AbsPath, "/MyRoot/Table");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(src.Entry->Ref.Role)), "Source");
+        UNIT_ASSERT_VALUES_EQUAL(src.Entry->Exists, true);
+
+        const auto& dst = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.DstPath");
+        UNIT_ASSERT_VALUES_EQUAL(dst.Entry->AbsPath, "/MyRoot/Moved");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(dst.Entry->Ref.Role)), "Target");
+        UNIT_ASSERT_VALUES_EQUAL(dst.Entry->Exists, false);
+    }
+
+    // The Move* parts resolve their destination with
+    // TPath::ResolveWithInactive, because the destination's parent may be held
+    // by an earlier part of the same transaction. The part-level footprint
+    // resolves it the same way, so it never reports a path the operation will
+    // not use; the request-level footprint has no part to walk back from and
+    // stays on the plain resolver.
+    Y_UNIT_TEST(MoveIndexedTableResolvesEveryMoveDestination) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Table"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const size_t mark = collector.Parts.size();
+        const size_t requestMark = collector.Requests.size();
+        TestMoveTable(runtime, ++txId, "/MyRoot/Table", "/MyRoot/Moved");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts, mark);
+
+        // The MoveTable part: destination resolved through the inactive-aware
+        // resolver, same answer as the operation's own dstPath.
+        const auto& tableDst = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.DstPath");
+        UNIT_ASSERT_VALUES_EQUAL(tableDst.Entry->AbsPath, "/MyRoot/Moved");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(tableDst.Entry->Ref.Role)), "Target");
+
+        // The source keeps the plain resolver: it is the still-active original.
+        const auto& tableSrc = RequireEntry(entries, "ESchemeOpMoveTable", "MoveTable.SrcPath");
+        UNIT_ASSERT_VALUES_EQUAL(tableSrc.Entry->AbsPath, "/MyRoot/Table");
+        UNIT_ASSERT_VALUES_EQUAL(tableSrc.Entry->Exists, true);
+
+        // The derived MoveTableIndex part hangs its destination off a table
+        // that only the earlier MoveTable part of this transaction created.
+        const auto& indexDst = RequireEntry(entries,
+            "ESchemeOpMoveTableIndex", "MoveTableIndex.DstPath");
+        UNIT_ASSERT_VALUES_EQUAL(indexDst.Entry->AbsPath, "/MyRoot/Moved/byValue");
+        const auto& indexSrc = RequireEntry(entries,
+            "ESchemeOpMoveTableIndex", "MoveTableIndex.SrcPath");
+        UNIT_ASSERT_VALUES_EQUAL(indexSrc.Entry->AbsPath, "/MyRoot/Table/byValue");
+
+        // The request footprint is resolved before any part exists, so it uses
+        // the plain resolver and still describes the request as submitted.
+        UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - requestMark, 1u);
+        const TPathFootprint& request = collector.Requests[requestMark].Footprint;
+        UNIT_ASSERT_VALUES_EQUAL(request.PartId, InvalidSubTxId);
+        bool sawDst = false;
+        for (const auto& entry : request.Entries) {
+            if (entry.Ref.FieldPath == "MoveTable.DstPath") {
+                UNIT_ASSERT_VALUES_EQUAL(entry.AbsPath, "/MyRoot/Moved");
+                sawDst = true;
+            }
+        }
+        UNIT_ASSERT_C(sawDst, "no MoveTable.DstPath in the request footprint");
+    }
+
+    Y_UNIT_TEST(DropTableByNameAndById) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        for (const TString& name : {TString("ByName"), TString("ById")}) {
+            TestCreateTable(runtime, ++txId, "/MyRoot", Sprintf(R"(
+                Name: "%s"
+                Columns { Name: "key" Type: "Uint64" }
+                KeyColumnNames: ["key"]
+            )", name.c_str()));
+            env.TestWaitNotification(runtime, txId);
+        }
+
+        const auto describe = DescribePath(runtime, "/MyRoot/ById");
+        const ui64 localPathId = describe.GetPathDescription().GetSelf().GetPathId();
+
+        size_t mark = collector.Parts.size();
+        TestDropTable(runtime, ++txId, "/MyRoot", "ByName");
+        env.TestWaitNotification(runtime, txId);
+        {
+            const auto entries = Flatten(collector.Parts, mark);
+            const auto& drop = RequireEntry(entries, "ESchemeOpDropTable", "Drop.Name");
+            UNIT_ASSERT_VALUES_EQUAL(drop.Entry->AbsPath, "/MyRoot/ByName");
+            UNIT_ASSERT_VALUES_EQUAL(
+                TString(PathRefKindName(drop.Entry->Ref.Kind)), "LeafUnderWorkingDir");
+            UNIT_ASSERT_VALUES_EQUAL(drop.Entry->Exists, true);
+        }
+
+        mark = collector.Parts.size();
+        TestDropTable(runtime, ++txId, localPathId);
+        env.TestWaitNotification(runtime, txId);
+        {
+            const auto entries = Flatten(collector.Parts, mark);
+            const auto& drop = RequireEntry(entries, "ESchemeOpDropTable", "Drop.Id");
+            UNIT_ASSERT_VALUES_EQUAL(TString(PathRefKindName(drop.Entry->Ref.Kind)), "ById");
+            UNIT_ASSERT_VALUES_EQUAL(drop.Entry->AbsPath, "/MyRoot/ById");
+            UNIT_ASSERT_VALUES_EQUAL(drop.Entry->Exists, true);
+        }
+    }
+
+    Y_UNIT_TEST(ConsistentCopyTables) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        for (int i = 0; i < 2; ++i) {
+            TestCreateTable(runtime, ++txId, "/MyRoot", Sprintf(R"(
+                Name: "Src%d"
+                Columns { Name: "key" Type: "Uint64" }
+                KeyColumnNames: ["key"]
+            )", i));
+            env.TestWaitNotification(runtime, txId);
+        }
+
+        const size_t mark = collector.Parts.size();
+        TestConsistentCopyTables(runtime, ++txId, "/MyRoot", R"(
+            CopyTableDescriptions { SrcPath: "/MyRoot/Src0" DstPath: "/MyRoot/Dst0" }
+            CopyTableDescriptions { SrcPath: "/MyRoot/Src1" DstPath: "/MyRoot/Dst1" }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // Each item becomes its own CreateTable part with an absolute
+        // WorkingDir and a leaf Name; both destinations must be present.
+        const auto entries = Flatten(collector.Parts, mark);
+        UNIT_ASSERT_VALUES_EQUAL(
+            AbsPaths(entries, "ESchemeOpCreateTable", "CreateTable.Name"),
+            (TVector<TString>{"/MyRoot/Dst0", "/MyRoot/Dst1"}));
+    }
+
+    // A backup collection's ExplicitEntryList entries are an Absolute field:
+    // RegisterBackupCollectionTables() resolves each with TPath::Resolve() and
+    // never joins WorkingDir (schemeshard_impl.cpp:3920). Layer 2 must do the
+    // same even when the value has no leading slash, otherwise it invents a
+    // path under the working dir that the operation never touches.
+    Y_UNIT_TEST(BackupCollectionEntriesAreAbsoluteNotWorkingDirRelative) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions()
+            .EnableBackupService(true)
+            .PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table1"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // The collection root is not auto-created.
+        TestMkDir(runtime, ++txId, "/MyRoot", ".backups");
+        env.TestWaitNotification(runtime, txId);
+        TestMkDir(runtime, ++txId, "/MyRoot/.backups", "collections");
+        env.TestWaitNotification(runtime, txId);
+
+        const size_t mark = collector.Parts.size();
+        TestCreateBackupCollection(runtime, ++txId, "/MyRoot/.backups/collections/", R"(
+            Name: "MyCollection"
+            ExplicitEntryList {
+                Entries { Type: ETypeTable Path: "/MyRoot/Table1" }
+                Entries { Type: ETypeTable Path: "Table1" }
+            }
+            Cluster: {}
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const auto entries = Flatten(collector.Parts, mark);
+
+        const auto& absolute = RequireEntry(entries, "ESchemeOpCreateBackupCollection",
+            "CreateBackupCollection.ExplicitEntryList.Entries[0].Path");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefKindName(absolute.Entry->Ref.Kind)), "Absolute");
+        UNIT_ASSERT_VALUES_EQUAL(TString(PathRefRoleName(absolute.Entry->Ref.Role)), "Dependency");
+        UNIT_ASSERT_VALUES_EQUAL(absolute.Entry->AbsPath, "/MyRoot/Table1");
+        UNIT_ASSERT_VALUES_EQUAL(absolute.Entry->Exists, true);
+
+        // No leading slash, but still not joined with the working dir.
+        const auto& relative = RequireEntry(entries, "ESchemeOpCreateBackupCollection",
+            "CreateBackupCollection.ExplicitEntryList.Entries[1].Path");
+        UNIT_ASSERT_VALUES_EQUAL(relative.Entry->AbsPath, "/Table1");
+        UNIT_ASSERT_VALUES_EQUAL(relative.Entry->Exists, false);
+    }
+
+    Y_UNIT_TEST(RejectedCreateTableStillProducesFootprint) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        const size_t mark = collector.Parts.size();
+        TestCreateTable(runtime, ++txId, "/MyRoot/NoSuchDir", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint64" }
+            KeyColumnNames: ["key"]
+        )", {NKikimrScheme::StatusPathDoesNotExist});
+
+        const auto entries = Flatten(collector.Parts, mark);
+        const auto& table = RequireEntry(entries, "ESchemeOpCreateTable", "CreateTable.Name");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->AbsPath, "/MyRoot/NoSuchDir/Table");
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->Exists, false);
+        UNIT_ASSERT_VALUES_EQUAL(
+            NKikimrScheme::EStatus_Name(table.Part->ProposeStatus), "StatusPathDoesNotExist");
+        // Best effort even though nothing under the working dir resolves.
+        UNIT_ASSERT_VALUES_EQUAL(table.Entry->RelPathToDatabase, "NoSuchDir/Table");
+
+        // A part that fails its checks never gets as far as writing anything.
+        const auto& part = RequirePart(collector.Parts, "ESchemeOpCreateTable", mark);
+        UNIT_ASSERT_VALUES_EQUAL(part.WriteSet.size(), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(part.Published.size(), 0u);
+        UNIT_ASSERT_VALUES_EQUAL(part.WriteSetMayBeIncomplete, false);
+        UNIT_ASSERT_VALUES_EQUAL(AllWriteSetPathIds(collector.Parts, mark), (TVector<TPathId>{}));
+    }
+
+    // Dropping an indexed table names only the table, but the operation
+    // touches the index and its impl table too. Those cascaded paths appear in
+    // the write set although no proto field of the request mentions them.
+    Y_UNIT_TEST(DropIndexedTableWriteSetCoversTheCascade) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
+
+        TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+            TableDescription {
+                Name: "Table"
+                Columns { Name: "key" Type: "Uint64" }
+                Columns { Name: "value" Type: "Utf8" }
+                KeyColumnNames: ["key"]
+            }
+            IndexDescription {
+                Name: "byValue"
+                KeyColumnNames: ["value"]
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        const TVector<std::pair<TString, TPathId>> expected = {
+            {"/MyRoot", PathIdOf(runtime, "/MyRoot")},
+            {"/MyRoot/Table", PathIdOf(runtime, "/MyRoot/Table")},
+            {"/MyRoot/Table/byValue", PathIdOf(runtime, "/MyRoot/Table/byValue")},
+            {"/MyRoot/Table/byValue/indexImplTable",
+                PathIdOf(runtime, "/MyRoot/Table/byValue/indexImplTable")},
+        };
+
+        const size_t mark = collector.Parts.size();
+        TestDropTable(runtime, ++txId, "/MyRoot", "Table");
+        env.TestWaitNotification(runtime, txId);
+
+        const TVector<TPathId> written = AllWriteSetPathIds(collector.Parts, mark);
+        for (const auto& [name, pathId] : expected) {
+            UNIT_ASSERT_C(Contains(written, pathId), "write set has no " << name);
+        }
+    }
+
+    // The read set the recorder collects while each part proposes must stay
+    // inside what the footprint already describes. This is the gate that makes
+    // a new path resolution inside some Propose() visible: if it reads a path
+    // that is neither an entry, an ancestor of one, inside a declared Implicit
+    // subtree, the working dir chain, nor something the part wrote, the
+    // footprint is understating that operation and this test says so.
     Y_UNIT_TEST(ReadSetStaysInsideTheFootprint) {
         TReadSetCollector collector;
         TTestBasicRuntime runtime;
@@ -1302,7 +1766,50 @@ Y_UNIT_TEST_SUITE(TSchemeShardPathFootprintPropose) {
     // Two transactions in one request: every part carries the index of the
     // client transaction it descends from, and each gets its own request
     // footprint.
+    Y_UNIT_TEST(TwoTransactionsGetDistinctOriginalTxIndexes) {
+        TFootprintCollector collector;
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime, TTestEnvOptions().PathFootprintObserver(&collector));
+        ui64 txId = 100;
 
+        const size_t mark = collector.Parts.size();
+        const size_t requestMark = collector.Requests.size();
+        ++txId;
+        {
+            auto* request = new TEvTx(txId, TTestTxConfig::SchemeShard);
+            for (const TString& name : {TString("first"), TString("second/nested")}) {
+                auto& tx = *request->Record.AddTransaction();
+                tx.SetOperationType(NKikimrSchemeOp::ESchemeOpMkDir);
+                tx.SetWorkingDir("/MyRoot");
+                tx.MutableMkDir()->SetName(name);
+            }
+            AsyncSend(runtime, TTestTxConfig::SchemeShard, request);
+            TestModificationResults(runtime, txId, {{NKikimrScheme::StatusAccepted}});
+        }
+        env.TestWaitNotification(runtime, txId);
+
+        UNIT_ASSERT_VALUES_EQUAL(collector.Requests.size() - requestMark, 2u);
+        const auto& first = collector.Requests[requestMark].Footprint;
+        const auto& second = collector.Requests[requestMark + 1].Footprint;
+        UNIT_ASSERT_VALUES_EQUAL(first.OriginalTxIndex, 0u);
+        UNIT_ASSERT_VALUES_EQUAL(first.Entries.size(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(first.Entries[0].AbsPath, "/MyRoot/first");
+        UNIT_ASSERT_VALUES_EQUAL(second.OriginalTxIndex, 1u);
+        UNIT_ASSERT_VALUES_EQUAL(second.Entries.size(), 1u);
+        UNIT_ASSERT_VALUES_EQUAL(second.Entries[0].AbsPath, "/MyRoot/second/nested");
+
+        // The second transaction fans out into a generated MkDir for "second"
+        // plus the MkDir for "nested"; all of them point back at index 1.
+        THashMap<TString, ui32> originByAbsPath;
+        for (const auto& observed : Flatten(collector.Parts, mark)) {
+            if (observed.FieldPath() == "MkDir.Name") {
+                originByAbsPath[observed.AbsPath()] = observed.Part->OriginalTxIndex;
+            }
+        }
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/first"], 0u);
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/second"], 1u);
+        UNIT_ASSERT_VALUES_EQUAL(originByAbsPath["/MyRoot/second/nested"], 1u);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
