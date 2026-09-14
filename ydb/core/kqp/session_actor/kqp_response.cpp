@@ -103,6 +103,9 @@ TMaybe<Ydb::StatusIds::StatusCode> GetYdbStatus(const TIssue& issue) {
         case TIssuesIds::KIKIMR_OPERATION_STATE_UNKNOWN:
             return Ydb::StatusIds::UNDETERMINED;
 
+        case TIssuesIds::KIKIMR_ALREADY_EXISTS:
+            return Ydb::StatusIds::ALREADY_EXISTS;
+
         case TIssuesIds::KIKIMR_PRECONDITION_FAILED:
             return Ydb::StatusIds::PRECONDITION_FAILED;
 

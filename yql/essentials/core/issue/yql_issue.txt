@@ -317,6 +317,11 @@ ids {
   severity: S_ERROR
 }
 ids {
+  code: KIKIMR_ALREADY_EXISTS
+  severity: S_ERROR
+  format: "Already exists."
+}
+ids {
   code: YQL_PRAGMA_WARNING_MSG
   severity: S_WARNING
 }

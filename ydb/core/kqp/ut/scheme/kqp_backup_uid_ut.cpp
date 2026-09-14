@@ -194,6 +194,9 @@ namespace NKikimr::NKqp {
             UNIT_ASSERT(intercepted->load());
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), AccessDenied ? EStatus::UNAUTHORIZED : EStatus::ALREADY_EXISTS,
                                        result.GetIssues().ToString());
+            UNIT_ASSERT_C(HasIssue(result.GetIssues(),
+                AccessDenied ? NYql::TIssuesIds::KIKIMR_ACCESS_DENIED : NYql::TIssuesIds::KIKIMR_ALREADY_EXISTS),
+                result.GetIssues().ToString());
             UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), reason);
             UNIT_ASSERT(result.GetResultSets().empty());
         }

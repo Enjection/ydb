@@ -61,9 +61,8 @@ public:
             NYql::TIssues issues;
             NYql::IssuesFromMessage(response.GetIssues(), issues);
             auto result = NYql::NCommon::ResultFromIssues<TResult>(
-                denied ? NYql::TIssuesIds::KIKIMR_ACCESS_DENIED : NYql::TIssuesIds::DEFAULT_ERROR,
+                denied ? NYql::TIssuesIds::KIKIMR_ACCESS_DENIED : NYql::TIssuesIds::KIKIMR_ALREADY_EXISTS,
                 response.GetSchemeShardReason(), issues);
-            result.IdempotencyStatus = denied ? Ydb::StatusIds::UNAUTHORIZED : Ydb::StatusIds::ALREADY_EXISTS;
             Promise.SetValue(std::move(result));
             this->Die(ctx);
             return;
