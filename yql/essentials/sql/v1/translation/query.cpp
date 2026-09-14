@@ -4490,6 +4490,9 @@ public:
         } else {
             opts->Add(Q(Y(Q("mode"), Q("backup"))));
         }
+        if (Params_.Uid.Defined()) {
+            opts->Add(Q(Y(Q("uid"), BuildQuotedAtom(Pos_, *Params_.Uid))));
+        }
 
         Add("block", Q(Y(
                          Y("let", "sink", Y("DataSink", BuildQuotedAtom(Pos_, ServiceId), Scoped_->WrapCluster(Cluster, ctx))),
@@ -4549,6 +4552,9 @@ public:
 
         if (Params_.At) {
             opts->Add(Q(Y(Q("at"), BuildQuotedAtom(Pos_, Params_.At))));
+        }
+        if (Params_.Uid.Defined()) {
+            opts->Add(Q(Y(Q("uid"), BuildQuotedAtom(Pos_, *Params_.Uid))));
         }
 
         Add("block", Q(Y(
