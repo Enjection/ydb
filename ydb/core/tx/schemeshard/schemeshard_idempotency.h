@@ -13,6 +13,10 @@ class OperationParams;
 
 namespace NKikimr::NSchemeShard {
 
+inline bool IsValidOperationUid(TStringBuf key) {
+    return !key.empty() && key.size() <= 128;
+}
+
 TString GetUid(const Ydb::Operations::OperationParams& operationParams);
 
 // Each operation type has an independent UID index; UIDs live with their operation records.

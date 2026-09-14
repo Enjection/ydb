@@ -6,11 +6,11 @@
 #include "schemeshard__operation_part.h"
 #include "schemeshard__operation_side_effects.h"
 #include "schemeshard_audit_log.h"
+#include "schemeshard_idempotency.h"
 #include "schemeshard_impl.h"
 #include "schemeshard_operation_factory.h"
 
 #include <ydb/core/base/appdata.h>
-#include <ydb/core/backup/common/idempotency.h>
 #include <ydb/core/tablet/tablet_exception.h>
 #include <ydb/core/tablet_flat/flat_cxx_database.h>
 #include <ydb/core/tablet_flat/tablet_flat_executor.h>
@@ -414,9 +414,9 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
                         "IDEMPOTENCY_NOT_SUPPORTED: unsupported operation kind");
             }
             const auto& identity = tx.GetOperationIdempotency();
-            if (!NBackup::IsValidBackupOperationUid(identity.GetUid())) {
+            if (!IsValidOperationUid(identity.GetUid())) {
                 return reject(NKikimrScheme::StatusInvalidParameter,
-                    "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
+                    "INVALID_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
             }
             if (!identity.HasOriginalDdl() || identity.GetOriginalDdl().empty())
             {

@@ -28,7 +28,7 @@ namespace NKikimr::NKqp {
                 }
                 const auto result = kikimr.GetQueryClient().ExecuteQuery(ddl, NQuery::TTxControl::NoTx(), settings).GetValueSync();
                 UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
-                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_BACKUP_OPERATION_UID");
+                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_OPERATION_UID");
             }
         }
 

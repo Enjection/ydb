@@ -4,8 +4,6 @@
 #include "kqp_query_state.h"
 #include "kqp_query_stats.h"
 
-#include <ydb/core/backup/common/idempotency.h>
-
 #include <ydb/core/kqp/common/buffer/buffer.h>
 #include <ydb/core/kqp/common/buffer/events.h>
 #include <ydb/core/kqp/common/kqp_data_integrity_trails.h>
@@ -32,6 +30,7 @@
 #include <ydb/core/kqp/rm_service/kqp_snapshot_manager.h>
 #include <ydb/core/ydb_convert/ydb_convert.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
+#include <ydb/core/tx/schemeshard/schemeshard_idempotency.h>
 #include <ydb/core/kqp/rm_service/kqp_rm_service.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/library/operation_id/operation_id.h>
 #include <ydb/core/kqp/common/kqp_yql.h>
@@ -1591,9 +1590,9 @@ public:
         if (!key.Defined()) {
             return true;
         }
-        if (!NBackup::IsValidBackupOperationUid(*key)) {
+        if (!NSchemeShard::IsValidOperationUid(*key)) {
             ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
-                "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
+                "INVALID_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions");
             return false;
         }
         if (!supported || QueryState->Statements.size() > 1 ||

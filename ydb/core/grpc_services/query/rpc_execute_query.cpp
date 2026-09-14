@@ -1,7 +1,6 @@
 #include "service_query.h"
 #include <ydb/core/actorlib_impl/long_timer.h>
 #include <ydb/core/base/appdata.h>
-#include <ydb/core/backup/common/idempotency.h>
 #include <ydb/core/grpc_services/audit_dml_operations.h>
 #include <ydb/core/grpc_services/base/base.h>
 #include <ydb/core/grpc_services/base/flow_control.h>
@@ -10,6 +9,7 @@
 #include <ydb/core/grpc_services/rpc_kqp_base.h>
 #include <ydb/core/kqp/executer_actor/kqp_executer.h>
 #include <ydb/core/kqp/opt/kqp_query_plan.h>
+#include <ydb/core/tx/schemeshard/schemeshard_idempotency.h>
 #include <ydb/library/ydb_issue/issue_helpers.h>
 #include <ydb/public/api/protos/ydb_query.pb.h>
 
@@ -274,9 +274,9 @@ private:
         }
 
         if (req->has_uid()) {
-            if (!NBackup::IsValidBackupOperationUid(req->uid())) {
+            if (!NSchemeShard::IsValidOperationUid(req->uid())) {
                 issues.AddIssue(NYql::TIssue(
-                    "INVALID_BACKUP_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
+                    "INVALID_OPERATION_UID: expected 1-128 bytes with no UID-specific character restrictions"));
                 return ReplyFinishStream(Ydb::StatusIds::BAD_REQUEST, std::move(issues));
             }
             if (QueryAction != NKikimrKqp::QUERY_ACTION_EXECUTE || req->has_tx_control()
