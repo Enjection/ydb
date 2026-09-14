@@ -119,6 +119,11 @@ struct TExecuteQuerySettings : public TRequestSettings<TExecuteQuerySettings> {
     FLUENT_SETTING_DEFAULT(TResultSet::EFormat, Format, TResultSet::EFormat::Unspecified);
     FLUENT_SETTING_OPTIONAL(TArrowFormatSettings, ArrowFormatSettings);
     FLUENT_SETTING_OPTIONAL(TRetryOperationSettings, RetrySettings);
+
+    // Supported backup or restore requests only. Preserve this key and the
+    // exact SQL text across retries. Requires UID support on all serving nodes.
+    // Keys are case-sensitive, 1-128 bytes with no UID-specific character restrictions. Empty is invalid.
+    FLUENT_SETTING_OPTIONAL(std::string, Uid);
 };
 
 struct TBeginTxSettings : public TRequestSettings<TBeginTxSettings> {};
