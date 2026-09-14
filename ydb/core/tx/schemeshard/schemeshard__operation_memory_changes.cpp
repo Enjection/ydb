@@ -36,23 +36,6 @@ void TMemoryChanges::GrabTable(TSchemeShard* ss, const TPathId& pathId) {
     Grab<TTableInfo>(pathId, ss->Tables, Tables);
 }
 
-void TMemoryChanges::GrabTopic(TSchemeShard* ss, const TPathId& pathId) {
-    const auto& topic = ss->Topics.at(pathId);
-    Y_ABORT_UNLESS(!topic->AlterData);
-    auto saved = MakeIntrusive<TTopicInfo>(*topic);
-    // Topic shards own partitions, while the partition index borrows them.
-    // A shallow copy would keep observing mutations made by the proposal.
-    saved->Shards.clear();
-    saved->Partitions.clear();
-    for (const auto& [shardIdx, shard] : topic->Shards) {
-        saved->Shards[shardIdx] = MakeIntrusive<TTopicTabletInfo>();
-        for (const auto& partition : shard->Partitions) {
-            saved->AddPartition(shardIdx, new TTopicTabletInfo::TTopicPartitionInfo(*partition));
-        }
-    }
-    Topics.emplace(pathId, std::move(saved));
-}
-
 void TMemoryChanges::GrabNewColumnTable(TSchemeShard* ss, const TPathId& pathId) {
     Y_ABORT_UNLESS(!ss->ColumnTables.contains(pathId));
     ColumnTables.emplace(pathId, nullptr);
@@ -319,16 +302,6 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
             ss->Tables.erase(id);
         }
         Tables.pop();
-    }
-
-    while (Topics) {
-        const auto& [id, saved] = Topics.top();
-        if (saved) {
-            ss->Topics[id] = saved;
-        } else {
-            ss->Topics.erase(id);
-        }
-        Topics.pop();
     }
 
     while (ColumnTables) {

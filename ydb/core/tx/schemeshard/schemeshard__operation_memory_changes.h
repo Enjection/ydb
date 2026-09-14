@@ -35,8 +35,6 @@ class TMemoryChanges: public TSimpleRefCount<TMemoryChanges> {
     using TTableState = std::pair<TPathId, TTableInfo::TPtr>;
     TStack<TTableState> Tables;
 
-    TStack<std::pair<TPathId, TTopicInfo::TPtr>> Topics;
-
     using TColumnTableState = std::pair<TPathId, TColumnTableInfo::TPtr>;
     TStack<TColumnTableState> ColumnTables;
 
@@ -111,8 +109,6 @@ public:
 
     void GrabNewTable(TSchemeShard* ss, const TPathId& pathId);
     void GrabTable(TSchemeShard* ss, const TPathId& pathId);
-
-    void GrabTopic(TSchemeShard* ss, const TPathId& pathId);
 
     void GrabNewColumnTable(TSchemeShard* ss, const TPathId& pathId);
     void GrabColumnTable(TSchemeShard* ss, const TPathId& pathId);

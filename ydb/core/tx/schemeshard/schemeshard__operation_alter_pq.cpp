@@ -106,11 +106,6 @@ void ComputeAlterPartitionCounts(
 }
 
 class TAlterPQ: public TSubOperation {
-    ui64 PqShardCountChange = 0;
-    ui64 BalancerCountChange = 0;
-    i64 ReservedThroughputChange = 0;
-    i64 ReservedStorageChange = 0;
-    ui64 PartitionCountChange = 0;
     // Make sure we make decisions using a consistent runtime value
     static TTxState::ETxState NextState() {
         return TTxState::CreateParts;
@@ -394,6 +389,7 @@ public:
             const NKikimrPQ::TPQTabletConfig& newTabletConfig)
     {
         TPathElement::TPtr item = path.Base();
+        NIceDb::TNiceDb db(context.GetDB());
 
         item->LastTxId = operationId.GetTxId();
         item->PathState = TPathElement::EPathState::EPathStateAlter;
@@ -401,7 +397,10 @@ public:
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxAlterPQGroup, item->PathId);
         txState.State = TTxState::CreateParts;
 
-        ApplySharding(operationId.GetTxId(), item->PathId, pqGroup, txState, rbChannelsBinding, pqChannelsBinding, context);
+        bool needMoreShards = ApplySharding(operationId.GetTxId(), item->PathId, pqGroup, txState, rbChannelsBinding, pqChannelsBinding, context);
+        if (needMoreShards) {
+            context.SS->PersistUpdateNextShardIdx(db);
+        }
 
         bool splitMergeWasDisabled = NKikimr::NPQ::SplitMergeEnabled(tabletConfig)
                 && !NKikimr::NPQ::SplitMergeEnabled(newTabletConfig);
@@ -427,7 +426,7 @@ public:
                     partitionInfo->KeyRange->ToBound = prevBound;
                 }
 
-                context.DbChanges.PersistPersQueue(item->PathId, partitions[i].first, *partitionInfo);
+                context.SS->PersistPersQueue(db, item->PathId, partitions[i].first, *partitionInfo);
             }
         } else {
             for (auto& [shardIdx, tabletInfo] : pqGroup->Shards) {
@@ -441,26 +440,26 @@ public:
                     } else if (const auto* range = pqGroup->AlterData->KeyRangesToChange.FindPtr(partitionInfo->PqId)) {
                         partitionInfo->KeyRange = *range;
                     }
-                    context.DbChanges.PersistPersQueue(item->PathId, shardIdx, *partitionInfo.Get());
+                    context.SS->PersistPersQueue(db, item->PathId, shardIdx, *partitionInfo.Get());
                 }
             }
         }
 
-        context.DbChanges.PersistAddPersQueueGroupAlter(item->PathId, pqGroup->AlterData);
+        context.SS->PersistAddPersQueueGroupAlter(db, item->PathId, pqGroup->AlterData);
 
-        context.DbChanges.PersistTxState(operationId);
+        context.SS->PersistTxState(db, operationId);
         ui64 checkShardsToCreate = 0;
         for (auto shard : txState.Shards) {
             if (shard.Operation == TTxState::CreateParts) {
                 TShardInfo& shardInfo = context.SS->ShardInfos[shard.Idx];
-                context.DbChanges.PersistShard(shard.Idx);
+                context.SS->PersistShardMapping(db, shard.Idx, shardInfo.TabletID, item->PathId, operationId.GetTxId(), shard.TabletType);
                 switch (shard.TabletType) {
                     case ETabletType::PersQueueReadBalancer:
-                        ++BalancerCountChange;
+                        context.SS->PersistChannelsBinding(db, shard.Idx, rbChannelsBinding);
                         context.SS->TabletCounters->Simple()[COUNTER_PQ_RB_SHARD_COUNT].Add(1);
                         break;
                     default:
-                        ++PqShardCountChange;
+                        context.SS->PersistChannelsBinding(db, shard.Idx, pqChannelsBinding);
                         context.SS->TabletCounters->Simple()[COUNTER_PQ_SHARD_COUNT].Add(1);
                         break;
                 }
@@ -540,7 +539,6 @@ public:
             auto& shardInfo = context.SS->ShardInfos[shardIdx];
 
             if (IsShardRequiresRecreation(shardInfo, defaultShardInfo)) {
-                context.MemChanges.GrabShard(context.SS, shardIdx);
                 txState.Shards.emplace_back(shardIdx, ETabletType::PersQueue, TTxState::CreateParts);
                 shardInfo.CurrentTxId = defaultShardInfo.CurrentTxId;
                 shardInfo.BindedChannels = defaultShardInfo.BindedChannels;
@@ -555,7 +553,6 @@ public:
             const auto idx = context.SS->NextShardIdx(startShardIdx, i);
             txState.Shards.emplace_back(idx, ETabletType::PersQueue, TTxState::CreateParts);
 
-            context.MemChanges.GrabNewShard(context.SS, idx);
             context.SS->RegisterShardInfo(idx, defaultShardInfo);
             pqGroup->Shards[idx] = new TTopicTabletInfo();
         }
@@ -564,7 +561,6 @@ public:
             const auto idx = context.SS->NextShardIdx(startShardIdx, pqShardsToCreate);
             pqGroup->BalancerShardIdx = idx;
             txState.Shards.emplace_back(idx, ETabletType::PersQueueReadBalancer, TTxState::CreateParts);
-            context.MemChanges.GrabNewShard(context.SS, idx);
             context.SS->RegisterShardInfo(idx,
                 defaultShardInfo
                     .WithTabletType(ETabletType::PersQueueReadBalancer)
@@ -1232,12 +1228,6 @@ public:
             pqChannelsBinding = tabletChannelsBinding;
         }
 
-        auto guard = context.DbGuard();
-        context.MemChanges.GrabPath(context.SS, path.Base()->PathId);
-        context.MemChanges.GrabDomain(context.SS, path.GetPathIdForDomain());
-        context.MemChanges.GrabNewTxState(context.SS, OperationId);
-        context.MemChanges.GrabTopic(context.SS, path.Base()->PathId);
-        context.DbChanges.PersistPath(path.Base()->PathId);
         topic->PrepareAlter(alterData);
         const TTxState& txState = PrepareChanges(OperationId, path, topic, shardsToCreate, tabletChannelsBinding,
                 pqChannelsBinding, context, tabletConfig, newTabletConfig);
@@ -1252,9 +1242,6 @@ public:
         path.DomainInfo()->UpdatePQReservedStorage(oldReserve.Storage, reserve.Storage);
         path.Base()->IncShardsInside(shardsToCreate);
 
-        ReservedThroughputChange = i64(reserve.Throughput) - i64(oldReserve.Throughput);
-        ReservedStorageChange = i64(reserve.Storage) - i64(oldReserve.Storage);
-        PartitionCountChange = partitionsToCreate;
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Add(reserve.Throughput);
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Sub(oldReserve.Throughput);
 
@@ -1267,12 +1254,8 @@ public:
         return result;
     }
 
-    void AbortPropose(TOperationContext& context) override {
-        context.SS->TabletCounters->Simple()[COUNTER_PQ_SHARD_COUNT].Sub(PqShardCountChange);
-        context.SS->TabletCounters->Simple()[COUNTER_PQ_RB_SHARD_COUNT].Sub(BalancerCountChange);
-        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Sub(ReservedThroughputChange);
-        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_STORAGE].Sub(ReservedStorageChange);
-        context.SS->TabletCounters->Simple()[COUNTER_STREAM_SHARDS_COUNT].Sub(PartitionCountChange);
+    void AbortPropose(TOperationContext&) override {
+        Y_ABORT("no AbortPropose for TAlterPQ");
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
