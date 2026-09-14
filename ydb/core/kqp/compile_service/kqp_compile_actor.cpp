@@ -554,15 +554,15 @@ private:
         // fail in the compiler before the session can inspect a physical plan.
         // It also applies when per-statement execution is disabled.
         bool keyed = QueryId.Settings.RequireIdempotency;
-        bool singleBackupOperation = astStatements.size() == 1;
+        bool singleSupportedOperation = astStatements.size() == 1;
         for (const auto& statement : astStatements) {
-            const auto info = InspectBackupOperationAst(statement.Ast->Root);
+            const auto info = InspectOperationIdempotency(statement.Ast->Root);
             keyed |= info.HasSqlKey;
-            singleBackupOperation &= info.IsSingleBackupOperation();
+            singleSupportedOperation &= info.IsSingleSupportedOperation();
         }
-        if (keyed && !singleBackupOperation) {
+        if (keyed && !singleSupportedOperation) {
             ReplyError(Ydb::StatusIds::UNSUPPORTED, {NYql::TIssue(NYql::TPosition(),
-                "IDEMPOTENCY_NOT_SUPPORTED: expected one backup or restore statement")});
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one statement supporting idempotency")});
             return;
         }
 

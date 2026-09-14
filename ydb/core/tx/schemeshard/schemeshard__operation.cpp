@@ -1,5 +1,7 @@
 #include "schemeshard__operation.h"
 
+#include "common/operation_idempotency.h"
+
 #include "schemeshard__dispatch_op.h"
 #include "schemeshard__operation_db_changes.h"
 #include "schemeshard__operation_memory_changes.h"
@@ -402,16 +404,11 @@ struct TSchemeShard::TTxOperationPropose: public NTabletFlatExecutor::TTransacti
             }
             if (record.TransactionSize() != 1) {
                 return reject(NKikimrScheme::StatusInvalidParameter,
-                    "IDEMPOTENCY_NOT_SUPPORTED: exactly one backup or restore statement is required");
+                    "IDEMPOTENCY_NOT_SUPPORTED: exactly one statement supporting idempotency is required");
             }
-            switch (tx.GetOperationType()) {
-                case NKikimrSchemeOp::ESchemeOpBackupBackupCollection:
-                case NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection:
-                case NKikimrSchemeOp::ESchemeOpRestoreBackupCollection:
-                    break;
-                default:
-                    return reject(NKikimrScheme::StatusInvalidParameter,
-                        "IDEMPOTENCY_NOT_SUPPORTED: unsupported operation kind");
+            if (!SupportsOperationIdempotency(tx.GetOperationType())) {
+                return reject(NKikimrScheme::StatusInvalidParameter,
+                    "IDEMPOTENCY_NOT_SUPPORTED: unsupported operation kind");
             }
             const auto& identity = tx.GetOperationIdempotency();
             if (!IsValidOperationUid(identity.GetUid())) {

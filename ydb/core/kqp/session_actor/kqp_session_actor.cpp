@@ -29,6 +29,7 @@
 #include <ydb/services/workload_manager/query_classifier.h>
 #include <ydb/core/kqp/rm_service/kqp_snapshot_manager.h>
 #include <ydb/core/ydb_convert/ydb_convert.h>
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 #include <ydb/core/tx/schemeshard/schemeshard_idempotency.h>
 #include <ydb/core/kqp/rm_service/kqp_rm_service.h>
@@ -1025,7 +1026,7 @@ public:
         if (QueryState->Statements.size() > 1) {
             bool keyed = QueryState->RequestEv->Record.GetRequest().HasUid();
             for (const auto& statement : QueryState->Statements) {
-                keyed |= statement.Ast && HasSqlBackupOperationUid(statement.Ast->Root);
+                keyed |= statement.Ast && HasSqlOperationUid(statement.Ast->Root);
             }
             if (keyed) {
                 ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
@@ -1566,19 +1567,13 @@ public:
 
         bool supported = phyQuery.TransactionsSize() == 1;
         for (const auto& tx : phyQuery.GetTransactions()) {
-            const NKikimrSchemeOp::TModifyScheme* backupOperation = nullptr;
+            const NKikimrSchemeOp::TModifyScheme* idempotencyOperation = nullptr;
             if (tx.GetType() == NKqpProto::TKqpPhyTx::TYPE_SCHEME) {
-                const auto& op = tx.GetSchemeOperation();
-                switch (op.GetOperationCase()) {
-                    case NKqpProto::TKqpSchemeOperation::kBackup: backupOperation = &op.GetBackup(); break;
-                    case NKqpProto::TKqpSchemeOperation::kBackupIncremental: backupOperation = &op.GetBackupIncremental(); break;
-                    case NKqpProto::TKqpSchemeOperation::kRestore: backupOperation = &op.GetRestore(); break;
-                    default: break;
-                }
+                idempotencyOperation = NSchemeShard::GetSchemeOperationForIdempotency(tx.GetSchemeOperation());
             }
-            supported &= backupOperation != nullptr;
-            if (backupOperation && backupOperation->HasOperationIdempotency()) {
-                const auto& sqlKey = backupOperation->GetOperationIdempotency().GetUid();
+            supported &= idempotencyOperation != nullptr;
+            if (idempotencyOperation && idempotencyOperation->HasOperationIdempotency()) {
+                const auto& sqlKey = idempotencyOperation->GetOperationIdempotency().GetUid();
                 if (key.Defined() && *key != sqlKey) {
                     ReplyQueryError(Ydb::StatusIds::BAD_REQUEST,
                         "UID_MISMATCH: SQL and request keys must match");
@@ -1600,7 +1595,7 @@ public:
             QueryState->HasTxControl() || !request.GetYdbParameters().empty() ||
             (request.GetSyntax() != Ydb::Query::SYNTAX_UNSPECIFIED && request.GetSyntax() != Ydb::Query::SYNTAX_YQL_V1)) {
             ReplyQueryError(Ydb::StatusIds::UNSUPPORTED,
-                "IDEMPOTENCY_NOT_SUPPORTED: expected one backup or restore statement in NoTx execution mode");
+                "IDEMPOTENCY_NOT_SUPPORTED: expected one statement supporting idempotency in NoTx execution mode");
             return false;
         }
         auto& identity = QueryState->OperationIdempotency.emplace();

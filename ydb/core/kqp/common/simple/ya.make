@@ -14,6 +14,7 @@ PEERDIR(
     contrib/libs/protobuf
     ydb/core/base
     ydb/core/protos
+    ydb/core/tx/schemeshard/common
     yql/essentials/ast
     ydb/library/yql/dq/actors
     ydb/public/api/protos

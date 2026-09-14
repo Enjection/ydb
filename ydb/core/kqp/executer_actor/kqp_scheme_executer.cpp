@@ -9,6 +9,7 @@
 #include <ydb/core/kqp/session_actor/kqp_worker_common.h>
 #include <ydb/core/protos/auth.pb.h>
 #include <ydb/core/protos/schemeshard/operations.pb.h>
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 #include <ydb/core/tx/schemeshard/index/build_index.h>
 #include <ydb/core/tx/schemeshard/schemeshard_forced_compaction.h>
 #include <ydb/core/tx/schemeshard/schemeshard_set_column_constraint.h>
@@ -829,16 +830,10 @@ public:
 
     void Bootstrap() {
         const auto& schemeOp = PhyTx->GetSchemeOperation();
-        if (OperationIdempotency) {
-            const auto kind = schemeOp.GetOperationCase();
-            if (kind != NKqpProto::TKqpSchemeOperation::kBackup
-                && kind != NKqpProto::TKqpSchemeOperation::kBackupIncremental
-                && kind != NKqpProto::TKqpSchemeOperation::kRestore)
-            {
-                ReplyErrorAndDie(Ydb::StatusIds::UNSUPPORTED,
-                    NYql::TIssue("IDEMPOTENCY_NOT_SUPPORTED: unsupported scheme operation"));
-                return;
-            }
+        if (OperationIdempotency && !NSchemeShard::GetSchemeOperationForIdempotency(schemeOp)) {
+            ReplyErrorAndDie(Ydb::StatusIds::UNSUPPORTED,
+                NYql::TIssue("IDEMPOTENCY_NOT_SUPPORTED: unsupported scheme operation"));
+            return;
         }
         if (schemeOp.GetObjectType()) {
             MakeObjectRequest();

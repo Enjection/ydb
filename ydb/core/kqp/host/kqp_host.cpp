@@ -1447,11 +1447,11 @@ private:
         // Legacy DDL/script execution can apply earlier statements while
         // traversing the expression. Reject a key anywhere in that request
         // before entering any transformer capable of executing DDL.
-        const auto backupOperation = InspectBackupOperationAst(queryAst->Root);
-        if (backupOperation.HasSqlKey && (SessionCtx->Query().Type != EKikimrQueryType::Query
-            || !backupOperation.IsSingleBackupOperation())) {
+        const auto idempotencyInfo = InspectOperationIdempotency(queryAst->Root);
+        if (idempotencyInfo.HasSqlKey && (SessionCtx->Query().Type != EKikimrQueryType::Query
+            || !idempotencyInfo.IsSingleSupportedOperation())) {
             ctx.AddError(YqlIssue(TPosition(), TIssuesIds::KIKIMR_UNSUPPORTED,
-                "IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires one backup or restore statement in ExecuteQuery"));
+                "IDEMPOTENCY_NOT_SUPPORTED: keyed SQL requires one statement supporting idempotency in ExecuteQuery"));
             return result;
         }
 

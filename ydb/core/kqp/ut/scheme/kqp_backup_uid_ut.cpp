@@ -1,6 +1,7 @@
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <ydb/core/protos/schemeshard/operations.pb.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 
 #include <ydb/public/api/grpc/ydb_query_v1.grpc.pb.h>
 #include <grpcpp/create_channel.h>
@@ -12,6 +13,51 @@
 namespace NKikimr::NKqp {
 
     using namespace NYdb;
+
+    Y_UNIT_TEST_SUITE(OperationIdempotencyCapabilities) {
+        Y_UNIT_TEST(UnlistedOperationsAreUnsupported) {
+            UNIT_ASSERT(!NSchemeShard::SupportsOperationIdempotency(NKikimrSchemeOp::ESchemeOpCreateTable));
+            UNIT_ASSERT(!NSchemeShard::SupportsOperationIdempotency(static_cast<NKikimrSchemeOp::EOperationType>(1000000)));
+            UNIT_ASSERT(!NSchemeShard::SupportsSqlOperationIdempotency("create"));
+            UNIT_ASSERT(!NSchemeShard::SupportsSqlOperationIdempotency("unknown"));
+            UNIT_ASSERT(!NSchemeShard::SupportsSqlOperationIdempotency(""));
+
+            NKqpProto::TKqpSchemeOperation operation;
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+            operation.MutableCreateTable()->SetOperationType(NKikimrSchemeOp::ESchemeOpCreateTable);
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+            operation.MutableCreateObject();
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+        }
+
+        Y_UNIT_TEST(PhysicalOperationMustMatchDeclaredType) {
+            NKqpProto::TKqpSchemeOperation operation;
+            auto* payload = operation.MutableBackup();
+            payload->SetOperationType(NKikimrSchemeOp::ESchemeOpBackupBackupCollection);
+            UNIT_ASSERT(NSchemeShard::GetSchemeOperationForIdempotency(operation) == payload);
+            UNIT_ASSERT(NSchemeShard::SupportsOperationIdempotency(payload->GetOperationType()));
+            UNIT_ASSERT(NSchemeShard::SupportsSqlOperationIdempotency("backup"));
+
+            payload->SetOperationType(NKikimrSchemeOp::ESchemeOpCreateTable);
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+            // A supported payload type cannot make an unrelated KQP operation eligible.
+            operation.MutableCreateTable()->SetOperationType(NKikimrSchemeOp::ESchemeOpBackupBackupCollection);
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+
+            payload = operation.MutableBackupIncremental();
+            payload->SetOperationType(NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection);
+            UNIT_ASSERT(NSchemeShard::GetSchemeOperationForIdempotency(operation) == payload);
+            UNIT_ASSERT(NSchemeShard::SupportsSqlOperationIdempotency("backupIncremental"));
+            payload = operation.MutableRestore();
+            payload->SetOperationType(NKikimrSchemeOp::ESchemeOpRestoreBackupCollection);
+            UNIT_ASSERT(NSchemeShard::GetSchemeOperationForIdempotency(operation) == payload);
+            UNIT_ASSERT(NSchemeShard::SupportsSqlOperationIdempotency("restore"));
+
+            // ObjectType selects a different executor path even if a payload is present.
+            operation.SetObjectType("test-object");
+            UNIT_ASSERT(!NSchemeShard::GetSchemeOperationForIdempotency(operation));
+        }
+    }
 
     Y_UNIT_TEST_SUITE(BackupIdempotency) {
         Y_UNIT_TEST_TWIN(UidLengthRejectedBeforeAdmission, Sql) {

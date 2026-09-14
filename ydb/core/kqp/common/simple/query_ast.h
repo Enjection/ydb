@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
+
 #include <yql/essentials/ast/yql_ast.h>
 
 #include <util/generic/maybe.h>
@@ -23,19 +25,19 @@ struct TQueryAst {
     TMaybe<TString> CommandTagName;
 };
 
-struct TBackupOperationAstInfo {
+struct TIdempotencyAstInfo {
     bool HasSqlKey = false;
     ui32 Writes = 0;
-    ui32 BackupWrites = 0;
+    ui32 SupportedWrites = 0;
     bool HasReads = false;
 
-    bool IsSingleBackupOperation() const {
-        return Writes == 1 && BackupWrites == 1 && !HasReads;
+    bool IsSingleSupportedOperation() const {
+        return Writes == 1 && SupportedWrites == 1 && !HasReads;
     }
 };
 
-inline TBackupOperationAstInfo InspectBackupOperationAst(const NYql::TAstNode* root) {
-    TBackupOperationAstInfo result;
+inline TIdempotencyAstInfo InspectOperationIdempotency(const NYql::TAstNode* root) {
+    TIdempotencyAstInfo result;
     const auto unquote = [](const NYql::TAstNode* node) {
         if (node->IsListOfSize(2) && node->GetChild(0)->IsAtom()
             && node->GetChild(0)->GetContent() == "quote")
@@ -60,7 +62,7 @@ inline TBackupOperationAstInfo InspectBackupOperationAst(const NYql::TAstNode* r
             result.HasReads |= callable == "Read!";
             if (callable == "Write!") {
                 ++result.Writes;
-                bool backupOperation = false;
+                bool supportedOperation = false;
                 const auto* settings = node->IsListOfSize(6) ? unquote(node->GetChild(5)) : nullptr;
                 if (settings && settings->IsList()) {
                     for (const auto* setting : settings->GetChildren()) {
@@ -76,11 +78,11 @@ inline TBackupOperationAstInfo InspectBackupOperationAst(const NYql::TAstNode* r
                         result.HasSqlKey |= name->GetContent() == "uid";
                         if (name->GetContent() == "mode" && value->IsAtom()) {
                             const auto mode = value->GetContent();
-                            backupOperation |= mode == "backup" || mode == "backupIncremental" || mode == "restore";
+                            supportedOperation |= NSchemeShard::SupportsSqlOperationIdempotency(mode);
                         }
                     }
                 }
-                result.BackupWrites += backupOperation;
+                result.SupportedWrites += supportedOperation;
             }
         }
         for (const auto* child : node->GetChildren()) {
@@ -90,8 +92,8 @@ inline TBackupOperationAstInfo InspectBackupOperationAst(const NYql::TAstNode* r
     return result;
 }
 
-inline bool HasSqlBackupOperationUid(const NYql::TAstNode* root) {
-    return InspectBackupOperationAst(root).HasSqlKey;
+inline bool HasSqlOperationUid(const NYql::TAstNode* root) {
+    return InspectOperationIdempotency(root).HasSqlKey;
 }
 
 } // namespace NKikimr::NKqp
