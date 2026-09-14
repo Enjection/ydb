@@ -90,6 +90,7 @@ message TIssuesIds {
         KIKIMR_SCHEMA_CHANGED = 2034;
         KIKIMR_INTERNAL_ERROR = 2035;
         KIKIMR_DISK_GROUP_OUT_OF_SPACE = 2036;
+        KIKIMR_ALREADY_EXISTS = 2037;
 
 // kikimr warnings
         KIKIMR_READ_MODIFIED_TABLE = 2500;

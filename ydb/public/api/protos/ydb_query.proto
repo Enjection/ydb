@@ -244,6 +244,13 @@ message ExecuteQueryRequest {
     // maintenance. Zero for read-only queries and non-matching DML.
     // Enabling this setting can lead to overheads.
     bool collect_affected_rows = 15;
+
+    // Optional durable submission identity for supported backup or restore statements.
+    // 1-128 bytes with no UID-specific character restrictions, compared case-sensitively.
+    // Reusing a key requires byte-identical original query text.
+    // Unsupported statements, batches, and execution modes are rejected.
+    // Enable only after all serving nodes support UID; older binaries may ignore it.
+    optional string uid = 16 [(Ydb.sensitive) = true];
 }
 
 message ResultSetMeta {
