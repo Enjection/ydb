@@ -324,9 +324,6 @@ public:
         request.set_stats_mode(::Ydb::Query::StatsMode(settings.StatsMode_));
         request.set_collect_affected_rows(settings.CollectAffectedRows_);
         request.set_pool_id(TStringType{settings.ResourcePool_});
-        if (settings.Uid_.has_value()) {
-            request.set_uid(TStringType{*settings.Uid_});
-        }
         request.mutable_query_content()->set_text(TStringType{query});
         request.mutable_query_content()->set_syntax(::Ydb::Query::Syntax(settings.Syntax_));
         request.set_schema_inclusion_mode(::Ydb::Query::SchemaInclusionMode(settings.SchemaInclusionMode_));
@@ -349,6 +346,10 @@ public:
 
         if (settings.StatsCollectPeriod_) {
             request.set_stats_period_ms(settings.StatsCollectPeriod_->count());
+        }
+
+        if (settings.Uid_) {
+            request.set_uid(TStringType{*settings.Uid_});
         }
 
         if (settings.ArrowFormatSettings_) {
