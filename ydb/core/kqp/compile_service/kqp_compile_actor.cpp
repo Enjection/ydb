@@ -553,7 +553,7 @@ private:
         // This check must precede compilation: a mixed DDL/result batch may
         // fail in the compiler before the session can inspect a physical plan.
         // It also applies when per-statement execution is disabled.
-        bool keyed = QueryId.Settings.RequireBackupOperation;
+        bool keyed = QueryId.Settings.RequireIdempotency;
         bool singleBackupOperation = astStatements.size() == 1;
         for (const auto& statement : astStatements) {
             const auto info = InspectBackupOperationAst(statement.Ast->Root);
