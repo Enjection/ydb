@@ -9,7 +9,7 @@
 #include <ydb/core/grpc_services/rpc_kqp_base.h>
 #include <ydb/core/kqp/executer_actor/kqp_executer.h>
 #include <ydb/core/kqp/opt/kqp_query_plan.h>
-#include <ydb/core/tx/schemeshard/schemeshard_idempotency.h>
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 #include <ydb/library/ydb_issue/issue_helpers.h>
 #include <ydb/public/api/protos/ydb_query.pb.h>
 
