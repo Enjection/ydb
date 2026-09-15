@@ -166,6 +166,7 @@ def create_execute_query_request(
     parameters: Optional[dict],
     concurrent_result_sets: Optional[bool],
     pool_id: Optional[str],
+    uid: Optional[str] = None,
 ) -> ydb_query.ExecuteQueryRequest:
     try:
         syntax = QuerySyntax.YQL_V1 if not syntax else syntax
@@ -209,6 +210,7 @@ def create_execute_query_request(
             result_set_format=result_set_format,
             arrow_format_settings=arrow_format_settings,
             pool_id=pool_id,
+            uid=uid,
         )
     except BaseException as e:
         raise issues.ClientInternalError("Unable to prepare execute request") from e
