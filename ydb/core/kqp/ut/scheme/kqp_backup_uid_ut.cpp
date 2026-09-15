@@ -62,6 +62,17 @@ namespace NKikimr::NKqp {
     }
 
     Y_UNIT_TEST_SUITE(BackupIdempotency) {
+        Y_UNIT_TEST(SqlUidLengthRejectedBeforeAdmission) {
+            NKikimrConfig::TAppConfig config;
+            config.MutableFeatureFlags()->SetEnableBackupService(true);
+            TKikimrRunner kikimr(NKqp::TKikimrSettings(config).SetEnableBackupService(true));
+            for (const TString& uid : TVector<TString>{"", TString(129, 'a'), TString(127, 'a') + "я"}) {
+                const auto result = ExecuteUidQuery(kikimr, "BACKUP `missing` WITH (uid = '" + uid + "');");
+                UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::BAD_REQUEST, result.GetIssues().ToString());
+                UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "INVALID_OPERATION_UID");
+            }
+        }
+
         Y_UNIT_TEST(UidLengthRejectedBeforeAdmission) {
             NKikimrConfig::TAppConfig config;
             config.MutableFeatureFlags()->SetEnableBackupService(true);
