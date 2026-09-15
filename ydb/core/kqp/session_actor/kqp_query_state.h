@@ -26,6 +26,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 
 namespace NKikimr {
 
@@ -172,6 +173,7 @@ public:
     TActorId RequestActorId;
 
     ui64 CurrentTx = 0;
+    std::optional<NKikimrSchemeOp::TOperationIdempotency> OperationIdempotency;
     TIntrusivePtr<TUserRequestContext> UserRequestContext;
     bool IsDocumentApiRestricted_ = false;
     bool IsWarmupCompilation_ = false;
@@ -599,6 +601,7 @@ public:
         PreparedQuery = {};
         CompileResult = {};
         CurrentTx = 0;
+        OperationIdempotency.reset();
         TableVersions = {};
         MaxReadType = ETableReadType::Other;
         TopicOperations = {};

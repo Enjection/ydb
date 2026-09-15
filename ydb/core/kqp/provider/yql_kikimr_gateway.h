@@ -1443,6 +1443,7 @@ struct TDropBackupCollectionSettings {
 
 struct TBackupSettings {
     TString Name;
+    TMaybe<TString> Uid;
 };
 
 struct TSecretSettings {

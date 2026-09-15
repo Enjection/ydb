@@ -222,6 +222,7 @@ PEERDIR(
     ydb/core/tx/sharding
     ydb/core/tx/data_events
     ydb/core/tx/schemeshard/olap/bg_tasks/events
+    ydb/core/tx/schemeshard/common
     ydb/core/util
     ydb/core/ydb_convert
     ydb/core/security

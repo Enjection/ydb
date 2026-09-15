@@ -1833,6 +1833,7 @@ public:
                         .DataSink(node->Child(1))
                         .BackupCollection().Build(key.GetBackupCollectionPath().Name)
                         .Prefix().Build(key.GetBackupCollectionPath().Prefix)
+                        .Settings(settings.Other)
                         .Done()
                         .Ptr();
                 } else if (mode == "backupIncremental") {
@@ -1841,6 +1842,7 @@ public:
                         .DataSink(node->Child(1))
                         .BackupCollection().Build(key.GetBackupCollectionPath().Name)
                         .Prefix().Build(key.GetBackupCollectionPath().Prefix)
+                        .Settings(settings.Other)
                         .Done()
                         .Ptr();
                 } else if (mode == "restore") {
@@ -1849,6 +1851,7 @@ public:
                         .DataSink(node->Child(1))
                         .BackupCollection().Build(key.GetBackupCollectionPath().Name)
                         .Prefix().Build(key.GetBackupCollectionPath().Prefix)
+                        .Settings(settings.Other)
                         .Done()
                         .Ptr();
                 } else {

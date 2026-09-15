@@ -1,3 +1,5 @@
+#include "kqp_uid_test_helpers.h"
+
 #include <ydb/core/base/tablet_resolver.h>
 #include <ydb/core/formats/arrow/arrow_helpers.h>
 #include <ydb/core/kqp/gateway/actors/scheme.h>
@@ -17229,6 +17231,28 @@ Y_UNIT_TEST_SUITE(KqpOlapTypes) {
             "[[\"1.25\";\"1.25\";\"100\";\"100000\";\"100000000000\";2]]");
         testHelper.ReadData("SELECT * FROM `/Root/ColumnTableTest` WHERE id=3",
             "[[#;#;#;#;#;3]]");
+    }
+
+    Y_UNIT_TEST_QUAD(BackupRequestIdempotencyRejectsUnsupportedBeforeEffects, AstCache, PerStatement) {
+        NKikimrConfig::TAppConfig config;
+        config.MutableTableServiceConfig()->SetEnableAstCache(AstCache);
+        config.MutableTableServiceConfig()->SetEnablePerStatementQueryExecution(PerStatement);
+        TKikimrRunner kikimr{NKqp::TKikimrSettings(config)};
+        for (const TString& query : TVector<TString>{
+                 "SELECT 1;",
+                 "CREATE TABLE `/Root/UnsupportedKeyedTable` (key Uint64, PRIMARY KEY (key));",
+                 "CREATE TABLE `/Root/UnsupportedKeyedTable` (key Uint64, PRIMARY KEY (key)); SELECT 1;"})
+        {
+            const auto result = ExecuteUidQuery(kikimr, query, TString("backup:unsupported"));
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::UNSUPPORTED, result.GetIssues().ToString());
+            UNIT_ASSERT_STRING_CONTAINS(result.GetIssues().ToString(), "IDEMPOTENCY_NOT_SUPPORTED");
+        }
+        auto session = kikimr.GetTableClient().CreateSession().GetValueSync().GetSession();
+        UNIT_ASSERT(!session.DescribeTable("/Root/UnsupportedKeyedTable").GetValueSync().IsSuccess());
+
+        const auto empty = ExecuteUidQuery(kikimr, "SELECT 1;", TString(""));
+        UNIT_ASSERT_VALUES_EQUAL_C(empty.GetStatus(), EStatus::BAD_REQUEST, empty.GetIssues().ToString());
+        UNIT_ASSERT_STRING_CONTAINS(empty.GetIssues().ToString(), "INVALID_OPERATION_UID");
     }
 
     Y_UNIT_TEST(BackupReturnsOperationId) {

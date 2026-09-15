@@ -200,6 +200,7 @@ message TQueryRequest {
     optional Ydb.Formats.ArrowFormatSettings ArrowFormatSettings = 40;
     optional bool IsWarmupCompilation = 41;
     optional bool CollectAffectedRows = 43;
+    optional string Uid = 44 [(Ydb.sensitive) = true];
 }
 
 message TVectorIndexKmeansTreeDescription {

@@ -9,6 +9,7 @@
 #include <ydb/core/kqp/session_actor/kqp_worker_common.h>
 #include <ydb/core/protos/auth.pb.h>
 #include <ydb/core/protos/schemeshard/operations.pb.h>
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 #include <ydb/core/tx/schemeshard/index/build_index.h>
 #include <ydb/core/tx/schemeshard/schemeshard_forced_compaction.h>
 #include <ydb/core/tx/schemeshard/schemeshard_set_column_constraint.h>
@@ -112,7 +113,8 @@ public:
         const TString& database, TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
         bool temporary, bool createTmpDir, bool isCreateTableAs, TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
         bool expectsResult, TTxAllocatorState::TPtr txAlloc,
-        const TActorId& kqpTempTablesAgentActor)
+        const TActorId& kqpTempTablesAgentActor,
+        std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
         : PhyTx(phyTx)
         , QueryType(queryType)
         , QueryData(queryData)
@@ -129,6 +131,7 @@ public:
         , ExpectsResult(expectsResult)
         , TxAlloc(std::move(txAlloc))
         , KqpTempTablesAgentActor(kqpTempTablesAgentActor)
+        , OperationIdempotency(std::move(operationIdempotency))
     {
         YQL_ENSURE(RequestContext);
         YQL_ENSURE(PhyTx);
@@ -728,6 +731,10 @@ public:
                 return;
         }
 
+        if (OperationIdempotency) {
+            *ev->Record.MutableTransaction()->MutableModifyScheme()->MutableOperationIdempotency() = *OperationIdempotency;
+        }
+
         auto promise = NewPromise<IKqpGateway::TGenericResult>();
 
         bool successOnNotExist = false;
@@ -744,7 +751,8 @@ public:
             ev.Release(),
             promise,
             failedOnAlreadyExists,
-            successOnNotExist
+            successOnNotExist,
+            OperationIdempotency.has_value()
         );
         RegisterWithSameMailbox(requestHandler);
 
@@ -821,6 +829,11 @@ public:
 
     void Bootstrap() {
         const auto& schemeOp = PhyTx->GetSchemeOperation();
+        if (OperationIdempotency && !NSchemeShard::GetSchemeOperationForIdempotency(schemeOp)) {
+            ReplyErrorAndDie(Ydb::StatusIds::UNSUPPORTED,
+                NYql::TIssue("IDEMPOTENCY_NOT_SUPPORTED: unsupported scheme operation"));
+            return;
+        }
         if (schemeOp.GetObjectType()) {
             MakeObjectRequest();
         } else if (IsCreateTableAs && schemeOp.GetOperationCase() == NKqpProto::TKqpSchemeOperation::kAlterTable) {
@@ -1308,7 +1321,7 @@ public:
         response.SetStatus(GetYdbStatus(ev->Get()->Result));
         IssuesToMessage(ev->Get()->Result.Issues(), response.MutableIssues());
 
-        if (ExpectsResult && GetYdbStatus(ev->Get()->Result) == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
+        if (ExpectsResult && response.GetStatus() == Ydb::StatusIds::SUCCESS && ev->Get()->Result.OperationId) {
             YQL_ENSURE(TxAlloc);
             auto guard = TxAlloc->TypeEnv.BindAllocator();
 
@@ -1465,6 +1478,7 @@ private:
     bool ExpectsResult = false;
     TTxAllocatorState::TPtr TxAlloc;
     const TActorId KqpTempTablesAgentActor;
+    const std::optional<NKikimrSchemeOp::TOperationIdempotency> OperationIdempotency;
     TActorId AnalyzeActorId;
 };
 
@@ -1476,12 +1490,13 @@ IActor* CreateKqpSchemeExecuter(
     TIntrusiveConstPtr<NACLib::TUserToken> userToken, const TString& clientAddress,
     bool temporary, bool createTmpDir, bool isCreateTableAs,
     TString tempDirName, TIntrusivePtr<TUserRequestContext> ctx,
-    bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor)
+    bool expectsResult, TTxAllocatorState::TPtr txAlloc, const TActorId& kqpTempTablesAgentActor,
+    std::optional<NKikimrSchemeOp::TOperationIdempotency> operationIdempotency)
 {
     return new TKqpSchemeExecuter(
         phyTx, queryType, queryData, target, requestType, database, userToken, clientAddress,
         temporary, createTmpDir, isCreateTableAs, tempDirName, std::move(ctx),
-        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor);
+        expectsResult, std::move(txAlloc), kqpTempTablesAgentActor, std::move(operationIdempotency));
 }
 
 } // namespace NKikimr::NKqp
