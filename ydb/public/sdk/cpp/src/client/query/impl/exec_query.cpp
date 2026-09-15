@@ -348,6 +348,10 @@ public:
             request.set_stats_period_ms(settings.StatsCollectPeriod_->count());
         }
 
+        if (settings.Uid_) {
+            request.set_uid(TStringType{*settings.Uid_});
+        }
+
         if (settings.ArrowFormatSettings_) {
             auto formatSettings = request.mutable_arrow_format_settings();
             if (settings.ArrowFormatSettings_->CompressionCodec_) {
