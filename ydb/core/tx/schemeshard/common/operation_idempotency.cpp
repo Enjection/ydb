@@ -1,66 +1,80 @@
-#include "operation_idempotency.h"
+#include <ydb/core/tx/schemeshard/common/operation_idempotency.h>
 
-#include <ydb/core/protos/flat_scheme_op.pb.h>
-#include <ydb/core/protos/kqp_physical.pb.h>
+#include <ydb/public/api/protos/ydb_operation.pb.h>
+#include <ydb/public/sdk/cpp/src/library/operation_id/protos/operation_id.pb.h>
 
-#include <array>
+#include <util/system/yassert.h>
 
 namespace NKikimr::NSchemeShard {
-namespace {
 
-using TKqpOperation = NKqpProto::TKqpSchemeOperation;
-using TModifyScheme = NKikimrSchemeOp::TModifyScheme;
-
-struct TOperationIdempotencySupport {
-    NKikimrSchemeOp::EOperationType OperationType;
-    TStringBuf SqlWriteMode;
-    TKqpOperation::OperationCase KqpOperationCase;
-    const TModifyScheme& (TKqpOperation::*GetPayload)() const;
-};
-
-// Single capability list for SQL validation, KQP execution, and SchemeShard
-// admission. Unlisted operations do not support UID-based idempotency.
-const std::array SupportedOperations = {
-    TOperationIdempotencySupport{NKikimrSchemeOp::ESchemeOpBackupBackupCollection,
-        "backup", TKqpOperation::kBackup, &TKqpOperation::GetBackup},
-    TOperationIdempotencySupport{NKikimrSchemeOp::ESchemeOpBackupIncrementalBackupCollection,
-        "backupIncremental", TKqpOperation::kBackupIncremental, &TKqpOperation::GetBackupIncremental},
-    TOperationIdempotencySupport{NKikimrSchemeOp::ESchemeOpRestoreBackupCollection,
-        "restore", TKqpOperation::kRestore, &TKqpOperation::GetRestore},
-};
-
-} // namespace
-
-bool SupportsOperationIdempotency(NKikimrSchemeOp::EOperationType operationType) {
-    for (const auto& supported : SupportedOperations) {
-        if (supported.OperationType == operationType) {
-            return true;
-        }
+TString GetUid(const Ydb::Operations::OperationParams& operationParams) {
+    if (const auto* uid = FindOperationByUid(operationParams.labels(), "uid")) {
+        return *uid;
     }
-    return false;
+    return {};
 }
 
-bool SupportsSqlOperationIdempotency(TStringBuf writeMode) {
-    for (const auto& supported : SupportedOperations) {
-        if (supported.SqlWriteMode == writeMode) {
-            return true;
-        }
-    }
-    return false;
+TString GetUid(Ydb::TOperationId::EKind kind, const Ydb::Operations::OperationParams& operationParams) {
+    Y_ABORT_UNLESS(SupportsOperationUid(kind), "UID support is not registered for operation kind %d", static_cast<int>(kind));
+    return GetUid(operationParams);
 }
 
-const TModifyScheme* GetSchemeOperationForIdempotency(const TKqpOperation& operation) {
-    // Object operations follow a separate executor path.
-    if (!operation.GetObjectType().empty()) {
-        return nullptr;
+EUidReplayMatch CompareOperationUid(const TOperationUidIdentity& stored, const TOperationUidIdentity& requested) {
+    if (requested.UserSID && stored.UserSID != requested.UserSID) {
+        return EUidReplayMatch::OwnerMismatch;
     }
-    for (const auto& supported : SupportedOperations) {
-        if (supported.KqpOperationCase == operation.GetOperationCase()) {
-            const auto& payload = (operation.*supported.GetPayload)();
-            return payload.GetOperationType() == supported.OperationType ? &payload : nullptr;
-        }
+    if (requested.DomainPathId && stored.DomainPathId != requested.DomainPathId) {
+        return EUidReplayMatch::DomainMismatch;
     }
-    return nullptr;
+    if (requested.RequestBody && stored.RequestBody != requested.RequestBody) {
+        return EUidReplayMatch::RequestMismatch;
+    }
+    return EUidReplayMatch::Match;
+}
+
+TOperationUidAdmission TOperationUidAdmission::Prepare(const TOperationUidKey& key,
+    EDuplicatePolicy policy, const TLookup& lookup, const TCheck& check)
+{
+    Y_ABORT_UNLESS(SupportsOperationUid(key.first));
+    TOperationUidAdmission admission;
+    if (key.second.empty()) {
+        return admission;
+    }
+    const auto stored = lookup(key);
+    if (!stored) {
+        return admission;
+    }
+    admission.OperationId = stored->OperationId;
+    if (policy == EDuplicatePolicy::Reject) {
+        admission.Decision = EDecision::AlreadyExists;
+        return admission;
+    }
+    Y_ABORT_UNLESS(check);
+    switch (check(*stored)) {
+        case EUidReplayMatch::Match:
+            admission.Decision = EDecision::Replay;
+            break;
+        case EUidReplayMatch::OwnerMismatch:
+            admission.Decision = EDecision::OwnerMismatch;
+            break;
+        case EUidReplayMatch::DomainMismatch:
+            admission.Decision = EDecision::DomainMismatch;
+            break;
+        case EUidReplayMatch::RequestMismatch:
+            admission.Decision = EDecision::RequestMismatch;
+            break;
+    }
+    return admission;
+}
+
+bool TOperationUidAdmission::Commit(bool admitted, const std::function<void()>& persist) {
+    if (!admitted || Decision != EDecision::Proceed) {
+        return false;
+    }
+    Y_ABORT_UNLESS(!Committed);
+    persist();
+    Committed = true;
+    return true;
 }
 
 } // namespace NKikimr::NSchemeShard
