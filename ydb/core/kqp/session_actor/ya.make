@@ -18,6 +18,7 @@ PEERDIR(
     ydb/library/security
     ydb/public/sdk/cpp/src/library/operation_id
     ydb/core/tx/schemeshard
+    ydb/core/tx/schemeshard/common
     ydb/services/workload_manager/service
 )
 
