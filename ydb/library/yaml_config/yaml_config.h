@@ -21,6 +21,7 @@
 
 #include <unordered_map>
 #include <map>
+#include <optional>
 #include <string>
 
 namespace NKikimr::NYamlConfig {
@@ -90,6 +91,184 @@ NKikimrConfig::TAppConfig YamlToProto(
     bool allowUnknown = false,
     bool preTransform = true,
     TSimpleSharedPtr<NProtobufJson::IUnknownFieldsCollector> unknownFieldsCollector = nullptr);
+
+// ---------------------------------------------------------------------------
+// Track A+ : structural (proto-transform) validation, K-independent.
+//
+// The legacy accept gate runs YamlToProto(transform=true) on every distinct
+// resolved doc (cost multiplicative in label cardinalities). The A+ variant
+// decomposes the work:
+//   (A/C) run the proto transform on each DISTINCT projection of the
+//         transform-read sections (regime A = static-only -> 1 projection;
+//         regime C = selector-varied section -> #distinct values);
+//   (B)   validate per-field enum/type coercion over the A+ value-sets, so a
+//         bad value in any tenant variant is caught without resolving K docs.
+// The static-section guard rejects (or flags) configs whose selectors override
+// a structural/static section, which is the precondition for (A).
+// ---------------------------------------------------------------------------
+
+struct TStructuralViolation {
+    TString Message;
+};
+
+/**
+ * Config-relative static/structural section prefixes selectors must not vary
+ * (the guard set). Derived from the (NMarkers.SelectorStatic) proto field
+ * markers plus the TEphemeralInputFields descriptor.
+ */
+const TVector<TString>& StaticGuardSections();
+
+/**
+ * K-independent structural validation over the whole label space.
+ * `guardViolations`, if non-null, receives selector-written static paths (the
+ * accept-set-narrowing guard). Returns every structural/coercion violation
+ * found (empty => structurally valid for every resolved config, modulo guard).
+ */
+TVector<TStructuralViolation> ValidateStructuralAPlus(
+    NFyaml::TDocument& doc,
+    bool allowUnknown = true,
+    TVector<TString>* guardViolations = nullptr);
+
+/**
+ * Legacy oracle: run YamlToProto(transform=true) on every distinct resolved
+ * doc; returns the first structural error encountered, or nullopt. Used by the
+ * shadow-run comparison and the equivalence tests.
+ */
+std::optional<TString> ValidateStructuralLegacy(
+    NFyaml::TDocument& doc,
+    bool allowUnknown = true);
+
+/**
+ * K-independent SEMANTIC validation: runs the REAL NConfig::ValidateConfig
+ * (Auth/ColumnShard/Monitoring min-max rules + StateStorage aggregates) on each
+ * DISTINCT per-section projection. Because it invokes the exact legacy validator
+ * per projection, its decision equals the legacy per-doc semantic gate
+ * (strictly not weaker), and the cost is additive across sections (K-independent)
+ * -- the same per-section decomposition used for the structural pass.
+ *
+ * Aggregate/whole-structure checks (StateStorage) read only static sections
+ * (domains_config, self_management_config) that selectors are FORBIDDEN to vary
+ * (SelectorStatic guard), so they are validated once on the constant base in
+ * every projection -- which is sound precisely because those sections cannot be
+ * selector-varied.
+ *
+ * `csk`, when non-null, replaces NConfig::ValidateConfig as the per-projection
+ * semantic validator (IConfigSwissKnife::ValidateConfig). The database accept
+ * gate validates resolved configs through the swiss knife, which a build may
+ * extend beyond the stock validators -- the A+ gate must call the SAME
+ * validator set or it would be weaker than the gate it replaces.
+ */
+class IConfigSwissKnife;
+
+TVector<TStructuralViolation> ValidateSemanticAPlus(
+    NFyaml::TDocument& doc, bool allowUnknown = true,
+    const IConfigSwissKnife* csk = nullptr);
+
+/**
+ * Legacy oracle: run YamlToProto + NConfig::ValidateConfig on every distinct
+ * resolved doc; returns the first semantic error, or nullopt.
+ */
+std::optional<TString> ValidateSemanticLegacy(
+    NFyaml::TDocument& doc, bool allowUnknown = true);
+
+/**
+ * K-independent database-config allowlist. Rejects any top-level config section
+ * that appears ANYWHERE in the database config (base OR a selector overlay) and
+ * is not marked (NMarkers.AllowInDatabaseConfig). Mirrors the per-field check
+ * NConfig::ValidateDatabaseConfig, but by inspecting the whole config space it
+ * ALSO covers fields a database-config selector introduces -- which the legacy
+ * base-only check misses (the TODO in TConfigsManager::ValidateDatabaseConfig).
+ * 'doc' is the database config document (its `config` subtree + selectors).
+ */
+TVector<TStructuralViolation> ValidateDatabaseAllowlistAPlus(NFyaml::TDocument& doc);
+
+/**
+ * Unknown / deprecated field diagnostics, collected K-independently. Paths are
+ * the editable YAML locations: "/config/..." for the base config and
+ * "/selector_config/<i>/config/..." for the i-th selector overlay. Each entry
+ * maps that path to {leaf key, declaring proto message full_name}.
+ *
+ * Deprecated = the field's content-relative path is in
+ * TAppConfig::GetReservedChildrenPaths(); everything else unknown.
+ */
+struct TFieldDiagnostics {
+    TMap<TString, std::pair<TString, TString>> UnknownFields;
+    TMap<TString, std::pair<TString, TString>> DeprecatedFields;
+
+    bool Empty() const { return UnknownFields.empty() && DeprecatedFields.empty(); }
+
+    // One human-readable warning line per field, for surfacing to the user.
+    TVector<TString> ToWarnings() const;
+};
+
+/**
+ * Collects unknown and deprecated fields over the UNRESOLVED document, per
+ * editable block (base config + each selector overlay). This is union-equivalent
+ * to collecting across every resolved doc -- unknown-field-ness is a per-path
+ * property under replace-only merge -- but is K-independent (no enumeration).
+ * Best-effort: never throws.
+ */
+TFieldDiagnostics CollectFieldDiagnosticsAPlus(NFyaml::TDocument& doc, bool allowUnknown = true);
+
+struct TStructuralShadowResult {
+    bool LegacyRejected = false;
+    bool APlusRejected = false;
+    bool Diverged = false;                 // LegacyRejected != APlusRejected
+    TString LegacyError;                   // first legacy error, if rejected
+    TVector<TStructuralViolation> APlusViolations;
+    TVector<TString> GuardViolations;      // selector-written static paths
+
+    // Semantic (NConfig::ValidateConfig) decisions.
+    bool SemanticLegacyRejected = false;
+    bool SemanticAPlusRejected = false;
+    bool SemanticDiverged = false;         // SemanticLegacyRejected != SemanticAPlusRejected
+    TString SemanticLegacyError;
+};
+
+/**
+ * Offline shadow-run: runs BOTH the legacy per-doc validation (structural and
+ * semantic, each a full O(K) ResolveUniqueDocs enumeration) and the
+ * K-independent A+ validation, comparing their accept/reject decisions.
+ * Because it re-derives the legacy verdict itself, it costs 2x the legacy
+ * enumeration -- use it for tests and offline head-to-head parity audits ONLY.
+ * The live accept gate must use ValidateAPlus and compare against the verdict
+ * it has already computed (see TAPlusVerdict).
+ */
+TStructuralShadowResult StructuralShadowRun(
+    NFyaml::TDocument& doc,
+    bool allowUnknown = true);
+
+/**
+ * Aggregate K-independent A+ verdict: the full A+ validation surface
+ * (per-section structural projections + static-section guard + per-section
+ * semantic projections) in one call. No legacy enumeration runs -- cost is
+ * additive across sections regardless of K.
+ *
+ * This is the live-gate shadow primitive: the caller compares `Rejected`
+ * against the authoritative legacy decision it has ALREADY computed, so the
+ * shadow adds no O(K) work and can run on legacy-REJECTED configs too -- the
+ * legacy-rejects/A+-accepts direction is the one that proves A+ is not weaker
+ * than legacy, and it is invisible to any shadow that only runs after a
+ * successful legacy pass.
+ *
+ * Note: the database allowlist (NConfig::ValidateDatabaseConfig) has no
+ * counterpart in ValidateConfig and therefore no counterpart here; the
+ * database accept path must additionally run ValidateDatabaseAllowlistAPlus.
+ * `csk` is forwarded to ValidateSemanticAPlus (see there); the database gate
+ * passes AppData()->ConfigSwissKnife, the main gate passes nullptr.
+ */
+struct TAPlusVerdict {
+    TVector<TStructuralViolation> StructuralViolations;
+    TVector<TString> GuardViolations;      // selector-written static paths
+    TVector<TStructuralViolation> SemanticViolations;
+    bool Rejected = false;                 // any of the three is non-empty
+
+    // First violation message across all surfaces, for log attribution.
+    TString FirstViolation() const;
+};
+
+TAPlusVerdict ValidateAPlus(NFyaml::TDocument& doc, bool allowUnknown = true,
+    const IConfigSwissKnife* csk = nullptr);
 
 /**
  * Resolves config for given labels and stores result to appConfig

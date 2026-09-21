@@ -16,6 +16,7 @@
 
 #include <unordered_map>
 #include <map>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -139,12 +140,24 @@ public:
 
     bool IsCompatible(const TMap<TString, TString>& labels) const;
 
+    // Partial-tuple compatibility: evaluates ONLY the rules whose every
+    // referenced label is present in `labels` (by name); a rule referencing
+    // any other label cannot be decided from a partial tuple and is skipped.
+    // A fully-inside rule fires identically for every extension of the tuple,
+    // so pruning on it is EXACT (legacy never materializes the combination);
+    // skipping the rest keeps the caller a sound over-approximation. Used by
+    // the A+ projection enumerators.
+    bool IsCompatiblePartial(const TVector<std::pair<TString, TLabel>>& labels) const;
+
     void MergeWith(const TIncompatibilityRules& userRules);
 
     size_t GetRuleCount() const { return RulesByName.size(); }
     size_t GetDisabledCount() const { return DisabledRules.size(); }
 
     bool HasRules() const { return !RulesByName.empty() || !DisabledRules.empty(); }
+
+    // Every label name referenced by any active rule.
+    THashSet<TString> ReferencedLabels() const;
 
 private:
     TMap<TString, TIncompatibilityRule> RulesByName;
@@ -202,6 +215,121 @@ TResolvedConfig ResolveAll(NFyaml::TDocument& doc);
 void ResolveUniqueDocs(
     NFyaml::TDocument& doc,
     const std::function<void(TDocumentConfig&&)>& onDocument);
+
+// ---------------------------------------------------------------------------
+// Track A+ : polynomial, K-independent config validation.
+//
+// The merge model (Apply/Inherit/Append) is replace-only for scalar leaves:
+// untagged scalars and !inherit deep-merge both leave each scalar leaf
+// single-sourced (the highest-precedence fitting selector that writes a leaf
+// wins). Only !append / !remove / !inherit:<key> keyed-sequence merges
+// accumulate. Therefore the set of values a scalar leaf can take across the
+// entire label space is bounded by {base value} U {value written by each
+// selector} -- at most n+1 literals, computable in O(n*d) WITHOUT enumerating
+// the Cartesian product of label values.
+//
+// Paths are config-relative, '/'-separated, with a leading '/'. For example
+// /auth_config/account_lockout/attempt_reset_duration.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-field value-sets.
+ *
+ * Values[p] is a sound over-approximation of the values the scalar leaf at path
+ * p can take across the whole label space. Soundness: for any realizable label
+ * tuple t, Resolve(doc, t) assigns every single-sourced scalar leaf at a
+ * non-fenced path p a value contained in Values[p]. The set may additionally
+ * contain values produced only by unrealizable selector combinations (possible
+ * false positives, never false negatives). Presence (a leaf being absent in
+ * some branch) is out of scope -- Values covers values of present leaves.
+ *
+ * FencedPaths are sequence-valued paths (every !append site, and any keyed or
+ * wholesale-replaced sequence). They cannot be decomposed into an independent
+ * per-field value-set; callers fall back to per-document enumeration for them.
+ */
+struct TFieldValueSets {
+    TMap<TString, TSet<TString>> Values;
+    TSet<TString> FencedPaths;
+
+    bool IsFenced(const TString& path) const { return FencedPaths.contains(path); }
+};
+
+/**
+ * Computes per-field value-sets. Cost O(n*d), independent of K (the number of
+ * distinct resolved configs).
+ */
+TFieldValueSets ResolveFieldValueSets(NFyaml::TDocument& doc);
+
+/**
+ * A joint assignment of values to a set of coupled field paths, as produced by
+ * one realizable label tuple. A path maps to its scalar value, or to nullopt if
+ * the leaf is absent under that tuple (presence is tracked so presence-coupled
+ * rules can be modelled, per the A+ soundness caveat).
+ */
+using TFieldAssignment = TMap<TString, std::optional<TString>>;
+
+/**
+ * The realizability filter (Track A localised enumeration).
+ *
+ * Returns the EXACT set of joint assignments the coupled paths can take across
+ * the whole label space. Computed by resolving only over the labels the
+ * coupled-field selectors actually constrain, so the cost is independent of
+ * high-cardinality labels (e.g. tenant) the rule does not couple -- the
+ * empirical "arity is anti-correlated with cardinality" property keeps this
+ * small for k>=2 rules. If any coupled path is fenced (accumulating sequence),
+ * the path is reported in 'fenced' and the rule must fall back to enumeration.
+ */
+TVector<TFieldAssignment> EnumerateRealizableAssignments(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& paths,
+    TSet<TString>& fenced);
+
+// NOTE: the reified-rule engine (TFieldRule/ValidateFieldRule/ValidateField)
+// that used to live here was TEST-ONLY -- production semantic validation runs
+// the real validators per projection (ValidateSemanticAPlus). It now lives in
+// yaml_config_ut.cpp as the equivalence-test harness, built on
+// EnumerateRealizableAssignments/ResolveFieldValueSets above.
+
+// ---------------------------------------------------------------------------
+// Track A+ : structural (proto-transform) validation support.
+//
+// Structural checks read whole config sections, not single fields. A check that
+// reads section S holds over the whole label space iff it holds for every
+// DISTINCT realizable projection of the config onto S. Two helpers below give
+// the building blocks; the proto-aware orchestration lives in the outer
+// yaml_config library (which can call YamlToProto / the proto descriptors).
+// ---------------------------------------------------------------------------
+
+/**
+ * The static-section guard. Returns every selector-written config path that
+ * falls at or under one of the given config-relative static section prefixes
+ * (e.g. "/domains_config", "/host_configs"). An empty result means no selector
+ * touches any static section -- the precondition for running the static
+ * structural checks exactly once on the base config. A non-empty result is an
+ * (intentional) accept-set narrowing: such configs must be rejected or fully
+ * enumerated.
+ */
+TVector<TString> SelectorWritesUnder(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& staticPrefixes);
+
+/**
+ * Invokes onProjection once per DISTINCT realizable projection of the config
+ * onto the given top-level section prefixes. The node passed to the callback is
+ * the fully resolved "config" node of a representative label tuple for that
+ * projection (tags removed, aliases resolved -- exactly what the legacy path
+ * would feed to YamlToProto).
+ *
+ * Cost is independent of any high-cardinality label that does not vary one of
+ * the requested sections (it enumerates only the labels those sections'
+ * selectors constrain, plus any label an incompatibility rule references), and
+ * dedups by the serialized projection -- so a check reading these sections runs
+ * #distinct-projections times rather than K times.
+ */
+void EnumerateDistinctProjections(
+    NFyaml::TDocument& doc,
+    const TVector<TString>& sectionPrefixes,
+    const std::function<void(NFyaml::TNodeRef)>& onProjection);
 
 /**
  * Calculates hash of resolved config
